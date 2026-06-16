@@ -15,8 +15,8 @@ The implementation follows the ST-Raptor table-image path conceptually, without 
 From the repo root:
 
 ```powershell
-python -m table2img semitab\data\HiTab\tables\raw\100.json -o table2img\outputs\100.png --scale 2
-python -m table2img semitab\data\MultiHiertt\dev.json -o table2img\outputs\mulhi.png --json-index 0 --table-index 0 --scale 2
+python -m table2img data\HiTab\tables\raw\100.json -o table2img\outputs\100.png --scale 2
+python -m table2img data\MultiHiertt\dev.json -o table2img\outputs\mulhi.png --json-index 0 --table-index 0 --scale 2
 python -m table2img path\to\table.md -o table2img\outputs\table.png
 python -m table2img path\to\table.xlsx -o table2img\outputs\table.png
 ```
@@ -26,17 +26,17 @@ If Chrome is not auto-detected, pass `--browser C:\path\to\chrome.exe` or set `T
 ## Smoke
 
 ```powershell
-python -m table2img.smoke_semitab --semitab-root semitab --output-dir table2img\outputs\smoke --scale 2
+python -m table2img.smoke_semitab --project-root . --output-dir table2img\outputs\smoke --scale 2
 ```
 
 This writes PNG and matching HTML files for two HiTab samples and one MulHi sample.
 
-## SemTab Pipeline Cache
+## ISE Table Pipeline Cache
 
-The SemTab `table2img_vlm` pipeline stores deterministic artifacts under:
+The ISE Table `table2img_vlm` pipeline stores deterministic artifacts under:
 
 ```text
-table2img/outputs/semitab/{hitab|mulhi}/{table_id}/{table_hash}/
+outputs/table2img_vlm/{hitab|mulhi}/{table_id}/{table_hash}/
 ```
 
 Each table folder contains:

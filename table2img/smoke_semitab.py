@@ -8,12 +8,13 @@ from .core import document_from_file, document_from_json, positive_float, render
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render a few SemTab HiTab and MulHi sample tables to PNG.")
+    parser = argparse.ArgumentParser(description="Render a few ISE Table HiTab and MulHi sample tables to PNG.")
     parser.add_argument(
+        "--project-root",
         "--semitab-root",
         type=Path,
-        default=Path("semitab"),
-        help="Path to the semitab folder. Defaults to ./semitab.",
+        default=Path("."),
+        help="Path to the project root. Defaults to current directory.",
     )
     parser.add_argument(
         "--output-dir",
@@ -28,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    semitab_root = args.semitab_root
+    project_root = args.project_root
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -37,11 +38,11 @@ def main(argv: list[str] | None = None) -> int:
         Path("data") / "HiTab" / "tables" / "raw" / "100.json",
         Path("data") / "HiTab" / "tables" / "raw" / "9_totto1028-1.json",
     ):
-        source = semitab_root / relative
+        source = project_root / relative
         document = document_from_file(source)
         jobs.append((f"hitab_{source.stem}", document))
 
-    mulhi_path = semitab_root / "data" / "MultiHiertt" / "dev.json"
+    mulhi_path = project_root / "data" / "MultiHiertt" / "dev.json"
     mulhi_data = json.loads(mulhi_path.read_text(encoding="utf-8"))
     for index, item in enumerate(mulhi_data):
         tables = item.get("tables")
