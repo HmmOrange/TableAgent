@@ -3,7 +3,8 @@ import pytest
 from configs import load_config, resolve_llm_config, resolve_vlm_config
 
 
-def test_config_example_loads_modular_files():
+def test_config_example_loads_modular_files(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:8024/v1")
     config = load_config("configs/config.example.yaml")
 
     assert "datasets" in config
@@ -13,13 +14,26 @@ def test_config_example_loads_modular_files():
     provider_name, _ = resolve_vlm_config(config, "table_agent")
     assert provider_name == "gemma4_vlm"
 
+    # Check that resolving embedding for straptor yields openai_embedding via top-level fallback
+    from configs.embedding_config import resolve_embedding_config
+    embedding_provider, embedding_cfg = resolve_embedding_config(config, "straptor")
+    assert embedding_provider == "openai_embedding"
+    assert embedding_cfg["base_url"] == "http://localhost:8024/v1"
 
-def test_legacy_root_config_path_falls_back_to_configs():
+
+def test_legacy_root_config_path_falls_back_to_configs(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:8024/v1")
     config = load_config("config.yaml")
 
     # Check that resolving layout VLM for table_agent yields qwen_local_vlm via top-level fallback
     provider_name, _ = resolve_vlm_config(config, "table_agent")
     assert provider_name == "qwen_local_vlm"
+
+    # Check that resolving embedding for straptor yields openai_embedding via top-level fallback
+    from configs.embedding_config import resolve_embedding_config
+    embedding_provider, embedding_cfg = resolve_embedding_config(config, "straptor")
+    assert embedding_provider == "openai_embedding"
+    assert embedding_cfg["base_url"] == "http://localhost:8001/v1"
 
 
 def test_resolve_vlm_provider_from_vlm_models(monkeypatch):
