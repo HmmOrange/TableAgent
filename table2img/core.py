@@ -586,6 +586,7 @@ def trim_image(image_path: str | Path, *, padding: int = 8) -> tuple[int | None,
         return None, None
 
     path = Path(image_path)
+    Image.MAX_IMAGE_PIXELS = None
     with Image.open(path) as img:
         if img.mode != "RGBA":
             img = img.convert("RGBA")

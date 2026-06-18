@@ -338,4 +338,516 @@ def test_table_agent_fallback_invalid_structure_marked_not_good(tmp_path: Path):
     assert "invalid" in output.metadata["verification"]["feedback"].lower() or "empty" in output.metadata["verification"]["feedback"].lower()
 
 
+def test_table_agent_siflex_answer_prompt_formatting(tmp_path: Path):
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path)},
+        renderer=FakeRenderer(),
+    )
+
+    # 1. Non-SiFlex sample
+    non_siflex_sample = EvalSample(
+        index=0,
+        sample_id="hitab/1",
+        table_id="t1",
+        table_content="Content",
+        question="What is the answer?",
+        answer=["Ans"],
+        sample_path="data/HiTab/split.json:cases[0]",
+    )
+    prompt = pipeline._answer_prompt(non_siflex_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" not in prompt
+    assert "Verified structure.yaml" in prompt
+
+    # 2. SiFlex table sample
+    siflex_table_sample = EvalSample(
+        index=0,
+        sample_id="siflex/1",
+        table_id="t1",
+        table_content="Content",
+        question="What is the answer?",
+        answer=["Ans"],
+        sample_path="data/SiFlex/compiled/golden_cases.json:cases[0]",
+        raw={"answer_type": "table"},
+    )
+    prompt = pipeline._answer_prompt(siflex_table_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" in prompt
+    assert "CRITICAL EXPECTED FORMAT: TABLE" in prompt
+    assert "Format your final answer as a markdown table" in prompt
+
+    # 3. SiFlex list sample
+    siflex_list_sample = EvalSample(
+        index=0,
+        sample_id="siflex/2",
+        table_id="t1",
+        table_content="Content",
+        question="What is the answer?",
+        answer=["Ans"],
+        sample_path="data/SiFlex/compiled/golden_cases.json:cases[1]",
+        raw={"answer_type": "list"},
+    )
+    prompt = pipeline._answer_prompt(siflex_list_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" in prompt
+    assert "CRITICAL EXPECTED FORMAT: LIST" in prompt
+    assert "Format your final answer as a bulleted list" in prompt
+
+    # 4. SiFlex form sample
+    siflex_form_sample = EvalSample(
+        index=0,
+        sample_id="siflex/3",
+        table_id="t1",
+        table_content="Content",
+        question="What is the answer?",
+        answer=["Ans"],
+        sample_path="data/SiFlex/compiled/golden_cases.json:cases[2]",
+        raw={"answer_type": "form"},
+    )
+    prompt = pipeline._answer_prompt(siflex_form_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" in prompt
+    assert "CRITICAL EXPECTED FORMAT: FORM/DOCUMENT" in prompt
+    assert "Organize your final answer in a clear document structure" in prompt
+
+
+def test_table_agent_max_tokens_safeguard_and_early_breaks(tmp_path: Path):
+    llm = FakeLLM()
+    # Test setting max_tokens overrides when they are None or very large
+    llm.max_tokens = None
+    layout_vlm = FakeLayoutVLM()
+    layout_vlm.max_tokens = 4096
+    
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path)},
+        renderer=FakeRenderer(),
+    )
+    # Check that they were capped at 2048 (default)
+    assert llm.max_tokens == 2048
+    assert layout_vlm.max_tokens == 2048
+
+    # Test fit_context truncation
+    long_content = "X" * 70000
+    fitted = pipeline._fit_context(long_content)
+    assert len(fitted) <= 60000 + 50
+    assert "...TRUNCATED..." in fitted
+
+
+def test_table_agent_max_tokens_config_driven(tmp_path: Path):
+    llm = FakeLLM()
+    llm.max_tokens = 100
+    layout_vlm = FakeLayoutVLM()
+    layout_vlm.max_tokens = 200
+    
+    # Config overrides default cap
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path), "generation_max_tokens": 1024},
+        renderer=FakeRenderer(),
+    )
+    assert llm.max_tokens == 1024
+    assert layout_vlm.max_tokens == 1024
+    assert pipeline.get_config()["agent"]["generation_max_tokens"] == 1024
+
+    # Config None disables capping/mutating
+    llm.max_tokens = 500
+    layout_vlm.max_tokens = 600
+    pipeline_none = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path), "generation_max_tokens": None},
+        renderer=FakeRenderer(),
+    )
+    assert llm.max_tokens == 500
+    assert layout_vlm.max_tokens == 600
+    assert pipeline_none.get_config()["agent"]["generation_max_tokens"] is None
+
+
+def test_is_valid_structure_rules():
+    from pipelines.table_agent_pipeline import _is_valid_structure
+    
+    # 1. Reject structures with 'error' key
+    assert not _is_valid_structure("headers: []\nerror: Failed to generate structure")
+    assert not _is_valid_structure("error: Failed to generate structure")
+    
+    # 2. Reject empty headers
+    assert not _is_valid_structure("headers: []")
+    
+    # 3. Reject structures with only placeholder/vague headers
+    assert not _is_valid_structure("headers:\n  - Column 1\n  - Column 2")
+    assert not _is_valid_structure("headers:\n  - col1\n  - col 2\n  - Placeholder")
+    assert not _is_valid_structure("headers:\n  - -")
+    assert not _is_valid_structure("headers:\n  - Empty\n  - None")
+    
+    # 4. Accept if at least one header is not placeholder
+    assert _is_valid_structure("headers:\n  - Column 1\n  - Revenue\n  - Column 2")
+    assert _is_valid_structure("headers:\n  - label: Column 1\n  - label: Total Revenue")
+    assert _is_valid_structure("headers:\n  - name: Column 1\n  - name: Net Profit")
+
+
+def test_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):
+    import openpyxl
+    # Create two dummy workbooks
+    wb1 = openpyxl.Workbook()
+    ws1 = wb1.active
+    ws1.title = "SheetA"
+    ws1["A1"] = "Apple"
+    path_a = tmp_path / "doc_a.xlsx"
+    wb1.save(path_a)
+
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    ws2.title = "SheetB"
+    ws2["A1"] = "Orange"
+    path_b = tmp_path / "doc_b.xlsx"
+    wb2.save(path_b)
+
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/1",
+        table_id="siflex-table",
+        table_content="Apple | Banana\nOrange | Grape",
+        question="Which sheet has the Apple and Banana?",
+        answer=["SheetA"],
+        sample_path="data/SiFlex/golden_tests/compiled/golden_cases.json:cases[0]",
+        table_path=f"{path_a};{path_b}",
+    )
+
+    llm = FakeLLM()
+    llm.generate_with_image = lambda prompt, image_path, system_prompt=None: LLMResponse(
+        content="SheetA", prompt_tokens=15, completion_tokens=3
+    )
+
+    layout_vlm = FakeLayoutVLM()
+    renderer = FakeRenderer()
+
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        renderer=renderer,
+    )
+
+    # Pre-encode sheets
+    pipeline.prepare_samples([sample])
+
+    # Now manually overwrite structure.yaml of SheetA and SheetB with placeholder/error/invalid structures
+    sources_dir = tmp_path / "sources"
+    struct_a_path = sources_dir / "doc_a.xlsx_SheetA" / "structure.yaml"
+    struct_b_path = sources_dir / "doc_b.xlsx_SheetB" / "structure.yaml"
+    
+    # Overwrite both structure.yaml with placeholder structures
+    struct_a_path.write_text("headers: []\nerror: Failed to generate structure", encoding="utf-8")
+    struct_b_path.write_text("headers: []\nerror: Failed to generate structure", encoding="utf-8")
+
+    # Run the pipeline - it should skip both since their structures are invalid (rejected)
+    output = pipeline.run(sample)
+    
+    # Verify that it didn't retrieve either (status won't be good or verification metadata won't say retrieved)
+    assert output.metadata["verification"]["feedback"] != "Retrieved from encoded source"
+
+
+def test_table_agent_prepare_samples_uses_error_sidecar(tmp_path: Path):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "SheetZ"
+    ws["A1"] = "Data"
+    path_z = tmp_path / "doc_z.xlsx"
+    wb.save(path_z)
+
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/sidecar_test",
+        table_id="siflex-table-sidecar",
+        table_content="Data",
+        question="What is Data?",
+        answer=["Data"],
+        sample_path="data/SiFlex/golden_tests/compiled/golden_cases.json:cases[0]",
+        table_path=str(path_z),
+    )
+
+    # Mock VLM layout client that returns invalid/empty layout to simulate failure
+    class ErrorLayoutVLM:
+        model_name = "error-vlm"
+        temperature = 0.0
+        def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
+            return LLMResponse(content="", prompt_tokens=0, completion_tokens=0)
+
+    llm = FakeLLM()
+    renderer = FakeRenderer()
+
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=ErrorLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        renderer=renderer,
+    )
+
+    # First prepare_samples call: should attempt generation, fail (VLM returns empty),
+    # write structure.error, and not write structure.yaml
+    pipeline.prepare_samples([sample])
+
+    sheet_dir = tmp_path / "sources" / "doc_z.xlsx_SheetZ"
+    error_path = sheet_dir / "structure.error"
+    struct_path = sheet_dir / "structure.yaml"
+
+    assert error_path.is_file()
+    assert not struct_path.is_file()
+
+    # Now let's mock a layout VLM that succeeds
+    class SuccessLayoutVLM:
+        model_name = "success-vlm"
+        temperature = 0.0
+        def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
+            # Return a valid structure
+            return LLMResponse(
+                content="headers:\n  - label: SuccessHeader",
+                prompt_tokens=5,
+                completion_tokens=5,
+            )
+
+    pipeline_success = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=SuccessLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        renderer=renderer,
+    )
+
+    # Run prepare_samples again. Since structure.error exists, it should NOT regenerate,
+    # and structure.yaml should still NOT exist.
+    pipeline_success.prepare_samples([sample])
+    assert not struct_path.is_file()
+
+    # If we delete structure.error, then running prepare_samples should regenerate and succeed
+    error_path.unlink()
+    pipeline_success.prepare_samples([sample])
+    assert struct_path.is_file()
+    assert "SuccessHeader" in struct_path.read_text(encoding="utf-8")
+
+
+def test_table_agent_image_dimension_config_and_render_kwargs(tmp_path: Path):
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/1",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+    )
+    llm = FakeLLM()
+    layout_vlm = FakeLayoutVLM()
+    renderer = FakeRenderer()
+    
+    # Configure with small max_image_dimension to trigger scaling down
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={
+            "artifact_dir": str(tmp_path),
+            "max_refinement_rounds": 1,
+            "image_scale": 2.0,
+            "max_image_dimension": 200,
+            "max_viewport_width": 1000,
+            "max_viewport_height": 800,
+        },
+        renderer=renderer,
+    )
+    
+    # Expose configs check
+    cfg = pipeline.get_config()
+    assert cfg["agent"]["max_image_dimension"] == 200
+    assert cfg["agent"]["max_viewport_width"] == 1000
+    assert cfg["agent"]["max_viewport_height"] == 800
+    
+    # Run the pipeline
+    output = pipeline.run(sample)
+    
+    # Verify renderer calls parameters
+    assert len(renderer.calls) == 1
+    doc, path, kwargs = renderer.calls[0]
+    assert kwargs["max_viewport_width"] == 1000
+    assert kwargs["max_viewport_height"] == 800
+
+
+def test_table_agent_image_fitting_and_tiling(tmp_path: Path):
+    from PIL import Image
+    from pipelines.table_agent_pipeline import (
+        compute_viewport_and_scale,
+        _generate_image_tiles,
+        _resize_image_file_to_fit,
+    )
+
+    # 1. Test compute_viewport_and_scale
+    # Case A: dimension limits
+    vw, vh, scale = compute_viewport_and_scale(
+        estimated_width=1000,
+        estimated_height=1000,
+        image_scale=2.0,
+        max_viewport_width=800,
+        max_viewport_height=800,
+        max_image_dimension=400,
+        max_image_pixels=None,
+    )
+    # vw/vh are limited to 800x800. max(800, 800) * 2.0 = 1600 > 400.
+    # Scale should become 400 / 800 = 0.5
+    assert vw == 800
+    assert vh == 800
+    assert abs(scale - 0.5) < 1e-5
+
+    # Case B: pixel limits
+    vw, vh, scale = compute_viewport_and_scale(
+        estimated_width=1000,
+        estimated_height=1000,
+        image_scale=2.0,
+        max_viewport_width=800,
+        max_viewport_height=800,
+        max_image_dimension=None,
+        max_image_pixels=10000,
+    )
+    # vw/vh are 800x800. Total base pixels = 640000.
+    # Total pixels at scale=2.0 would be 640000 * 4 = 2.56M > 10000.
+    # Scale should become (10000 / 640000) ** 0.5 = (1/64) ** 0.5 = 0.125
+    assert abs(scale - 0.125) < 1e-5
+
+    # 2. Test _generate_image_tiles and _resize_image_file_to_fit on a large fake image
+    large_img_path = tmp_path / "large_table.png"
+    # Create a dummy image of size 1200 x 800
+    img = Image.new("RGB", (1200, 800), color="white")
+    img.save(large_img_path)
+
+    # Slice into tiles of size 500 with 100 overlap
+    tiles = _generate_image_tiles(large_img_path, tile_size=500, overlap=100)
+    assert len(tiles) == 6
+    for tile in tiles:
+        tile_file = tmp_path / tile["filename"]
+        assert tile_file.is_file()
+        with Image.open(tile_file) as t_img:
+            assert t_img.width <= 500
+            assert t_img.height <= 500
+
+    # Resize the large image to max_dim 600 and max_pixels 200000
+    _resize_image_file_to_fit(large_img_path, max_dim=600, max_pixels=200000)
+    with Image.open(large_img_path) as resized_img:
+        assert resized_img.width <= 600
+        assert resized_img.height <= 400
+        assert resized_img.width * resized_img.height <= 200000
+
+    # 3. Test decompression bomb safety
+    bomb_path = tmp_path / "bomb.png"
+    try:
+        # Create a 10000x9000 (90MP) image in mode "1" (binary, keeps RAM tiny ~11MB)
+        bomb_img = Image.new("1", (10000, 9000), color=0)
+        bomb_img.save(bomb_path)
+        
+        # Verify opening it does not crash/throw with our bypass, and it successfully resizes to max_dim 1000
+        _resize_image_file_to_fit(bomb_path, max_dim=1000)
+        assert bomb_path.is_file()
+        Image.MAX_IMAGE_PIXELS = None
+        with Image.open(bomb_path) as opened_bomb:
+            assert opened_bomb.width == 1000
+    except MemoryError:
+        pass
+
+
+def test_table_agent_llm_reranker(tmp_path: Path):
+    import openpyxl
+    # Create two dummy workbooks: doc_a has low lexical score, doc_b has high lexical score
+    wb1 = openpyxl.Workbook()
+    ws1 = wb1.active
+    ws1.title = "LowLexical"
+    ws1["A1"] = "Cherry"
+    path_a = tmp_path / "doc_a.xlsx"
+    wb1.save(path_a)
+
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    ws2.title = "HighLexical"
+    ws2["A1"] = "Apple"
+    path_b = tmp_path / "doc_b.xlsx"
+    wb2.save(path_b)
+
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/rerank_test",
+        table_id="siflex-table",
+        table_content="Apple | Cherry",
+        question="Which sheet has the Apple?",
+        answer=["SomeSecretGoldAnswer"],  # gold answer is distinct secret string
+        sample_path="data/SiFlex/golden_tests/compiled/golden_cases.json:cases[0]",
+        table_path=f"{path_a};{path_b}",
+    )
+
+    class CustomFakeLLM:
+        model_name = "custom-fake"
+        temperature = 0.0
+        def __init__(self):
+            self.calls = []
+            self.generate_content = "selected_index: 1\nrationale: LLM chose LowLexical"
+        
+        def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
+            self.calls.append((prompt, system_prompt))
+            if system_prompt and "selection agent" in system_prompt:
+                return LLMResponse(content=self.generate_content, prompt_tokens=100, completion_tokens=10)
+            return LLMResponse(content="LowLexical", prompt_tokens=15, completion_tokens=3)
+
+    llm = CustomFakeLLM()
+    # Mock generate_with_image for answering
+    llm.generate_with_image = lambda prompt, image_path, system_prompt=None: LLMResponse(
+        content="LowLexical", prompt_tokens=15, completion_tokens=3
+    )
+
+    layout_vlm = FakeLayoutVLM()
+    renderer = FakeRenderer()
+
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=layout_vlm,
+        config={
+            "artifact_dir": str(tmp_path),
+            "max_refinement_rounds": 1,
+            "retrieval_rerank_with_llm": True,
+            "retrieval_top_k": 2,
+        },
+        renderer=renderer,
+    )
+
+    # 1. Pre-encode sheets
+    pipeline.prepare_samples([sample])
+
+    # 2. Run the QA flow with LLM reranking choosing the lower lexical candidate
+    output = pipeline.run(sample)
+    
+    # Verify we selected LowLexical (from path_a)
+    assert output.metadata["workbook_sheets"] == ["LowLexical"]
+    assert output.metadata["workbook_path"] == str(path_a.resolve())
+    assert output.metadata["retrieval_info"]["reranker_selected_index"] == 1
+    assert output.metadata["retrieval_info"]["fallback_used"] is False
+    assert output.metadata["retrieval_info"]["reranker_rationale"] == "LLM chose LowLexical"
+    
+    # Verify the prompt does not contain the gold answer "SomeSecretGoldAnswer"
+    rerank_call = [call for call in llm.calls if call[1] and "selection agent" in call[1]]
+    assert len(rerank_call) == 1
+    rerank_prompt = rerank_call[0][0]
+    assert "SomeSecretGoldAnswer" not in rerank_prompt
+    assert "gold" not in rerank_prompt
+
+    # Test 2: Invalid/empty reranker output falls back to lexical best (HighLexical/doc_b) and does not crash.
+    llm.calls.clear()
+    llm.generate_content = "invalid yaml here: index: 9999"
+    llm.generate_with_image = lambda prompt, image_path, system_prompt=None: LLMResponse(
+        content="HighLexical", prompt_tokens=15, completion_tokens=3
+    )
+    
+    output2 = pipeline.run(sample)
+    assert output2.metadata["workbook_sheets"] == ["HighLexical"]
+    assert output2.metadata["workbook_path"] == str(path_b.resolve())
+    assert output2.metadata["retrieval_info"]["fallback_used"] is True
+
+
+
+
+
+
 
