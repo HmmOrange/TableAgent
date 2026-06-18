@@ -23,6 +23,9 @@ def clear_thread_log_context():
     if hasattr(_thread_context, "context"):
         del _thread_context.context
 
+def get_thread_log_context() -> str | None:
+    return getattr(_thread_context, "context", None)
+
 class Logger:
     def __init__(self, name, log_dir=None, run_name=None):
         self.name = name
@@ -108,4 +111,11 @@ class Logger:
 # Create a default logger instance
 logger = Logger(__name__)
 
-__all__ = ["Logger", "logger", "configure_logging", "set_thread_log_context", "clear_thread_log_context"]
+__all__ = [
+    "Logger",
+    "logger",
+    "configure_logging",
+    "set_thread_log_context",
+    "clear_thread_log_context",
+    "get_thread_log_context",
+]
