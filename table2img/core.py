@@ -201,7 +201,12 @@ def document_from_hitab_json(data: dict[str, Any]) -> TableDocument:
     )
 
 
-def document_from_xlsx(input_path: str | Path, *, sheet: str | int | None = None) -> TableDocument:
+def document_from_xlsx(
+    input_path: str | Path,
+    *,
+    sheet: str | int | None = None,
+    add_coordinates: bool = True,
+) -> TableDocument:
     try:
         import openpyxl
     except ImportError as exc:
@@ -215,21 +220,56 @@ def document_from_xlsx(input_path: str | Path, *, sheet: str | int | None = None
     else:
         worksheet = workbook[str(sheet)]
 
-    rows = [
-        [cell.value if cell.value is not None else "" for cell in row]
-        for row in worksheet.iter_rows()
-    ]
-    merged_regions = [
-        {
-            "first_row": merged.min_row - 1,
-            "last_row": merged.max_row - 1,
-            "first_column": merged.min_col - 1,
-            "last_column": merged.max_col - 1,
-        }
-        for merged in worksheet.merged_cells.ranges
-    ]
+    rows_iter = list(worksheet.iter_rows())
+    if not rows_iter:
+        rows = []
+        merged_regions = []
+    elif add_coordinates:
+        from openpyxl.utils import get_column_letter
+
+        first_row = rows_iter[0]
+        start_row = first_row[0].row
+        start_col = first_row[0].column
+
+        col_letters = [get_column_letter(cell.column) for cell in first_row]
+        new_rows = [[""] + col_letters]
+        for row in rows_iter:
+            row_num = str(row[0].row)
+            row_values = [cell.value if cell.value is not None else "" for cell in row]
+            new_rows.append([row_num] + row_values)
+        rows = new_rows
+
+        merged_regions = [
+            {
+                "first_row": merged.min_row - start_row + 1,
+                "last_row": merged.max_row - start_row + 1,
+                "first_column": merged.min_col - start_col + 1,
+                "last_column": merged.max_col - start_col + 1,
+            }
+            for merged in worksheet.merged_cells.ranges
+        ]
+    else:
+        rows = [
+            [cell.value if cell.value is not None else "" for cell in row]
+            for row in rows_iter
+        ]
+        merged_regions = [
+            {
+                "first_row": merged.min_row - 1,
+                "last_row": merged.max_row - 1,
+                "first_column": merged.min_col - 1,
+                "last_column": merged.max_col - 1,
+            }
+            for merged in worksheet.merged_cells.ranges
+        ]
+
     rows = _rectangularize(rows)
-    fragment = rows_to_html(rows, title=worksheet.title, merged_regions=merged_regions)
+    fragment = rows_to_html(
+        rows,
+        title=worksheet.title,
+        merged_regions=merged_regions,
+        add_coordinates=add_coordinates,
+    )
     width, height = estimate_rows_size(rows)
     return TableDocument(
         html=wrap_html(fragment, title=worksheet.title),
@@ -289,6 +329,7 @@ def rows_to_html(
     *,
     title: str = "",
     merged_regions: list[dict[str, Any]] | None = None,
+    add_coordinates: bool = False,
 ) -> str:
     rows = _rectangularize(rows)
     merge_map: dict[tuple[int, int], tuple[int, int]] = {}
@@ -330,6 +371,8 @@ def rows_to_html(
                 attrs.append(f'rowspan="{rowspan}"')
             if colspan > 1:
                 attrs.append(f'colspan="{colspan}"')
+            if add_coordinates and (row_index == 0 or col_index == 0):
+                attrs.append('class="excel-coord"')
             attr_text = " " + " ".join(attrs) if attrs else ""
             text = _nbsp_pad(_clean_text(cell))
             lines.append(f"<td{attr_text}>{html.escape(text)}</td>")
@@ -387,6 +430,14 @@ def wrap_html(fragment: str, *, title: str = "") -> str:
     }}
     th {{
       font-weight: 700;
+    }}
+    .excel-coord {{
+      background-color: #f3f4f6;
+      color: #374151;
+      font-weight: 700;
+      text-align: center;
+      border: 1px solid #9ca3af;
+      font-size: 12px;
     }}
   </style>
 </head>

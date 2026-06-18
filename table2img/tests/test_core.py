@@ -48,6 +48,32 @@ class Table2ImgCoreTests(unittest.TestCase):
         self.assertIn("score", document.html)
         self.assertIn("B", document.html)
 
+    def test_document_from_xlsx_coordinates(self):
+        import openpyxl
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from table2img.core import document_from_xlsx
+
+        with TemporaryDirectory() as tmpdir:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "SheetTest"
+            ws["B2"] = "ValB2"
+            ws["C3"] = "ValC3"
+            
+            xlsx_path = Path(tmpdir) / "test.xlsx"
+            wb.save(xlsx_path)
+            
+            doc = document_from_xlsx(xlsx_path, add_coordinates=True)
+            
+            self.assertIn("B", doc.html)
+            self.assertIn("C", doc.html)
+            self.assertIn("2", doc.html)
+            self.assertIn("3", doc.html)
+            self.assertIn('class="excel-coord"', doc.html)
+            self.assertIn("ValB2", doc.html)
+            self.assertIn("ValC3", doc.html)
+
 
 if __name__ == "__main__":
     unittest.main()
