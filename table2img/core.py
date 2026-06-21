@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -453,6 +455,7 @@ def render_document(
     output_path: str | Path,
     *,
     scale: float = DEFAULT_SCALE,
+    backend: str = "auto",
     browser_path: str | Path | None = None,
     keep_html: bool = True,
     timeout_seconds: float = 60.0,
@@ -471,18 +474,35 @@ def render_document(
         html_path = Path(temp_dir.name) / "table.html"
         html_path.write_text(document.html, encoding="utf-8")
 
-    browser = find_browser(browser_path)
     width = min(max(320, document.estimated_width), max_viewport_width)
     height = min(max(240, document.estimated_height), max_viewport_height)
-    _capture_with_chrome_cli(
-        browser,
-        html_path,
-        output,
-        width=width,
-        height=height,
-        scale=scale,
-        timeout_seconds=timeout_seconds,
-    )
+    backend = backend.strip().lower()
+    if backend not in {"auto", "browser", "pillow"}:
+        raise ValueError(f"Unsupported table2img backend: {backend}")
+
+    capture_errors = []
+    browser = None
+    if backend != "pillow":
+        for candidate in find_browsers(browser_path):
+            try:
+                _capture_with_chrome_cli(
+                    candidate,
+                    html_path,
+                    output,
+                    width=width,
+                    height=height,
+                    scale=scale,
+                    timeout_seconds=timeout_seconds,
+                )
+                browser = candidate
+                break
+            except RuntimeError as exc:
+                capture_errors.append(str(exc))
+    if browser is None and backend != "browser":
+        _capture_with_pillow(html_path, output, scale=scale)
+        browser = Path("pillow")
+    if browser is None:
+        raise RuntimeError("All browser screenshot attempts failed: " + " | ".join(capture_errors))
     image_width, image_height = trim_image(output)
 
     result = RenderResult(
@@ -498,6 +518,10 @@ def render_document(
 
 
 def find_browser(browser_path: str | Path | None = None) -> Path:
+    return find_browsers(browser_path)[0]
+
+
+def find_browsers(browser_path: str | Path | None = None) -> list[Path]:
     candidates: list[Path] = []
     if browser_path:
         candidates.append(Path(browser_path))
@@ -506,19 +530,15 @@ def find_browser(browser_path: str | Path | None = None) -> Path:
     if env_browser:
         candidates.append(Path(env_browser))
 
-    for name in ("chrome", "chrome.exe", "google-chrome", "chromium", "chromium-browser", "msedge", "msedge.exe"):
+    for name in ("msedge", "msedge.exe", "chrome", "chrome.exe", "google-chrome", "chromium", "chromium-browser"):
         found = shutil.which(name)
         if found:
             candidates.append(Path(found))
 
     program_files = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")]
-    for root in [Path(p) for p in program_files if p]:
-        candidates.extend(
-            [
-                root / "Google" / "Chrome" / "Application" / "chrome.exe",
-                root / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-            ]
-        )
+    program_roots = [Path(p) for p in program_files if p]
+    candidates.extend(root / "Microsoft" / "Edge" / "Application" / "msedge.exe" for root in program_roots)
+    candidates.extend(root / "Google" / "Chrome" / "Application" / "chrome.exe" for root in program_roots)
 
     candidates.extend(
         [
@@ -535,9 +555,17 @@ def find_browser(browser_path: str | Path | None = None) -> Path:
         candidates.extend(puppeteer_root.glob("**/chrome.exe"))
         candidates.extend(puppeteer_root.glob("**/chrome"))
 
+    resolved = []
+    seen = set()
     for candidate in candidates:
         if candidate.is_file():
-            return candidate.resolve()
+            path = candidate.resolve()
+            normalized = str(path).lower()
+            if normalized not in seen:
+                resolved.append(path)
+                seen.add(normalized)
+    if resolved:
+        return resolved
 
     raise FileNotFoundError(
         "No Chrome/Chromium/Edge browser found. Set TABLE2IMG_BROWSER or pass --browser."
@@ -617,36 +645,155 @@ def _capture_with_chrome_cli(
     timeout_seconds: float,
 ) -> None:
     output_path = output_path.resolve()
+    output_path.unlink(missing_ok=True)
     html_uri = html_path.resolve().as_uri()
-    base_args = [
-        str(browser),
-        "--disable-gpu",
-        "--hide-scrollbars",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--no-sandbox",
-        f"--force-device-scale-factor={scale:g}",
-        f"--window-size={width},{height}",
-        f"--screenshot={output_path}",
-        html_uri,
-    ]
+    with tempfile.TemporaryDirectory(prefix="table2img-chrome-") as profile_dir:
+        base_args = [
+            str(browser),
+            f"--user-data-dir={profile_dir}",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--hide-scrollbars",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--no-sandbox",
+            f"--force-device-scale-factor={scale:g}",
+            f"--window-size={width},{height}",
+            f"--screenshot={output_path}",
+            html_uri,
+        ]
 
-    last_error = None
-    for headless_arg in ("--headless=new", "--headless"):
-        args = [base_args[0], headless_arg, *base_args[1:]]
-        completed = subprocess.run(
-            args,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-        )
-        if completed.returncode == 0 and output_path.is_file():
-            return
-        last_error = completed
+        last_error = None
+        for headless_arg in ("--headless=new", "--headless"):
+            args = [base_args[0], headless_arg, *base_args[1:]]
+            completed = subprocess.run(
+                args,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+            )
+            if _wait_for_screenshot(output_path):
+                return
+            last_error = completed
 
     stderr = (last_error.stderr if last_error else "").strip()
     stdout = (last_error.stdout if last_error else "").strip()
-    raise RuntimeError(f"Chrome screenshot failed. stdout={stdout!r} stderr={stderr!r}")
+    returncode = last_error.returncode if last_error else None
+    raise RuntimeError(
+        f"Chrome screenshot failed. browser={str(browser)!r} returncode={returncode!r} "
+        f"stdout={stdout!r} stderr={stderr!r}"
+    )
+
+
+def _wait_for_screenshot(output_path: Path, grace_seconds: float = 2.0) -> bool:
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if output_path.is_file() and output_path.stat().st_size > 0:
+            return True
+        time.sleep(0.05)
+    return output_path.is_file() and output_path.stat().st_size > 0
+
+
+def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+    table = soup.find("table")
+    if table is None:
+        raise RuntimeError("Pillow table rendering failed: HTML contains no table")
+
+    cells = []
+    occupied = set()
+    max_column = 0
+    rows = table.find_all("tr")
+    for row_index, row in enumerate(rows):
+        column_index = 0
+        for cell in row.find_all(["th", "td"], recursive=False):
+            while (row_index, column_index) in occupied:
+                column_index += 1
+            rowspan = max(1, int(cell.get("rowspan", 1)))
+            colspan = max(1, int(cell.get("colspan", 1)))
+            for covered_row in range(row_index, row_index + rowspan):
+                for covered_column in range(column_index, column_index + colspan):
+                    occupied.add((covered_row, covered_column))
+            cells.append({
+                "row": row_index,
+                "column": column_index,
+                "rowspan": rowspan,
+                "colspan": colspan,
+                "text": cell.get_text(" ", strip=True),
+                "header": cell.name == "th" or row_index == 0,
+            })
+            column_index += colspan
+            max_column = max(max_column, column_index)
+
+    if not cells or not rows or max_column == 0:
+        raise RuntimeError("Pillow table rendering failed: table is empty")
+
+    factor = max(1.0, float(scale))
+    font_size = max(12, round(14 * factor))
+    regular_font = _load_table_font(ImageFont, font_size, bold=False)
+    bold_font = _load_table_font(ImageFont, font_size, bold=True)
+    padding = round(8 * factor)
+
+    column_widths = [round(90 * factor)] * max_column
+    for cell in cells:
+        if cell["colspan"] != 1:
+            continue
+        font = bold_font if cell["header"] else regular_font
+        text_width = _text_size(cell["text"], font)[0] + padding * 2
+        column_widths[cell["column"]] = min(round(360 * factor), max(column_widths[cell["column"]], text_width))
+
+    wrapped = {}
+    row_heights = [round(38 * factor)] * len(rows)
+    for index, cell in enumerate(cells):
+        available_width = sum(column_widths[cell["column"]:cell["column"] + cell["colspan"]]) - padding * 2
+        chars = max(8, int(available_width / max(1, font_size * 0.58)))
+        lines = textwrap.wrap(cell["text"], width=chars, break_long_words=True) or [""]
+        wrapped[index] = "\n".join(lines)
+        if cell["rowspan"] == 1:
+            row_heights[cell["row"]] = max(row_heights[cell["row"]], len(lines) * round(font_size * 1.3) + padding * 2)
+
+    x_positions = [0]
+    for column_width in column_widths:
+        x_positions.append(x_positions[-1] + column_width)
+    y_positions = [0]
+    for row_height in row_heights:
+        y_positions.append(y_positions[-1] + row_height)
+
+    image = Image.new("RGB", (x_positions[-1] + 1, y_positions[-1] + 1), "white")
+    draw = ImageDraw.Draw(image)
+    for index, cell in enumerate(cells):
+        left = x_positions[cell["column"]]
+        top = y_positions[cell["row"]]
+        right = x_positions[cell["column"] + cell["colspan"]]
+        bottom = y_positions[min(len(rows), cell["row"] + cell["rowspan"])]
+        fill = "#e5e7eb" if cell["header"] else "white"
+        draw.rectangle((left, top, right, bottom), fill=fill, outline="#4b5563", width=max(1, round(factor)))
+        draw.multiline_text(
+            (left + padding, top + padding),
+            wrapped[index],
+            fill="#111827",
+            font=bold_font if cell["header"] else regular_font,
+            spacing=round(3 * factor),
+        )
+    image.save(output_path, format="PNG")
+
+
+def _load_table_font(image_font, size: int, *, bold: bool):
+    candidates = [
+        Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return image_font.truetype(str(candidate), size=size)
+    return image_font.load_default()
+
+
+def _text_size(text: str, font) -> tuple[int, int]:
+    box = font.getbbox(text or " ")
+    return box[2] - box[0], box[3] - box[1]
 
 
 def _detect_format(path: Path, input_format: str) -> str:

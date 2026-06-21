@@ -61,28 +61,29 @@ class FakeLayoutVLM:
 
     def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
         self.calls.append((prompt, Path(image_path), system_prompt))
+        structure = yaml.safe_dump(
+            {
+                "headers": [
+                    {
+                        "label": "Revenue",
+                        "description": "Company revenue values by year",
+                        "orientation": "column",
+                        "range": "B1:B3",
+                        "sub_headers": [
+                            {
+                                "label": "2024",
+                                "description": "Revenue for fiscal year 2024",
+                                "orientation": "column",
+                                "range": "B2:B2",
+                            }
+                        ],
+                    }
+                ]
+            },
+            sort_keys=False,
+        )
         return LLMResponse(
-            content=yaml.safe_dump(
-                {
-                    "headers": [
-                        {
-                            "label": "Revenue",
-                            "description": "Company revenue values by year",
-                            "orientation": "column",
-                            "range": "B1:B3",
-                            "sub_headers": [
-                                {
-                                    "label": "2024",
-                                    "description": "Revenue for fiscal year 2024",
-                                    "orientation": "column",
-                                    "range": "B2:B2",
-                                }
-                            ],
-                        }
-                    ]
-                },
-                sort_keys=False,
-            ),
+            content=f"Inspected the visible headers and ranges.\n```yaml\n{structure}```",
             prompt_tokens=10,
             completion_tokens=5,
         )
@@ -134,6 +135,8 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert structure_path.is_file()
     structure = yaml.safe_load(structure_path.read_text(encoding="utf-8"))
     assert structure["headers"][0]["label"] == "Revenue"
+    thinking_trace_path = Path(output.metadata["thinking_trace_path"])
+    assert thinking_trace_path.read_text(encoding="utf-8") == "Inspected the visible headers and ranges."
     assert Path(output.metadata["workbook_path"]).is_file()
     assert Path(output.metadata["image_path"]).is_file()
     assert Path(output.metadata["html_path"]).is_file()
@@ -409,9 +412,8 @@ def test_table_agent_siflex_answer_prompt_formatting(tmp_path: Path):
     assert "Organize your final answer in a clear document structure" in prompt
 
 
-def test_table_agent_max_tokens_safeguard_and_early_breaks(tmp_path: Path):
+def test_table_agent_default_has_no_generation_cap_and_early_breaks(tmp_path: Path):
     llm = FakeLLM()
-    # Test setting max_tokens overrides when they are None or very large
     llm.max_tokens = None
     layout_vlm = FakeLayoutVLM()
     layout_vlm.max_tokens = 4096
@@ -422,9 +424,8 @@ def test_table_agent_max_tokens_safeguard_and_early_breaks(tmp_path: Path):
         config={"artifact_dir": str(tmp_path)},
         renderer=FakeRenderer(),
     )
-    # Check that they were capped at 2048 (default)
-    assert llm.max_tokens == 2048
-    assert layout_vlm.max_tokens == 2048
+    assert llm.max_tokens is None
+    assert layout_vlm.max_tokens == 4096
 
     # Test fit_context truncation
     long_content = "X" * 70000
@@ -484,6 +485,161 @@ def test_is_valid_structure_rules():
     assert _is_valid_structure("headers:\n  - Column 1\n  - Revenue\n  - Column 2")
     assert _is_valid_structure("headers:\n  - label: Column 1\n  - label: Total Revenue")
     assert _is_valid_structure("headers:\n  - name: Column 1\n  - name: Net Profit")
+
+
+def test_table_agent_prompts_prefer_and_verify_null_ranges():
+    from prompts.table_agent import LAYOUT_SYSTEM_PROMPT, VERIFICATION_SYSTEM_PROMPT
+
+    assert "when uncertain, set range to null" in LAYOUT_SYSTEM_PROMPT
+    assert "Never guess a range" in LAYOUT_SYSTEM_PROMPT
+    assert "A range value of null is valid" in VERIFICATION_SYSTEM_PROMPT
+    assert "do not reject a structure solely because a range is null" in VERIFICATION_SYSTEM_PROMPT
+
+
+def test_strict_structure_normalizes_uncertain_ranges_to_null():
+    from pipelines.table_agent_pipeline import extract_strict_structure
+
+    structure_text, _ = extract_strict_structure(
+        "headers:\n"
+        "- label: Revenue\n"
+        "  range: UNKNOWN\n"
+        "  sub_headers:\n"
+        "  - label: 2024\n"
+        "    range: uncertain\n"
+    )
+    structure = yaml.safe_load(structure_text)
+
+    assert structure["headers"][0]["range"] is None
+    assert structure["headers"][0]["sub_headers"][0]["range"] is None
+
+
+def test_strict_structure_extraction_discards_reasoning_and_extra_keys():
+    from pipelines.table_agent_pipeline import extract_strict_structure
+
+    content = """I analyzed the table before producing the result.
+```yaml
+reasoning: this must never be persisted
+headers:
+  - label: Revenue
+    description: Annual revenue
+    orientation: column
+    range: B1:B3
+    confidence: 0.9
+    sub_headers:
+      - label: "2024"
+        description: Fiscal year 2024
+        orientation: column
+        range: B2
+```
+This trailing explanation is also logging-only."""
+
+    structure_text, discarded = extract_strict_structure(content)
+    structure = yaml.safe_load(structure_text)
+
+    assert set(structure) == {"headers"}
+    assert set(structure["headers"][0]) == {"label", "description", "orientation", "range", "sub_headers"}
+    assert set(structure["headers"][0]["sub_headers"][0]) == {"label", "description", "orientation", "range"}
+    assert "reasoning" not in structure_text
+    assert "confidence" not in structure_text
+    assert "analyzed the table" in discarded
+    assert "trailing explanation" in discarded
+    assert "reasoning" in discarded
+    assert "confidence" in discarded
+
+
+def test_table_agent_persists_only_strict_structure(tmp_path: Path):
+    class ReasoningLayoutVLM(FakeLayoutVLM):
+        def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
+            return LLMResponse(
+                content="""Analysis that belongs in logs.
+headers:
+  - label: Revenue
+    description: Annual revenue
+    orientation: column
+    range: B1:B3
+    sub_headers: []""",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+
+    sample = EvalSample(
+        index=0,
+        sample_id="strict/1",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the revenue?",
+        answer=["100"],
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=ReasoningLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 0},
+        renderer=FakeRenderer(),
+    )
+
+    output = pipeline.run(sample)
+    persisted = Path(output.metadata["structure_path"]).read_text(encoding="utf-8")
+
+    assert persisted.startswith("headers:")
+    assert "Analysis that belongs in logs" not in persisted
+
+
+def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
+    from TableAgent.config import run_scoped_table_agent_config
+
+    scoped_config = run_scoped_table_agent_config(
+        {
+            "table_agent": {
+                "artifact_root": str(tmp_path),
+                "run_dir_template": "{run_name}",
+                "repeat_dir_template": "repeat_{run_id}",
+                "shared_dir_name": "shared",
+            }
+        },
+        "hitab-table_agent-20260621_163851",
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config=scoped_config,
+        renderer=FakeRenderer(),
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/1",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the revenue?",
+        answer=["100"],
+    )
+
+    pipeline.set_run_id(1)
+    first_output = pipeline.run(sample)
+    pipeline.set_run_id(3)
+    third_output = pipeline.run(sample)
+
+    assert "repeat_1" in Path(first_output.metadata["structure_path"]).parts
+    assert "repeat_3" in Path(third_output.metadata["structure_path"]).parts
+    assert Path(first_output.metadata["structure_path"]) != Path(third_output.metadata["structure_path"])
+    assert pipeline.settings.source_artifact_dir == tmp_path / "hitab-table_agent-20260621_163851" / "shared"
+
+
+def test_table_agent_default_outputs_and_logs_are_scoped_under_table_agent():
+    from TableAgent.config import resolve_table_agent_run_roots
+
+    config = {
+        "table_agent": {
+            "evaluation_output_dir": "TableAgent/outputs/evaluations",
+            "log_dir": "TableAgent/outputs/logs",
+        }
+    }
+
+    output_dir, log_dir = resolve_table_agent_run_roots("table_agent", "outputs", config)
+
+    assert output_dir == Path("TableAgent/outputs/evaluations")
+    assert log_dir == Path("TableAgent/outputs/logs")
+    assert resolve_table_agent_run_roots("table_agent", "custom", config)[0] == Path("custom")
+    assert resolve_table_agent_run_roots("graphotter", "outputs", config) == (Path("outputs"), Path("logs"))
 
 
 def test_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):

@@ -36,6 +36,19 @@ def test_legacy_root_config_path_falls_back_to_configs(monkeypatch):
     assert embedding_cfg["base_url"] == "http://localhost:8001/v1"
 
 
+def test_table_agent_root_config_disables_token_caps():
+    config = load_config("config.yaml")
+
+    llm_provider_name, llm_config = resolve_llm_config(config, "table_agent")
+    vlm_provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
+
+    assert llm_provider_name == "qwen_local"
+    assert llm_config["max_tokens"] is None
+    assert vlm_provider_name == "qwen_local_vlm"
+    assert vlm_config["max_tokens"] is None
+    assert config["table_agent"]["generation_max_tokens"] is None
+
+
 def test_resolve_vlm_provider_from_vlm_models(monkeypatch):
     monkeypatch.setenv("GEMMA4_VLM_BASE_URL", "https://vlm.local/v1")
     config = load_config("configs/config.example.yaml")

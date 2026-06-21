@@ -1,10 +1,61 @@
 import json
 import unittest
+from pathlib import Path
+from subprocess import CompletedProcess
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from table2img.core import document_from_json, rows_from_markdown
+from table2img.core import _capture_with_chrome_cli, document_from_json, find_browsers, render_document, rows_from_markdown
 
 
 class Table2ImgCoreTests(unittest.TestCase):
+    def test_pillow_backend_renders_without_launching_browser(self):
+        with TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "table.png"
+            document = document_from_json({"texts": [["Year", "Revenue"], ["2024", "100"]]})
+
+            with patch("table2img.core._capture_with_chrome_cli") as browser_capture:
+                result = render_document(document, output_path, backend="pillow")
+
+            browser_capture.assert_not_called()
+            self.assertTrue(output_path.is_file())
+            self.assertGreater(output_path.stat().st_size, 0)
+            self.assertEqual(result.browser_path, Path("pillow"))
+
+    def test_browser_discovery_deduplicates_candidates(self):
+        browser = Path("browser.exe").resolve()
+        with patch("table2img.core.shutil.which", return_value=str(browser)), patch.object(Path, "is_file", return_value=True):
+            browsers = find_browsers()
+
+        self.assertEqual(browsers.count(browser), 1)
+
+    def test_chrome_capture_uses_isolated_profile_and_accepts_written_screenshot(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            html_path = root / "table.html"
+            output_path = root / "table.png"
+            html_path.write_text("<html><body>table</body></html>", encoding="utf-8")
+            output_path.write_bytes(b"stale")
+
+            def fake_run(args, **kwargs):
+                self.assertTrue(any(arg.startswith("--user-data-dir=") for arg in args))
+                self.assertFalse(output_path.exists())
+                output_path.write_bytes(b"png")
+                return CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+            with patch("table2img.core.subprocess.run", side_effect=fake_run):
+                _capture_with_chrome_cli(
+                    Path("chrome.exe"),
+                    html_path,
+                    output_path,
+                    width=800,
+                    height=600,
+                    scale=2.0,
+                    timeout_seconds=10,
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"png")
+
     def test_markdown_rows(self):
         rows = rows_from_markdown(
             """
