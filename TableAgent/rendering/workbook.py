@@ -38,6 +38,23 @@ class WorkbookRenderer:
             self.render_document(document, image_path)
         return self.postprocess_image(image_path)
 
+    def source_viewport_to_image(
+        self,
+        source_path: Path,
+        sheet_name: str,
+        cell_range: str,
+        image_path: Path,
+    ) -> RenderResult:
+        document = document_from_xlsx(
+            source_path,
+            sheet=sheet_name,
+            add_coordinates=True,
+            cell_range=cell_range,
+        )
+        result = self.render_document(document, image_path)
+        self.postprocess_image(image_path)
+        return result
+
     def render_document(self, document: Any, image_path: Path) -> RenderResult:
         _, _, scale = compute_viewport_and_scale(
             estimated_width=document.estimated_width,

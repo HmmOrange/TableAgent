@@ -2,8 +2,9 @@
 
 TableAgent is the image-assisted table-structure and question-answering pipeline used by
 the `table_agent` benchmark option. It converts table inputs into workbooks and images,
-asks a layout VLM for a strict `structure.yaml`, verifies and optionally refines that
-structure, and then asks the answer model to answer the sample question.
+asks layout and verification agents for a grounded `structure.yaml`, and then asks the
+QA agent to answer the sample question. Prepared XLSX sources use an ExStruct-backed,
+multi-viewport MAS; the per-sample fallback retains the legacy single-image loop.
 
 This document describes the current implementation under `TableAgent/`. The legacy
 import path `pipelines.table_agent_pipeline` is only a compatibility shim.
@@ -119,14 +120,22 @@ behavior as a deliberate pipeline change and cover it with tests.
 
 Before repeats begin, the CLI calls `prepare_samples()`:
 
-1. Collect unique `.xlsx` files referenced by the loaded SiFlex samples.
-2. Enumerate every worksheet.
-3. Render each worksheet with visible Excel coordinates.
-4. Extract flattened sheet text for retrieval.
-5. Generate and verify one reusable `structure.yaml` per sheet.
-6. Write source metadata and optional image-tile metadata under `shared/sources/`.
-7. Write `structure.error` instead of `structure.yaml` when structure generation fails.
-   The sidecar prevents repeated regeneration until it is removed.
+1. Collect unique `.xlsx` files and run ExStruct once per workbook.
+2. Write each sheet's non-commented metadata contract to `metadata.yaml`.
+3. Start at the top-left cell of the first table candidate (or used range fallback).
+4. Render a coordinate-labelled cell viewport, defaulting to 20 rows by 20 columns.
+5. Ask LayoutAgent to update `structure.yaml`, emit a changelog, and suggest directions.
+6. Have VerificationAgent write and execute `verification.py`, then review its report.
+7. Traverse `stay`, `right`, `down`, `left`, and `up` through a priority queue. Cardinal
+   shifts default to 15 cells. A direction receives one extra attempt after its first
+   verified zero-change viewport and stops after the second.
+8. Retry a failed viewport with `stay` up to `max_retry`; after exhaustion, set
+   unverifiable ranges to `null`.
+9. Stop when the queue is empty and leave the reusable source for QAAgent retrieval.
+
+Each loop directory contains its image/HTML, prompts, raw responses, before/after
+structures, changelog, generated verifier, verifier output, and discarded layout prose.
+`events.jsonl` is the compact traversal index.
 
 At question time, `SourceRetriever`:
 
@@ -140,19 +149,19 @@ At question time, `SourceRetriever`:
 
 ## `structure.yaml` contract
 
-The persisted document has exactly one top-level key:
+Prepared XLSX sources use table keys (the legacy fallback still accepts `headers`):
 
 ```yaml
-headers:
-  - label: Revenue
-    description: Annual company revenue
-    orientation: column
-    range: B1:B12
-    sub_headers:
-      - label: "2024"
-        description: Revenue for fiscal year 2024
-        orientation: column
-        range: B2
+table1:
+  name: Revenue
+  description: Annual company revenue
+  headers:
+    - label: Year
+      description: Fiscal year labels
+      orientation: column
+      header_range: A1:A1
+      data_range: A2:A12
+      sub_headers: []
 ```
 
 Required semantics:
@@ -161,11 +170,10 @@ Required semantics:
   placeholders such as `Header`, `Column 1`, or `UNKNOWN`.
 - `description` explains the specific semantic role of the header.
 - `orientation` is `row`, `column`, or `mixed`.
-- `range` is an exact A1-style reference supported by the rendered table.
-- Use `range: null` when exact coordinates cannot be determined. Never guess.
+- `header_range` and `data_range` are exact A1-style references supported by the viewport.
+- Use `null` when exact coordinates cannot be determined. Never guess.
 - `sub_headers` is always a list for top-level headers and may be empty.
-- Sub-headers use `label`, `description`, `orientation`, and `range`; deeper nesting is
-  not part of the current schema.
+- Sub-headers use the same range fields; deeper nesting is not part of the current schema.
 
 `extract_strict_structure()` accepts fenced or unfenced YAML, removes unsupported keys,
 normalizes fields, and separates discarded prose from persisted YAML. Uncertainty
@@ -176,6 +184,7 @@ The verifier must return:
 ```yaml
 status: good
 feedback: Structure is supported by the table.
+null_fields: []
 ```
 
 or:
@@ -183,6 +192,7 @@ or:
 ```yaml
 status: not_good
 feedback: Correct the 2024 header range from B1 to B2.
+null_fields: [table1.headers[0].header_range]
 ```
 
 A `null` range is valid and must not be the sole reason for rejection. A missing range
@@ -190,19 +200,10 @@ key and an invalid or unsupported A1 reference should be rejected.
 
 ### Important validation boundary
 
-`_is_valid_structure()` is a local sanity check, not a workbook-grounding validator. It
-currently checks that YAML parses, contains a non-empty `headers` list, is not an error
-payload, and has at least one non-placeholder label. It does **not** confirm that:
-
-- an A1 reference is within workbook bounds;
-- the referenced cell contains the claimed label;
-- ranges follow the displayed hierarchy;
-- subtotal and total rows are classified correctly; or
-- verifier status is `good`.
-
-Future range validation should live in `perception/structure.py` (or a focused module
-called from it) and should be tested with real workbook coordinates. Do not hide
-grounding failures by broadening `_is_valid_structure()`.
+`_is_valid_structure()` remains a local sanity check. The generated `verification.py`
+adds deterministic A1 syntax and Excel-bound checks, while VerificationAgent judges
+visible header semantics and data-range correctness. Neither layer should silently
+broaden an invalid range.
 
 ## Prompt templates
 
@@ -254,6 +255,10 @@ Key settings:
 | `retrieval_rerank_with_llm` | Enable SiFlex LLM reranking |
 | `retrieval_top_k` | Maximum candidates sent to the reranker |
 | `retrieval_candidate_max_chars` | Text preview budget per candidate |
+| `exstruct_mode` | ExStruct extraction mode for source preparation |
+| `viewport_rows` / `viewport_columns` | Viewport dimensions in cells (default 20×20) |
+| `shift_cells` | Cardinal movement distance in cells (default 15) |
+| `max_retry` | Maximum `stay` attempts before ranges become `null` (default 5) |
 
 The active answer and layout providers are selected by top-level `llm.provider` and
 `vlm.provider`. Their model blocks may also define `max_tokens`. To leave generation
@@ -262,6 +267,12 @@ uncapped by the client, both provider-level `max_tokens` and
 own context and output limits.
 
 ## Artifact layout
+
+Prepared source directories contain `metadata.yaml`, `structure.yaml`, `changelog.md`,
+`events.jsonl`, and `iterations/`. Each iteration directory is named with its sequence,
+direction, and A1 viewport and contains `viewport.png`, `viewport.html`, layout and
+verification prompts/responses, before/after structures, `verification.py`, and
+`verification_output.json`.
 
 Benchmark CLI runs use this structure:
 

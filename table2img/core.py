@@ -208,6 +208,7 @@ def document_from_xlsx(
     *,
     sheet: str | int | None = None,
     add_coordinates: bool = True,
+    cell_range: str | None = None,
 ) -> TableDocument:
     try:
         import openpyxl
@@ -222,7 +223,20 @@ def document_from_xlsx(
     else:
         worksheet = workbook[str(sheet)]
 
-    rows_iter = list(worksheet.iter_rows())
+    if cell_range:
+        from openpyxl.utils.cell import range_boundaries
+
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        rows_iter = list(
+            worksheet.iter_rows(
+                min_row=min_row,
+                max_row=max_row,
+                min_col=min_col,
+                max_col=max_col,
+            )
+        )
+    else:
+        rows_iter = list(worksheet.iter_rows())
     if not rows_iter:
         rows = []
         merged_regions = []
@@ -241,29 +255,45 @@ def document_from_xlsx(
             new_rows.append([row_num] + row_values)
         rows = new_rows
 
-        merged_regions = [
-            {
-                "first_row": merged.min_row - start_row + 1,
-                "last_row": merged.max_row - start_row + 1,
-                "first_column": merged.min_col - start_col + 1,
-                "last_column": merged.max_col - start_col + 1,
-            }
-            for merged in worksheet.merged_cells.ranges
-        ]
+        merged_regions = []
+        end_row = rows_iter[-1][0].row
+        end_col = rows_iter[0][-1].column
+        for merged in worksheet.merged_cells.ranges:
+            clipped_first_row = max(merged.min_row, start_row)
+            clipped_last_row = min(merged.max_row, end_row)
+            clipped_first_col = max(merged.min_col, start_col)
+            clipped_last_col = min(merged.max_col, end_col)
+            if clipped_first_row > clipped_last_row or clipped_first_col > clipped_last_col:
+                continue
+            merged_regions.append({
+                "first_row": clipped_first_row - start_row + 1,
+                "last_row": clipped_last_row - start_row + 1,
+                "first_column": clipped_first_col - start_col + 1,
+                "last_column": clipped_last_col - start_col + 1,
+            })
     else:
         rows = [
             [cell.value if cell.value is not None else "" for cell in row]
             for row in rows_iter
         ]
-        merged_regions = [
-            {
-                "first_row": merged.min_row - 1,
-                "last_row": merged.max_row - 1,
-                "first_column": merged.min_col - 1,
-                "last_column": merged.max_col - 1,
-            }
-            for merged in worksheet.merged_cells.ranges
-        ]
+        start_row = rows_iter[0][0].row
+        start_col = rows_iter[0][0].column
+        end_row = rows_iter[-1][0].row
+        end_col = rows_iter[0][-1].column
+        merged_regions = []
+        for merged in worksheet.merged_cells.ranges:
+            clipped_first_row = max(merged.min_row, start_row)
+            clipped_last_row = min(merged.max_row, end_row)
+            clipped_first_col = max(merged.min_col, start_col)
+            clipped_last_col = min(merged.max_col, end_col)
+            if clipped_first_row > clipped_last_row or clipped_first_col > clipped_last_col:
+                continue
+            merged_regions.append({
+                "first_row": clipped_first_row - start_row,
+                "last_row": clipped_last_row - start_row,
+                "first_column": clipped_first_col - start_col,
+                "last_column": clipped_last_col - start_col,
+            })
 
     rows = _rectangularize(rows)
     fragment = rows_to_html(
@@ -273,6 +303,7 @@ def document_from_xlsx(
         add_coordinates=add_coordinates,
     )
     width, height = estimate_rows_size(rows)
+    workbook.close()
     return TableDocument(
         html=wrap_html(fragment, title=worksheet.title),
         title=worksheet.title,

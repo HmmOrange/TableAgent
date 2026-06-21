@@ -21,6 +21,8 @@ from utils.llm.base import BaseLLM, LLMResponse
 from utils.log.logger import Logger
 
 from TableAgent.config import TableAgentConfig
+from TableAgent.agents import LayoutAgent, QAAgent, VerificationAgent
+from TableAgent.perception.metadata import SheetMetadata
 from TableAgent.perception.structure import _is_valid_structure, _parse_yaml_mapping, extract_strict_structure
 from TableAgent.pipeline.common import (
     SourceCandidate,
@@ -32,6 +34,7 @@ from TableAgent.pipeline.common import (
 from TableAgent.pipeline.prompting import PromptBuilder
 from TableAgent.pipeline.retrieval import SourceRetriever
 from TableAgent.pipeline.source_preparer import SourcePreparer
+from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
 from TableAgent.rendering.workbook import WorkbookRenderer
 
 logger = Logger(__name__)
@@ -62,7 +65,16 @@ class TableAgentPipeline(BasePipeline):
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, renderer, logger)
-        self.source_preparer = SourcePreparer(self.settings, self.workbook_renderer, self._build_structure_for_sheet)
+        self.layout_agent = LayoutAgent(self.layout_vlm)
+        self.verification_agent = VerificationAgent(self.llm)
+        self.qa_agent = QAAgent(self.llm, self.answer_system_prompt)
+        self.layout_workflow = TableLayoutWorkflow(
+            self.settings,
+            self.workbook_renderer,
+            self.layout_agent,
+            self.verification_agent,
+        )
+        self.source_preparer = SourcePreparer(self.settings, self._analyze_source_sheet)
         self.source_retriever = SourceRetriever(self.settings, self.llm, self, self.prompts)
         self._apply_generation_cap()
 
@@ -103,9 +115,8 @@ class TableAgentPipeline(BasePipeline):
         else:
             structure_path.unlink(missing_ok=True)
         self._write_thinking_trace(thinking_trace_path, thinking_trace)
-        answer_response = self.llm.generate(
+        answer_response = self.qa_agent.run(
             prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
-            system_prompt=self.answer_system_prompt,
         )
         responses.append(answer_response)
 
@@ -215,6 +226,21 @@ class TableAgentPipeline(BasePipeline):
         self._write_thinking_trace(image_path.parent / "thinking_trace.txt", "\n\n---\n\n".join(trace_parts))
         return structure_text
 
+    def _analyze_source_sheet(
+        self,
+        source_path: Path,
+        sheet_name: str,
+        metadata: SheetMetadata,
+        sheet_dir: Path,
+    ) -> str:
+        result = self.layout_workflow.run(
+            workbook_path=source_path,
+            sheet_name=sheet_name,
+            metadata=metadata,
+            output_dir=sheet_dir,
+        )
+        return result.structure_text
+
     def _run_prepared_source(
         self,
         sample: EvalSample,
@@ -224,7 +250,7 @@ class TableAgentPipeline(BasePipeline):
     ) -> PipelineOutput:
         image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
         fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
-        answer_response = self._generate_answer_with_image(
+        answer_response = self.qa_agent.run(
             prompt=image_prompt,
             image_path=candidate.image_path,
             fallback_prompt=fallback_prompt,
@@ -255,6 +281,10 @@ class TableAgentPipeline(BasePipeline):
                 "artifact_dir": display_path(candidate.directory),
                 "image_tiles": read_image_tiles(candidate.directory),
                 "retrieval_info": retrieval_info,
+                "metadata_yaml_path": display_path(candidate.directory / "metadata.yaml"),
+                "changelog_path": display_path(candidate.directory / "changelog.md"),
+                "events_path": display_path(candidate.directory / "events.jsonl"),
+                "iteration_artifact_dir": display_path(candidate.directory / "iterations"),
             },
         )
 
@@ -265,10 +295,7 @@ class TableAgentPipeline(BasePipeline):
         return generate_with_image(prompt=prompt, image_path=image_path, system_prompt=self.layout_system_prompt)
 
     def _generate_answer_with_image(self, *, prompt: str, image_path: Path, fallback_prompt: str | None = None) -> LLMResponse:
-        generate_with_image = getattr(self.llm, "generate_with_image", None)
-        if callable(generate_with_image):
-            return generate_with_image(prompt=prompt, image_path=image_path, system_prompt=self.answer_system_prompt)
-        return self.llm.generate(prompt=fallback_prompt or prompt, system_prompt=self.answer_system_prompt)
+        return self.qa_agent.run(prompt=prompt, image_path=image_path, fallback_prompt=fallback_prompt)
 
     def _fit_context(self, table_content: str) -> str:
         if len(table_content) <= self.settings.max_context_chars:

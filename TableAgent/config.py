@@ -29,6 +29,11 @@ class TableAgentConfig:
     retrieval_rerank_with_llm: bool
     retrieval_top_k: int
     retrieval_candidate_max_chars: int
+    exstruct_mode: str
+    viewport_rows: int
+    viewport_columns: int
+    shift_cells: int
+    max_retry: int
 
     @classmethod
     def from_config(cls, override: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -53,6 +58,11 @@ class TableAgentConfig:
             retrieval_rerank_with_llm=_bool(_required(merged, "retrieval_rerank_with_llm")),
             retrieval_top_k=int(_required(merged, "retrieval_top_k")),
             retrieval_candidate_max_chars=int(_required(merged, "retrieval_candidate_max_chars")),
+            exstruct_mode=str(merged.get("exstruct_mode", "light")),
+            viewport_rows=int(merged.get("viewport_rows", 20)),
+            viewport_columns=int(merged.get("viewport_columns", 20)),
+            shift_cells=int(merged.get("shift_cells", 15)),
+            max_retry=int(merged.get("max_retry", 5)),
         )
 
 

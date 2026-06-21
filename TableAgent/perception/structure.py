@@ -80,10 +80,16 @@ def _is_valid_structure(structure_text: str | None) -> bool:
     if not isinstance(parsed, dict) or "error" in parsed:
         return False
     headers = parsed.get("headers")
-    if not isinstance(headers, list) or not headers:
-        return False
+    if isinstance(headers, list) and headers:
+        return any(not _is_placeholder_header(header) for header in headers)
 
-    return any(not _is_placeholder_header(header) for header in headers)
+    tables = _table_mappings(parsed)
+    return bool(tables) and all(
+        isinstance(table.get("headers"), list)
+        and table["headers"]
+        and any(not _is_placeholder_header(header) for header in table["headers"])
+        for table in tables.values()
+    )
 
 
 def _is_placeholder_header(header: Any) -> bool:
@@ -194,3 +200,172 @@ def _structure_extras(parsed: dict[str, Any]) -> dict[str, Any]:
     if any(header_extras):
         extras["headers"] = header_extras
     return extras
+
+
+def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
+    """Parse a LayoutAgent response without persisting its control envelope."""
+    text = content.strip()
+    candidates = [(match.group(1).strip(), match.span()) for match in _YAML_FENCE.finditer(text)]
+    if not candidates:
+        candidates = [(text, (0, len(text)))]
+
+    for candidate, span in candidates:
+        try:
+            parsed = yaml.safe_load(candidate)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+
+        source = parsed.get("structure") or parsed.get("updated_structure") or parsed
+        normalized = _normalize_layout_structure(source)
+        if normalized is None:
+            continue
+
+        directions = parsed.get("remaining_directions") or parsed.get("directions") or []
+        if not isinstance(directions, list):
+            directions = []
+        changelog = str(parsed.get("changelog") or "").strip()
+        discarded = (text[:span[0]] + "\n" + text[span[1]:]).strip()
+        return (
+            yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
+            discarded,
+            [str(direction).strip().lower() for direction in directions],
+            changelog,
+        )
+
+    legacy, discarded = extract_strict_structure(content)
+    return legacy, discarded, [], ""
+
+
+def nullify_structure_ranges(structure_text: str, field_paths: list[str] | None = None) -> str:
+    try:
+        parsed = yaml.safe_load(structure_text)
+    except yaml.YAMLError:
+        return structure_text
+    if not isinstance(parsed, dict):
+        return structure_text
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"range", "header_range", "data_range"}:
+                    value[key] = None
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    paths_applied = 0
+    for field_path in field_paths or []:
+        if _set_range_path_to_null(parsed, field_path):
+            paths_applied += 1
+    if not field_paths or paths_applied == 0:
+        visit(parsed)
+    return yaml.safe_dump(parsed, sort_keys=False, allow_unicode=True).strip()
+
+
+def _set_range_path_to_null(structure: dict[str, Any], field_path: str) -> bool:
+    tokens = []
+    for name, index in re.findall(r"([^.\[\]]+)|\[(\d+)\]", field_path):
+        tokens.append(int(index) if index else name)
+    if not tokens or tokens[-1] not in {"range", "header_range", "data_range"}:
+        return False
+    current: Any = structure
+    try:
+        for token in tokens[:-1]:
+            current = current[token]
+        if isinstance(current, dict) and tokens[-1] in current:
+            current[tokens[-1]] = None
+            return True
+    except (KeyError, IndexError, TypeError):
+        return False
+    return False
+
+
+def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
+    legacy = _normalize_structure(parsed)
+    if legacy is not None:
+        return legacy
+    if not isinstance(parsed, dict):
+        return None
+
+    tables = _table_mappings(parsed)
+    if not tables:
+        return None
+    normalized_tables: dict[str, Any] = {}
+    for key, table in tables.items():
+        headers = table.get("headers")
+        if not isinstance(headers, list) or not headers:
+            return None
+        normalized_headers = []
+        for header in headers:
+            normalized = _normalize_layout_header(header, include_sub_headers=True)
+            if normalized is None:
+                return None
+            normalized_headers.append(normalized)
+        normalized_tables[key] = {
+            "name": str(table.get("name") or "").strip() or None,
+            "description": str(table.get("description") or "").strip(),
+            "headers": normalized_headers,
+        }
+    return normalized_tables
+
+
+def _table_mappings(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    tables: dict[str, dict[str, Any]] = {}
+    for key, value in parsed.items():
+        if not re.fullmatch(r"table\d+", str(key), flags=re.IGNORECASE):
+            continue
+        if isinstance(value, dict):
+            tables[str(key)] = value
+            continue
+        if isinstance(value, list):
+            merged: dict[str, Any] = {}
+            for item in value:
+                if isinstance(item, dict):
+                    merged.update(item)
+            if merged:
+                tables[str(key)] = merged
+    return tables
+
+
+def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[str, Any] | None:
+    if not isinstance(header, dict):
+        return None
+    label = str(header.get("label") or "").strip()
+    if not label:
+        return None
+    orientation = str(header.get("orientation") or "mixed").strip().lower()
+    if orientation not in {"row", "column", "mixed"}:
+        orientation = "mixed"
+
+    normalized = {
+        "label": label,
+        "description": str(header.get("description") or "").strip(),
+        "orientation": orientation,
+        "header_range": _normalize_range_value(header.get("header_range", header.get("range"))),
+        "data_range": _normalize_range_value(header.get("data_range")),
+    }
+    if include_sub_headers:
+        sub_headers = header.get("sub_headers") or []
+        if not isinstance(sub_headers, list):
+            return None
+        normalized_sub_headers = []
+        for sub_header in sub_headers:
+            child = _normalize_layout_header(sub_header, include_sub_headers=False)
+            if child is None:
+                return None
+            normalized_sub_headers.append(child)
+        normalized["sub_headers"] = normalized_sub_headers
+    return normalized
+
+
+def _normalize_range_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in _UNCERTAIN_RANGE_VALUES:
+        return None
+    return text
