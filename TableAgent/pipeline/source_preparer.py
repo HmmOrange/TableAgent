@@ -153,6 +153,7 @@ class SourcePreparer:
             "safe_filename": safe_name(source_path.name),
             "safe_sheetname": safe_name(sheet_name),
             "layout_workflow_version": 2,
-            **metadata.to_dict(),
+            "used_range": metadata.used_range,
+            "merged_ranges": metadata.merged_ranges,
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

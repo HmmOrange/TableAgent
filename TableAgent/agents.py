@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from prompts.table_agent import (
+from TableAgent.prompts import (
     LAYOUT_MAS_SYSTEM_PROMPT,
     LAYOUT_MAS_USER_PROMPT_TEMPLATE,
     VERIFICATION_MAS_SYSTEM_PROMPT,
@@ -245,6 +245,7 @@ def _execute_verifier(
 _VERIFIER_CODE = '''from __future__ import annotations
 
 import json
+import re
 import sys
 
 import openpyxl
@@ -265,6 +266,176 @@ def walk(value, path=""):
             yield from walk(child, f"{path}[{index}]")
 
 
+def norm(value):
+    return re.sub(r"\\s+", "", str(value or "")).casefold()
+
+
+def range_box(value):
+    min_col, min_row, max_col, max_row = range_boundaries(str(value))
+    if min_col > max_col or min_row > max_row:
+        raise ValueError(f"invalid range order: {value}")
+    return min_col, min_row, max_col, max_row
+
+
+def box_cells(box):
+    min_col, min_row, max_col, max_row = box
+    return {
+        (row, col)
+        for row in range(min_row, max_row + 1)
+        for col in range(min_col, max_col + 1)
+    }
+
+
+def intersects(left, right):
+    return not (
+        left[2] < right[0]
+        or right[2] < left[0]
+        or left[3] < right[1]
+        or right[3] < left[1]
+    )
+
+
+def contains(outer, inner):
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def cell_texts(worksheet, box):
+    texts = []
+    for row, col in sorted(box_cells(box)):
+        value = worksheet.cell(row=row, column=col).value
+        if value is not None and str(value).strip():
+            texts.append(str(value).strip())
+    return texts
+
+
+def walk_headers(structure):
+    for table_key, table in structure.items():
+        if not isinstance(table, dict):
+            continue
+        headers = table.get("headers") or []
+        if not isinstance(headers, list):
+            continue
+        for index, header in enumerate(headers):
+            yield from walk_header(header, f"{table_key}.headers[{index}]")
+
+
+def walk_header(header, path):
+    if not isinstance(header, dict):
+        return
+    yield path, header
+    sub_headers = header.get("sub_headers") or []
+    if not isinstance(sub_headers, list):
+        return
+    for index, child in enumerate(sub_headers):
+        yield from walk_header(child, f"{path}.sub_headers[{index}]")
+
+
+def check_header(worksheet, path, header, used_box, errors):
+    label = str(header.get("label") or "").strip()
+    header_range = header.get("header_range") or header.get("range")
+    data_range = header.get("data_range")
+    orientation = str(header.get("orientation") or "column").strip().lower()
+    if orientation not in {"row", "column"}:
+        errors.append(f"{path}.orientation must be row or column: {orientation}")
+
+    header_box = None
+    data_box = None
+    if header_range is not None:
+        try:
+            header_box = range_box(header_range)
+        except (TypeError, ValueError):
+            errors.append(f"{path}.header_range is not a valid A1 range: {header_range}")
+        else:
+            if not contains(used_box, header_box):
+                errors.append(f"{path}.header_range is outside used range: {header_range}")
+            texts = cell_texts(worksheet, header_box)
+            normalized_label = norm(label)
+            if not texts:
+                errors.append(f"{path}.header_range contains no visible header text: {header_range}")
+            elif normalized_label and not any(normalized_label in norm(text) for text in texts):
+                errors.append(f"{path}.header_range does not contain label {label!r}: {header_range}")
+            extras = [text for text in texts if normalized_label and normalized_label not in norm(text)]
+            if extras:
+                errors.append(f"{path}.header_range contains unrelated text {extras!r}: {header_range}")
+
+    if data_range is not None:
+        try:
+            data_box = range_box(data_range)
+        except (TypeError, ValueError):
+            errors.append(f"{path}.data_range is not a valid A1 range: {data_range}")
+        else:
+            if not contains(used_box, data_box):
+                errors.append(f"{path}.data_range is outside used range: {data_range}")
+            if header_box is not None and intersects(data_box, header_box):
+                errors.append(f"{path}.data_range overlaps its header_range: {data_range} vs {header_range}")
+            data_texts = cell_texts(worksheet, data_box)
+            if not data_texts:
+                errors.append(f"{path}.data_range contains no visible data: {data_range}")
+
+    sub_headers = header.get("sub_headers") or []
+    child_header_boxes = []
+    child_data_boxes = []
+    if isinstance(sub_headers, list):
+        for index, child in enumerate(sub_headers):
+            child_path = f"{path}.sub_headers[{index}]"
+            if not isinstance(child, dict):
+                errors.append(f"{child_path} must be a mapping")
+                continue
+            child_header_range = child.get("header_range") or child.get("range")
+            child_data_range = child.get("data_range")
+            if child_header_range is not None:
+                try:
+                    child_header_box = range_box(child_header_range)
+                except (TypeError, ValueError):
+                    continue
+                child_header_boxes.append((child_path, child_header_range, child_header_box))
+            if child_data_range is not None:
+                try:
+                    child_data_box = range_box(child_data_range)
+                except (TypeError, ValueError):
+                    continue
+                child_data_boxes.append((child_path, child_data_range, child_data_box))
+
+    if data_box is not None:
+        for child_path, child_header_range, child_header_box in child_header_boxes:
+            if intersects(data_box, child_header_box):
+                errors.append(
+                    f"{path}.data_range overlaps {child_path}.header_range: "
+                    f"{data_range} vs {child_header_range}"
+                )
+        for child_path, child_data_range, child_data_box in child_data_boxes:
+            if not contains(data_box, child_data_box):
+                errors.append(
+                    f"{child_path}.data_range is not contained by parent {path}.data_range: "
+                    f"{child_data_range} vs {data_range}"
+                )
+
+    if header_box is not None and child_header_boxes:
+        for child_path, child_header_range, child_header_box in child_header_boxes:
+            if orientation == "column":
+                if child_header_box[0] < header_box[0] or child_header_box[2] > header_box[2]:
+                    errors.append(
+                        f"{child_path}.header_range columns are outside parent {path}.header_range: "
+                        f"{child_header_range} vs {header_range}"
+                    )
+                if child_header_box[1] <= header_box[3]:
+                    errors.append(
+                        f"{child_path}.header_range must be below parent {path}.header_range: "
+                        f"{child_header_range} vs {header_range}"
+                    )
+            else:
+                if child_header_box[1] < header_box[1] or child_header_box[3] > header_box[3]:
+                    errors.append(
+                        f"{child_path}.header_range rows are outside parent {path}.header_range: "
+                        f"{child_header_range} vs {header_range}"
+                    )
+                if child_header_box[0] <= header_box[2]:
+                    errors.append(
+                        f"{child_path}.header_range must be right of parent {path}.header_range: "
+                        f"{child_header_range} vs {header_range}"
+                    )
+
+
 workbook_path, sheet_name, structure_path = sys.argv[1:4]
 with open(structure_path, "r", encoding="utf-8") as handle:
     structure = yaml.safe_load(handle) or {}
@@ -273,14 +444,17 @@ workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
 errors = []
 try:
     worksheet = workbook[sheet_name]
+    used_box = range_box(worksheet.calculate_dimension())
     for path, value in walk(structure):
         try:
-            min_col, min_row, max_col, max_row = range_boundaries(str(value))
+            min_col, min_row, max_col, max_row = range_box(value)
         except (TypeError, ValueError):
             errors.append(f"{path} is not a valid A1 range: {value}")
             continue
         if min_row < 1 or min_col < 1 or max_row > 1048576 or max_col > 16384:
             errors.append(f"{path} is outside Excel worksheet bounds: {value}")
+    for path, header in walk_headers(structure):
+        check_header(worksheet, path, header, used_box, errors)
 finally:
     workbook.close()
 

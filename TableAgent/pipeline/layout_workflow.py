@@ -29,6 +29,8 @@ class LayoutWorkflowResult:
     iterations: int
     image_path: Path | None
     changelog_path: Path
+    events_path: Path
+    responses: list[Any]
 
 
 class TableLayoutWorkflow:
@@ -64,7 +66,7 @@ class TableLayoutWorkflow:
         (output_dir / "metadata.yaml").write_text(metadata_text, encoding="utf-8")
 
         structure_text = structure_path.read_text(encoding="utf-8") if structure_path.is_file() else ""
-        table_range = (metadata.table_candidates or [metadata.used_range])[0]
+        table_range = metadata.used_range
         start = initial_viewport(
             table_range,
             rows=self.settings.viewport_rows,
@@ -81,6 +83,7 @@ class TableLayoutWorkflow:
             "status": "not_good",
             "feedback": "No viewport has been verified.",
         }
+        responses: list[Any] = []
         first_image: Path | None = None
         iteration = 0
 
@@ -121,6 +124,7 @@ class TableLayoutWorkflow:
                 iteration=iteration,
                 iteration_dir=iteration_dir,
             )
+            responses.append(layout.response)
             structure_text = layout.structure_text
             (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
             (iteration_dir / "changelog.md").write_text(layout.changelog + "\n", encoding="utf-8")
@@ -137,6 +141,7 @@ class TableLayoutWorkflow:
                 iteration=iteration,
                 iteration_dir=iteration_dir,
             )
+            responses.append(verification.response)
             last_verification = {
                 "status": verification.status,
                 "feedback": verification.feedback,
@@ -188,7 +193,7 @@ class TableLayoutWorkflow:
                         self._enqueue_shift(queue, task.viewport, task.direction, successful_viewports, table_range)
 
             suggested = [Direction.parse(value) for value in layout.directions]
-            discovered = [direction for direction in suggested if direction is not None]
+            discovered = [direction for direction in suggested if direction in frontier]
             if not discovered:
                 discovered = frontier
             for direction in discovered:
@@ -208,6 +213,8 @@ class TableLayoutWorkflow:
             iterations=iteration,
             image_path=first_image,
             changelog_path=changelog_path,
+            events_path=events_path,
+            responses=responses,
         )
 
     def _enqueue_shift(

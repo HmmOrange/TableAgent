@@ -6,7 +6,7 @@ from pathlib import Path
 import openpyxl
 import yaml
 
-from TableAgent.agents import LayoutAgent, VerificationAgent
+from TableAgent.agents import LayoutAgent, VerificationAgent, _VERIFIER_CODE, _execute_verifier
 from TableAgent.config import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
 from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
@@ -83,9 +83,31 @@ def _workbook(path: Path) -> None:
     worksheet.title = "Sheet1"
     worksheet["A1"] = "Region"
     worksheet["A2"] = "North"
+    for row in range(3, 11):
+        worksheet[f"A{row}"] = f"Region {row}"
     worksheet["B2"] = 12.5
     worksheet["B2"].number_format = "0.00"
     workbook.save(path)
+
+
+def _hierarchical_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet["A1"] = "Month"
+    worksheet["A2"] = "In"
+    worksheet["B2"] = "Out"
+    worksheet["A3"] = 1
+    worksheet["B3"] = 2
+    workbook.save(path)
+
+
+def _run_verifier(tmp_path: Path, workbook_path: Path, structure: dict) -> dict:
+    verifier_path = tmp_path / "verification.py"
+    structure_path = tmp_path / "structure_after.yaml"
+    verifier_path.write_text(_VERIFIER_CODE, encoding="utf-8")
+    structure_path.write_text(yaml.safe_dump(structure, sort_keys=False), encoding="utf-8")
+    return _execute_verifier(verifier_path, workbook_path, "Sheet1", structure_path)
 
 
 def test_direction_queue_uses_required_priority():
@@ -114,7 +136,6 @@ def test_exstruct_payload_becomes_metadata_yaml(tmp_path: Path):
                     {"r": 2, "c": {"A": "North", "B": 12.5}},
                 ],
                 "merged_ranges": ["A1:B1"],
-                "table_candidates": ["A1:B2"],
             }
         }
     }
@@ -123,11 +144,76 @@ def test_exstruct_payload_becomes_metadata_yaml(tmp_path: Path):
 
     assert metadata.used_range == "A1:B2"
     assert metadata.merged_ranges == ["A1:B1"]
-    assert metadata.table_candidates == ["A1:B2"]
-    assert metadata.number_formats == {"0.00": ["B2"]}
-    assert list(yaml.safe_load(metadata.to_yaml())) == [
-        "sheet_name", "used_range", "merged_ranges", "number_formats", "table_candidates"
-    ]
+    assert list(yaml.safe_load(metadata.to_yaml())) == ["sheet_name", "used_range", "merged_ranges"]
+
+
+def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _hierarchical_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Movement",
+            "description": "Movement by month",
+            "headers": [{
+                "label": "Month",
+                "description": "Month group",
+                "orientation": "column",
+                "header_range": "A1:B1",
+                "data_range": "A3:B3",
+                "sub_headers": [
+                    {
+                        "label": "In",
+                        "description": "Inbound",
+                        "orientation": "column",
+                        "header_range": "A2:A2",
+                        "data_range": "A3:A3",
+                    },
+                    {
+                        "label": "Out",
+                        "description": "Outbound",
+                        "orientation": "column",
+                        "header_range": "B2:B2",
+                        "data_range": "B3:B3",
+                    },
+                ],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report == {"status": "good", "errors": []}
+
+
+def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _hierarchical_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Movement",
+            "description": "Movement by month",
+            "headers": [{
+                "label": "Month",
+                "description": "Month group",
+                "orientation": "column",
+                "header_range": "A1:A2",
+                "data_range": "A2:B3",
+                "sub_headers": [{
+                    "label": "In",
+                    "description": "Inbound",
+                    "orientation": "column",
+                    "header_range": "A2:A2",
+                    "data_range": "A3:A3",
+                }],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["status"] == "not_good"
+    assert any("header_range contains unrelated text" in error for error in report["errors"])
+    assert any("data_range overlaps" in error for error in report["errors"])
 
 
 def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path):
@@ -142,7 +228,7 @@ def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path)
         LayoutAgent(StaticLayoutVLM()),
         VerificationAgent(GoodVerificationLLM()),
     )
-    metadata = SheetMetadata("Sheet1", "A1:AN10", [], {}, ["A1:AN10"])
+    metadata = SheetMetadata("Sheet1", "A1:AN10", [])
 
     result = workflow.run(
         workbook_path=workbook_path,
@@ -182,7 +268,7 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path):
     result = workflow.run(
         workbook_path=workbook_path,
         sheet_name="Sheet1",
-        metadata=SheetMetadata("Sheet1", "A1:A2", [], {}, ["A1:A2"]),
+        metadata=SheetMetadata("Sheet1", "A1:A2", []),
         output_dir=tmp_path / "retry-artifacts",
     )
 
@@ -192,3 +278,33 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path):
     assert header["header_range"] is None
     assert header["data_range"] is None
     assert "retries exhausted" in (tmp_path / "retry-artifacts" / "changelog.md").read_text().lower()
+
+
+def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path):
+    class RightSuggestingLayoutVLM(StaticLayoutVLM):
+        def generate_with_image(self, prompt, image_path, system_prompt=None):
+            response = yaml.safe_load(super().generate_with_image(prompt, image_path, system_prompt).content)
+            response["remaining_directions"] = ["right"]
+            return LLMResponse(content=yaml.safe_dump(response, sort_keys=False))
+
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    settings = _settings(tmp_path)
+    renderer = WorkbookRenderer(settings, RecordingRenderer(), logger=None)
+    workflow = TableLayoutWorkflow(
+        settings,
+        renderer,
+        LayoutAgent(RightSuggestingLayoutVLM()),
+        VerificationAgent(GoodVerificationLLM()),
+    )
+
+    workflow.run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata=SheetMetadata("Sheet1", "A1:Q51", []),
+        output_dir=tmp_path / "bounded-artifacts",
+    )
+
+    events = [json.loads(line) for line in (tmp_path / "bounded-artifacts" / "events.jsonl").read_text().splitlines()]
+    assert [event["viewport"] for event in events] == ["A1:T20", "A16:T35", "A31:T50"]
+    assert all(event["direction"] != "right" for event in events)

@@ -3,8 +3,8 @@
 TableAgent is the image-assisted table-structure and question-answering pipeline used by
 the `table_agent` benchmark option. It converts table inputs into workbooks and images,
 asks layout and verification agents for a grounded `structure.yaml`, and then asks the
-QA agent to answer the sample question. Prepared XLSX sources use an ExStruct-backed,
-multi-viewport MAS; the per-sample fallback retains the legacy single-image loop.
+QA agent to answer the sample question. Prepared XLSX sources and transient per-sample
+workbooks both use the same multi-viewport MAS layout and verification workflow.
 
 This document describes the current implementation under `TableAgent/`. The legacy
 import path `pipelines.table_agent_pipeline` is only a compatibility shim.
@@ -23,7 +23,7 @@ uv run ise-table --dataset siflex --pipeline table_agent --limit 5 --repeats 1
 Run the focused tests with:
 
 ```bash
-uv run pytest tests/test_table_agent_pipeline.py tests/test_openai_llm.py -q
+uv run pytest tests/test_table_agent_mas.py tests/test_table_agent_pipeline.py -q
 ```
 
 ## Architecture
@@ -52,7 +52,7 @@ Code outside this package still participates in the pipeline:
   benchmark-run artifact scoping.
 - [`../cli/__init__.py`](../cli/__init__.py) calls `set_run_id()`, `prepare_samples()`,
   and `run()` during evaluation.
-- [`../prompts/table_agent.py`](../prompts/table_agent.py) contains the layout,
+- [`prompts.py`](prompts.py) contains the layout,
   verification, answer, and reranker templates.
 - [`../utils/workbook_converter.py`](../utils/workbook_converter.py) normalizes benchmark
   samples into `.xlsx` workbooks.
@@ -81,17 +81,16 @@ flowchart TD
     Retrieve -->|prepared SiFlex candidate| PreparedAnswer[Image answer with text fallback]
     Retrieve -->|no candidate| Convert[Sample to table.xlsx]
     Convert --> Render[Render table.png and table.html]
-    Render --> Layout[Layout VLM proposes structure]
-    Layout --> Normalize[Strict YAML extraction and normalization]
-    Normalize --> Verify[Verifier returns good or feedback]
-    Verify -->|not_good and rounds remain| Layout
-    Verify --> Persist[Persist valid structure and trace]
+    Render --> Layout[LayoutAgent updates structure and changelog]
+    Layout --> Verify[Deterministic verifier plus VerificationAgent]
+    Verify -->|not_good and retries remain| Layout
+    Verify --> Persist[Persist valid MAS structure artifacts]
     Persist --> TextAnswer[Text answer model]
 ```
 
-There are two execution paths because SiFlex questions can reference one or more source
-workbooks with many worksheets. HiTab and MulHi normally use the standard per-sample
-path.
+SiFlex questions can reference one or more source workbooks with many worksheets, so
+they pre-encode reusable source artifacts. HiTab and MulHi normally create a transient
+workbook per sample, then run the same MAS workflow on that workbook.
 
 ## Standard per-sample flow
 
@@ -100,13 +99,12 @@ retrieved:
 
 1. Build a stable sample artifact directory from `sample_id`, `table_id`, and question.
 2. Convert the sample to `table.xlsx`.
-3. Render the workbook as `table.png` and `table.html`.
-4. Send the image plus bounded text context to the layout VLM.
-5. Extract only the supported YAML schema and save discarded model prose as a thinking
-   trace.
-6. Ask the verifier for `status: good` or actionable feedback.
-7. Repeat layout generation with that feedback for at most
-   `max_refinement_rounds + 1` total layout attempts.
+3. Derive lightweight sheet metadata from the workbook.
+4. Render coordinate-labelled viewports, copying the first viewport to `table.png` and
+   `table.html`.
+5. Ask LayoutAgent to update the structure, emit a changelog, and suggest directions.
+6. Have VerificationAgent run deterministic range checks and review the result.
+7. Traverse and retry viewports using the same MAS queue used by prepared sources.
 8. Persist `structure.yaml` only when it passes the local structural sanity check.
 9. Ask the answer LLM using the table text and final structure.
 10. Return the answer, token usage, verification result, and artifact paths in
@@ -149,7 +147,7 @@ At question time, `SourceRetriever`:
 
 ## `structure.yaml` contract
 
-Prepared XLSX sources use table keys (the legacy fallback still accepts `headers`):
+MAS structure extraction persists table keys:
 
 ```yaml
 table1:
@@ -169,15 +167,17 @@ Required semantics:
 - `label` is a meaningful label observed or safely inferred from the table. Do not use
   placeholders such as `Header`, `Column 1`, or `UNKNOWN`.
 - `description` explains the specific semantic role of the header.
-- `orientation` is `row`, `column`, or `mixed`.
+- `orientation` is `row` or `column`.
 - `header_range` and `data_range` are exact A1-style references supported by the viewport.
 - Use `null` when exact coordinates cannot be determined. Never guess.
 - `sub_headers` is always a list for top-level headers and may be empty.
 - Sub-headers use the same range fields; deeper nesting is not part of the current schema.
 
-`extract_strict_structure()` accepts fenced or unfenced YAML, removes unsupported keys,
-normalizes fields, and separates discarded prose from persisted YAML. Uncertainty
-sentinels such as `UNKNOWN`, `uncertain`, and `N/A` are normalized to `null` ranges.
+`extract_layout_structure()` parses the MAS envelope, removes control keys from
+persisted YAML, and normalizes uncertainty sentinels such as `UNKNOWN`, `uncertain`,
+and `N/A` to `null` ranges. `extract_strict_structure()` remains available from the
+compatibility shim for older callers of the legacy `headers` utility surface, but it is
+not used by active structure extraction.
 
 The verifier must return:
 
@@ -207,22 +207,22 @@ broaden an invalid range.
 
 ## Prompt templates
 
-Prompt constants live in [`../prompts/table_agent.py`](../prompts/table_agent.py), while
+Prompt constants live in [`prompts.py`](prompts.py), while
 `pipeline/prompting.py` binds sample data to those templates.
 
 | Template | Model | Purpose |
 | --- | --- | --- |
-| `LAYOUT_*` | Layout VLM | Produce strict header hierarchy and A1/null ranges |
-| `VERIFICATION_*` | Answer LLM | Return `good` or corrective feedback |
+| `LAYOUT_MAS_*` | Layout VLM | Update MAS structure, changelog, and traversal directions |
+| `VERIFICATION_MAS_*` | Answer LLM | Review deterministic verifier output and return `good` or corrective feedback |
 | `ANSWER_*` | Answer LLM | Produce only the final benchmark answer |
 | `RERANKER_*` | Answer LLM | Select a prepared SiFlex worksheet |
 
 When changing a prompt:
 
 1. Keep the parser contract and prompt schema synchronized.
-2. Add a focused assertion in `tests/test_table_agent_pipeline.py`.
+2. Add a focused assertion in `tests/test_table_agent_mas.py` or `tests/test_table_agent_pipeline.py`.
 3. Test fenced YAML, prose around YAML, malformed output, and `null` ranges as relevant.
-4. Inspect `thinking_trace.txt` after a real run for runaway reasoning.
+4. Inspect `iterations/*/layout_discarded.txt` after a real run for runaway reasoning.
 5. Compare both accuracy and token usage; prompt changes can alter refinement count.
 
 ## Configuration
@@ -287,13 +287,18 @@ TableAgent/outputs/
 │   │       ├── metadata.json
 │   │       ├── structure.yaml       # success
 │   │       ├── structure.error      # failure; mutually exclusive with YAML
-│   │       └── thinking_trace.txt   # present only when prose was discarded
+│   │       ├── changelog.md
+│   │       ├── events.jsonl
+│   │       └── iterations/
 │   └── repeat_<n>/<sample_id>/<hash>/
 │       ├── table.xlsx
 │       ├── table.png
 │       ├── table.html
 │       ├── structure.yaml           # present only when locally valid
-│       ├── thinking_trace.txt       # optional
+│       ├── metadata.yaml
+│       ├── changelog.md
+│       ├── events.jsonl
+│       ├── iterations/
 │       ├── metadata.json            # optional image-tile metadata
 │       └── table_tile_*.png         # only when tiling is enabled
 ├── evaluations/<dataset>-table_agent-<timestamp>/
@@ -333,7 +338,7 @@ source answering.
 Keep changes surgical and place them at the narrowest ownership boundary:
 
 - Add or change orchestration in `pipeline/table_agent_pipeline.py`.
-- Change prompt wording or answer formats in `prompts/table_agent.py` and
+- Change prompt wording or answer formats in `prompts.py` and
   `pipeline/prompting.py`.
 - Add YAML schema or grounding rules in `perception/structure.py`.
 - Change source indexing or candidate scoring in `pipeline/retrieval.py`.
@@ -361,8 +366,8 @@ When a run produces a wrong answer or structure:
 1. Open `table.png` or `table.html` and confirm the displayed coordinates.
 2. Compare every YAML range against those coordinates; distinguish global combined-sheet
    coordinates from table-local row numbers.
-3. Check `thinking_trace.txt` for reasoning that consumed the response before YAML was
-   emitted.
+3. Check `iterations/*/layout_discarded.txt` for prose that was discarded before YAML
+   was persisted.
 4. Inspect report metadata for verifier status and feedback.
 5. Inspect worker logs for connection errors, retries, and whether each call was text or
    vision.
@@ -379,7 +384,7 @@ model-server disconnections, and exact-match formatting disagreements.
 
 - Preserve `range: null` as the uncertainty representation; do not invent coordinates.
 - Keep persisted YAML schema-only. Model reasoning belongs in logs or
-  `thinking_trace.txt`.
+  `iterations/*/layout_discarded.txt`.
 - Do not treat local YAML validity as proof of workbook grounding.
 - Keep standard and prepared-source behavior explicit; changes to one path should not
   silently affect the other.

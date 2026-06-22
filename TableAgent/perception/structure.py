@@ -146,9 +146,9 @@ def _normalize_header(header: Any, *, include_sub_headers: bool) -> dict[str, An
     if not label:
         return None
 
-    orientation = str(header.get("orientation") or "mixed").strip().lower()
-    if orientation not in {"row", "column", "mixed"}:
-        orientation = "mixed"
+    orientation = str(header.get("orientation") or "column").strip().lower()
+    if orientation not in {"row", "column"}:
+        orientation = "column"
     cell_range = header.get("range")
     if cell_range is not None:
         cell_range = str(cell_range).strip() or None
@@ -337,9 +337,9 @@ def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[
     label = str(header.get("label") or "").strip()
     if not label:
         return None
-    orientation = str(header.get("orientation") or "mixed").strip().lower()
-    if orientation not in {"row", "column", "mixed"}:
-        orientation = "mixed"
+    orientation = str(header.get("orientation") or "column").strip().lower()
+    if orientation not in {"row", "column"}:
+        orientation = "column"
 
     normalized = {
         "label": label,

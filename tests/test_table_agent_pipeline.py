@@ -21,22 +21,24 @@ class FakeLLM:
             return LLMResponse(
                 content=yaml.safe_dump(
                     {
-                        "headers": [
-                            {
-                                "label": "Revenue",
+                        "structure": {
+                            "table1": {
+                                "name": "Revenue",
                                 "description": "Company revenue values by year",
-                                "orientation": "column",
-                                "range": "B1:B3",
-                                "sub_headers": [
+                                "headers": [
                                     {
-                                        "label": "2024",
-                                        "description": "Revenue for fiscal year 2024",
+                                        "label": "Revenue",
+                                        "description": "Company revenue values by year",
                                         "orientation": "column",
-                                        "range": "B2:B2",
+                                        "header_range": "B1:B1",
+                                        "data_range": "B2:B2",
+                                        "sub_headers": [],
                                     }
                                 ],
                             }
-                        ]
+                        },
+                        "changelog": "Added Revenue header.",
+                        "remaining_directions": [],
                     },
                     sort_keys=False,
                 ),
@@ -63,27 +65,29 @@ class FakeLayoutVLM:
         self.calls.append((prompt, Path(image_path), system_prompt))
         structure = yaml.safe_dump(
             {
-                "headers": [
-                    {
-                        "label": "Revenue",
+                "structure": {
+                    "table1": {
+                        "name": "Revenue",
                         "description": "Company revenue values by year",
-                        "orientation": "column",
-                        "range": "B1:B3",
-                        "sub_headers": [
+                        "headers": [
                             {
-                                "label": "2024",
-                                "description": "Revenue for fiscal year 2024",
+                                "label": "Revenue",
+                                "description": "Company revenue values by year",
                                 "orientation": "column",
-                                "range": "B2:B2",
+                                "header_range": "B1:B1",
+                                "data_range": "B2:B2",
+                                "sub_headers": [],
                             }
                         ],
                     }
-                ]
+                },
+                "changelog": "Added Revenue header.",
+                "remaining_directions": [],
             },
             sort_keys=False,
         )
         return LLMResponse(
-            content=f"Inspected the visible headers and ranges.\n```yaml\n{structure}```",
+            content=f"```yaml\n{structure}```",
             prompt_tokens=10,
             completion_tokens=5,
         )
@@ -134,16 +138,16 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     structure_path = Path(output.metadata["structure_path"])
     assert structure_path.is_file()
     structure = yaml.safe_load(structure_path.read_text(encoding="utf-8"))
-    assert structure["headers"][0]["label"] == "Revenue"
-    thinking_trace_path = Path(output.metadata["thinking_trace_path"])
-    assert thinking_trace_path.read_text(encoding="utf-8") == "Inspected the visible headers and ranges."
+    assert structure["table1"]["headers"][0]["label"] == "Revenue"
     assert Path(output.metadata["workbook_path"]).is_file()
     assert Path(output.metadata["image_path"]).is_file()
     assert Path(output.metadata["html_path"]).is_file()
+    assert Path(output.metadata["changelog_path"]).is_file()
+    assert Path(output.metadata["events_path"]).is_file()
     assert output.metadata["workbook_sheets"] == ["table-1"]
     assert len(renderer.calls) == 1
     assert len(layout_vlm.calls) == 1
-    assert layout_vlm.calls[0][1] == Path(output.metadata["image_path"])
+    assert layout_vlm.calls[0][1].name == "viewport.png"
     assert output.token_usage == {"prompt": 20, "completion": 8}
 
 
@@ -487,13 +491,18 @@ def test_is_valid_structure_rules():
     assert _is_valid_structure("headers:\n  - name: Column 1\n  - name: Net Profit")
 
 
-def test_table_agent_prompts_prefer_and_verify_null_ranges():
-    from prompts.table_agent import LAYOUT_SYSTEM_PROMPT, VERIFICATION_SYSTEM_PROMPT
+def test_table_agent_mas_prompts_preserve_null_ranges():
+    from TableAgent.prompts import (
+        LAYOUT_MAS_SYSTEM_PROMPT,
+        LAYOUT_MAS_USER_PROMPT_TEMPLATE,
+        VERIFICATION_MAS_SYSTEM_PROMPT,
+    )
 
-    assert "when uncertain, set range to null" in LAYOUT_SYSTEM_PROMPT
-    assert "Never guess a range" in LAYOUT_SYSTEM_PROMPT
-    assert "A range value of null is valid" in VERIFICATION_SYSTEM_PROMPT
-    assert "do not reject a structure solely because a range is null" in VERIFICATION_SYSTEM_PROMPT
+    assert "use null instead of guessing a range" in LAYOUT_MAS_SYSTEM_PROMPT
+    assert "header_range` is only the cell or merged/spanned cells" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "data starts below all header and sub-header rows" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "must not include child `header_range` cells" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "null_fields" in VERIFICATION_MAS_SYSTEM_PROMPT
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -552,12 +561,21 @@ def test_table_agent_persists_only_strict_structure(tmp_path: Path):
         def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
             return LLMResponse(
                 content="""Analysis that belongs in logs.
-headers:
-  - label: Revenue
+```yaml
+structure:
+  table1:
+    name: Revenue
     description: Annual revenue
-    orientation: column
-    range: B1:B3
-    sub_headers: []""",
+    headers:
+      - label: Revenue
+        description: Annual revenue
+        orientation: column
+        header_range: B1:B1
+        data_range: B2:B2
+        sub_headers: []
+changelog: Added revenue.
+remaining_directions: []
+```""",
                 prompt_tokens=10,
                 completion_tokens=5,
             )
@@ -580,7 +598,7 @@ headers:
     output = pipeline.run(sample)
     persisted = Path(output.metadata["structure_path"]).read_text(encoding="utf-8")
 
-    assert persisted.startswith("headers:")
+    assert persisted.startswith("table1:")
     assert "Analysis that belongs in logs" not in persisted
 
 

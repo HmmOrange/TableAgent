@@ -431,7 +431,8 @@ def wrap_html(fragment: str, *, title: str = "") -> str:
     body {{
       color: #111827;
       display: inline-block;
-      font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR",
+        "NanumGothic", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
       font-size: 14px;
       line-height: 1.35;
       padding: 24px;
@@ -813,6 +814,10 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
 
 def _load_table_font(image_font, size: int, *, bold: bool):
     candidates = [
+        Path("C:/Windows/Fonts/malgunbd.ttf" if bold else "C:/Windows/Fonts/malgun.ttf"),
+        Path("C:/Windows/Fonts/NanumGothicBold.ttf" if bold else "C:/Windows/Fonts/NanumGothic.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf" if bold else "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
         Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
