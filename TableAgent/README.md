@@ -82,7 +82,7 @@ flowchart TD
     Retrieve -->|no candidate| Convert[Sample to table.xlsx]
     Convert --> Render[Render table.png and table.html]
     Render --> Layout[LayoutAgent updates structure and changelog]
-    Layout --> Verify[Deterministic verifier plus VerificationAgent]
+    Layout --> Verify[Deterministic verifier observation plus ReAct VerificationAgent]
     Verify -->|not_good and retries remain| Layout
     Verify --> Persist[Persist valid MAS structure artifacts]
     Persist --> TextAnswer[Text answer model]
@@ -103,7 +103,8 @@ retrieved:
 4. Render coordinate-labelled viewports, copying the first viewport to `table.png` and
    `table.html`.
 5. Ask LayoutAgent to update the structure, emit a changelog, and suggest directions.
-6. Have VerificationAgent run deterministic range checks and review the result.
+6. Have VerificationAgent run deterministic range checks, review the observation with
+   a ReAct-style semantic pass, and optionally apply an `updated_structure`.
 7. Traverse and retry viewports using the same MAS queue used by prepared sources.
 8. Persist `structure.yaml` only when it passes the local structural sanity check.
 9. Ask the answer LLM using the table text and final structure.
@@ -123,7 +124,8 @@ Before repeats begin, the CLI calls `prepare_samples()`:
 3. Start at the top-left cell of the first table candidate (or used range fallback).
 4. Render a coordinate-labelled cell viewport, defaulting to 20 rows by 20 columns.
 5. Ask LayoutAgent to update `structure.yaml`, emit a changelog, and suggest directions.
-6. Have VerificationAgent write and execute `verification.py`, then review its report.
+6. Have VerificationAgent write and execute `verification.py`, then perform semantic
+   ReAct review over the deterministic report.
 7. Traverse `stay`, `right`, `down`, `left`, and `up` through a priority queue. Cardinal
    shifts default to 15 cells. A direction receives one extra attempt after its first
    verified zero-change viewport and stops after the second.
@@ -133,7 +135,36 @@ Before repeats begin, the CLI calls `prepare_samples()`:
 
 Each loop directory contains its image/HTML, prompts, raw responses, before/after
 structures, changelog, generated verifier, verifier output, and discarded layout prose.
-`events.jsonl` is the compact traversal index.
+When semantic review edits the candidate structure, the loop also writes
+`structure_semantic.yaml` and `verification_output_after_semantic.json`. `events.jsonl`
+is the compact traversal index.
+
+### Verification and ReAct repair
+
+Verification has two layers:
+
+1. `verification.py` is deterministic workbook-backed code. It checks A1 syntax,
+   worksheet bounds, visible header text, merged-cell expansion, data/header overlap,
+   parent/child containment, and simple range repairs that can be proved from the
+   workbook.
+2. `VerificationAgent` receives that report as a tool observation and responds with a
+   ReAct-style YAML envelope: `thought`, `action`, `observation`, `status`, `feedback`,
+   `null_fields`, and optionally `updated_structure`.
+
+The deterministic report is intentionally not the final authority. It can be too strict
+for VLM/OCR artifacts such as line breaks, multilingual labels, whitespace differences,
+or obvious visual spans. If semantic review can confidently repair or accept the full
+structure, it returns `updated_structure`; the pipeline writes that YAML back to
+`structure_after.yaml` and carries it forward as the current structure. The repaired
+structure is rerun through the deterministic verifier for diagnostics and written to
+`verification_output_after_semantic.json`. If the deterministic report still says
+`not_good` but semantic review marks the updated structure `good`, the workflow accepts
+the semantic decision and continues.
+
+If semantic review cannot produce a valid complete structure, the workflow keeps the
+candidate structure, feeds `feedback` back to LayoutAgent, and retries the same viewport
+with `stay` until `max_retry`. After retry exhaustion, only fields listed in
+`null_fields` are set to `null`.
 
 At question time, `SourceRetriever`:
 
@@ -182,6 +213,9 @@ not used by active structure extraction.
 The verifier must return:
 
 ```yaml
+thought: deterministic ranges align with the visible header.
+action: accept
+observation: no repair is needed.
 status: good
 feedback: Structure is supported by the table.
 null_fields: []
@@ -190,9 +224,23 @@ null_fields: []
 or:
 
 ```yaml
+thought: the data range overlaps a child header.
+action: repair_structure
+observation: the corrected range starts below the child header.
 status: not_good
 feedback: Correct the 2024 header range from B1 to B2.
 null_fields: [table1.headers[0].header_range]
+updated_structure:
+  table1:
+    name: Revenue
+    description: Annual company revenue
+    headers:
+      - label: Year
+        description: Fiscal year labels
+        orientation: column
+        header_range: A1:A1
+        data_range: A2:A12
+        sub_headers: []
 ```
 
 A `null` range is valid and must not be the sole reason for rejection. A missing range
@@ -202,8 +250,9 @@ key and an invalid or unsupported A1 reference should be rejected.
 
 `_is_valid_structure()` remains a local sanity check. The generated `verification.py`
 adds deterministic A1 syntax and Excel-bound checks, while VerificationAgent judges
-visible header semantics and data-range correctness. Neither layer should silently
-broaden an invalid range.
+visible header semantics and data-range correctness. VerificationAgent may replace the
+candidate with a complete `updated_structure`, but the update must remain schema-valid
+and should change only fields needed by the deterministic observation or semantic review.
 
 ## Prompt templates
 
@@ -213,7 +262,7 @@ Prompt constants live in [`prompts.py`](prompts.py), while
 | Template | Model | Purpose |
 | --- | --- | --- |
 | `LAYOUT_MAS_*` | Layout VLM | Update MAS structure, changelog, and traversal directions |
-| `VERIFICATION_MAS_*` | Answer LLM | Review deterministic verifier output and return `good` or corrective feedback |
+| `VERIFICATION_MAS_*` | Answer LLM | ReAct semantic review over deterministic verifier output; may return `updated_structure` |
 | `ANSWER_*` | Answer LLM | Produce only the final benchmark answer |
 | `RERANKER_*` | Answer LLM | Select a prepared SiFlex worksheet |
 
@@ -222,7 +271,8 @@ When changing a prompt:
 1. Keep the parser contract and prompt schema synchronized.
 2. Add a focused assertion in `tests/test_table_agent_mas.py` or `tests/test_table_agent_pipeline.py`.
 3. Test fenced YAML, prose around YAML, malformed output, and `null` ranges as relevant.
-4. Inspect `iterations/*/layout_discarded.txt` after a real run for runaway reasoning.
+4. Inspect `iterations/*/layout_discarded.txt` and
+   `iterations/*/verification_discarded.txt` after a real run for runaway reasoning.
 5. Compare both accuracy and token usage; prompt changes can alter refinement count.
 
 ## Configuration
@@ -272,7 +322,8 @@ Prepared source directories contain `metadata.yaml`, `structure.yaml`, `changelo
 `events.jsonl`, and `iterations/`. Each iteration directory is named with its sequence,
 direction, and A1 viewport and contains `viewport.png`, `viewport.html`, layout and
 verification prompts/responses, before/after structures, `verification.py`, and
-`verification_output.json`.
+`verification_output.json`. Semantic verifier edits add `structure_semantic.yaml`,
+`verification_output_after_semantic.json`, and optionally `verification_discarded.txt`.
 
 Benchmark CLI runs use this structure:
 
@@ -369,16 +420,36 @@ When a run produces a wrong answer or structure:
 3. Check `iterations/*/layout_discarded.txt` for prose that was discarded before YAML
    was persisted.
 4. Inspect report metadata for verifier status and feedback.
-5. Inspect worker logs for connection errors, retries, and whether each call was text or
+5. If `structure_semantic.yaml` exists, compare it with `structure_before.yaml` and
+   `verification_output_after_semantic.json`; semantic review may have accepted a
+   structure despite a strict deterministic mismatch.
+6. Inspect worker logs for connection errors, retries, and whether each call was text or
    vision.
-6. For SiFlex, inspect `retrieval_info`, candidate sheet names, lexical score, reranker
+7. For SiFlex, inspect `retrieval_info`, candidate sheet names, lexical score, reranker
    index, and fallback flag.
-7. Check whether the answer double-counted subtotal or total rows.
-8. Check evaluator conventions such as decimal-versus-percent formatting.
+8. Check whether the answer double-counted subtotal or total rows.
+9. Check evaluator conventions such as decimal-versus-percent formatting.
 
 Common failure classes include valid-looking but shifted A1 ranges, table-local ranges in
 a combined workbook, verifier false positives, missing YAML after runaway reasoning,
 model-server disconnections, and exact-match formatting disagreements.
+
+## Current Flow Boundaries
+
+The implemented MAS loop matches the high-level diagram of metadata extraction,
+viewport rendering, LayoutAgent updates, VerificationAgent review, retry, directional
+traversal, and final structure output. A few boundaries are explicit in code:
+
+- Direction traversal expands only after a viewport verifies as `good`. A failing
+  viewport retries with `stay`; it does not enqueue right/down/left/up until accepted.
+- `remaining_directions` from LayoutAgent is advisory and bounded by the sheet
+  `used_range`. If no valid direction is suggested, the workflow falls back to all
+  valid frontier directions.
+- A direction with a verified zero-change viewport gets one extra shift in the same
+  direction. If the next verified viewport also has no change, that direction stops.
+- There is no persistent experience pool yet. Agents have in-process message memory and
+  the run leaves artifacts for humans or future tooling, but no retrieval-backed memory
+  is injected into prompts.
 
 ## Development principles
 

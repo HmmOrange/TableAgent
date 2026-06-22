@@ -491,18 +491,21 @@ def test_is_valid_structure_rules():
     assert _is_valid_structure("headers:\n  - name: Column 1\n  - name: Net Profit")
 
 
-def test_table_agent_mas_prompts_preserve_null_ranges():
+def test_table_agent_mas_prompts_assign_nulling_to_verifier():
     from TableAgent.prompts import (
         LAYOUT_MAS_SYSTEM_PROMPT,
         LAYOUT_MAS_USER_PROMPT_TEMPLATE,
         VERIFICATION_MAS_SYSTEM_PROMPT,
     )
 
-    assert "use null instead of guessing a range" in LAYOUT_MAS_SYSTEM_PROMPT
+    assert "never output null, UNKNOWN, or placeholder range values" in LAYOUT_MAS_SYSTEM_PROMPT
     assert "header_range` is only the cell or merged/spanned cells" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "data starts below all header and sub-header rows" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "must not include child `header_range` cells" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "null_fields" in VERIFICATION_MAS_SYSTEM_PROMPT
+    assert "ReAct pattern" in VERIFICATION_MAS_SYSTEM_PROMPT
+    assert "updated_structure" in VERIFICATION_MAS_SYSTEM_PROMPT
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():

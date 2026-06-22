@@ -53,6 +53,26 @@ class GoodVerificationLLM:
         return LLMResponse(content="status: good\nfeedback: Verified.\nnull_fields: []\n")
 
 
+class SemanticRepairVerificationLLM:
+    model_name = "semantic-verifier"
+    temperature = 0.0
+
+    def __init__(self, structure: dict, status: str = "good"):
+        self.structure = structure
+        self.status = status
+
+    def generate(self, prompt, system_prompt=None):
+        return LLMResponse(content=yaml.safe_dump({
+            "thought": "The deterministic report identifies a range issue.",
+            "action": "repair_structure",
+            "observation": "Semantic review can correct the persisted structure.",
+            "status": self.status,
+            "feedback": "Applied semantic structure repair.",
+            "null_fields": [],
+            "updated_structure": self.structure,
+        }, sort_keys=False))
+
+
 class RecordingRenderer:
     def __init__(self):
         self.ranges = []
@@ -99,6 +119,30 @@ def _hierarchical_workbook(path: Path) -> None:
     worksheet["B2"] = "Out"
     worksheet["A3"] = 1
     worksheet["B3"] = 2
+    workbook.save(path)
+
+
+def _merged_header_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:B1")
+    worksheet["A1"] = "Month\nPlan"
+    worksheet["A2"] = "North"
+    worksheet["B2"] = "South"
+    workbook.save(path)
+
+
+def _adjacent_merged_header_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:B1")
+    worksheet.merge_cells("C1:D1")
+    worksheet["A1"] = "First"
+    worksheet["C1"] = "Second"
+    worksheet["C2"] = 1
+    worksheet["D2"] = 2
     workbook.save(path)
 
 
@@ -182,7 +226,8 @@ def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path
 
     report = _run_verifier(tmp_path, workbook_path, structure)
 
-    assert report == {"status": "good", "errors": []}
+    assert report["status"] == "good"
+    assert report["errors"] == []
 
 
 def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
@@ -212,8 +257,170 @@ def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
     report = _run_verifier(tmp_path, workbook_path, structure)
 
     assert report["status"] == "not_good"
-    assert any("header_range contains unrelated text" in error for error in report["errors"])
-    assert any("data_range overlaps" in error for error in report["errors"])
+    assert any("header_range contains multiple unrelated texts" in error for error in report["errors"])
+    assert "table1.headers[0].data_range" in report["null_fields"]
+
+
+def test_verifier_repairs_header_label_and_ranges_from_workbook(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _merged_header_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Plan",
+            "description": "Plan table",
+            "headers": [{
+                "label": "Month \\n Plan",
+                "description": "Month plan",
+                "orientation": "column",
+                "header_range": "B1",
+                "data_range": "B2:B2",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    header = repaired["table1"]["headers"][0]
+
+    assert report["status"] == "good"
+    assert header["label"] == "Month Plan"
+    assert header["header_range"] == "A1:B1"
+    assert header["data_range"] == "A2:B2"
+
+
+def test_verifier_moves_blank_merged_follower_to_next_matching_header(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _adjacent_merged_header_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Adjacent",
+            "description": "Adjacent merged headers",
+            "headers": [{
+                "label": "Second",
+                "description": "Second group",
+                "orientation": "column",
+                "header_range": "B1",
+                "data_range": "B2:B2",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    header = repaired["table1"]["headers"][0]
+
+    assert report["status"] == "good"
+    assert header["header_range"] == "C1:D1"
+    assert header["data_range"] == "C2:D2"
+
+
+def test_verification_agent_applies_semantic_updated_structure(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    bad_structure = {
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "NOT_A_RANGE",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+    repaired_structure = {
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+    iteration_dir = tmp_path / "iteration"
+    iteration_dir.mkdir()
+    structure_text = yaml.safe_dump(bad_structure, sort_keys=False)
+    (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
+
+    result = VerificationAgent(SemanticRepairVerificationLLM(repaired_structure)).run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata_text=SheetMetadata("Sheet1", "A1:A10", []).to_yaml(),
+        structure_text=structure_text,
+        changelog="Added bad range.",
+        viewport_range="A1:T20",
+        iteration=1,
+        iteration_dir=iteration_dir,
+    )
+
+    assert result.status == "good"
+    assert yaml.safe_load(result.structure_text) == repaired_structure
+    assert yaml.safe_load((iteration_dir / "structure_after.yaml").read_text(encoding="utf-8")) == repaired_structure
+    assert (iteration_dir / "structure_semantic.yaml").is_file()
+    assert (iteration_dir / "verification_output_after_semantic.json").is_file()
+
+
+def test_verification_agent_semantic_update_can_override_strict_deterministic_mismatch(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    original_structure = {
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+    semantic_structure = {
+        "table1": {
+            "name": "Sales semantic",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A2",
+                "data_range": "A3:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+    iteration_dir = tmp_path / "semantic-iteration"
+    iteration_dir.mkdir()
+    structure_text = yaml.safe_dump(original_structure, sort_keys=False)
+    (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
+
+    result = VerificationAgent(SemanticRepairVerificationLLM(semantic_structure)).run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata_text=SheetMetadata("Sheet1", "A1:A10", []).to_yaml(),
+        structure_text=structure_text,
+        changelog="Semantic review adjusted header span.",
+        viewport_range="A1:T20",
+        iteration=1,
+        iteration_dir=iteration_dir,
+    )
+    after_semantic = yaml.safe_load((iteration_dir / "verification_output_after_semantic.json").read_text(encoding="utf-8"))
+
+    assert after_semantic["status"] == "not_good"
+    assert result.status == "good"
+    assert yaml.safe_load(result.structure_text) == semantic_structure
 
 
 def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path):

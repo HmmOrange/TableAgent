@@ -123,6 +123,7 @@ class VerificationResult:
     null_fields: list[str]
     report: dict[str, Any]
     response: LLMResponse
+    structure_text: str
 
     @property
     def is_good(self) -> bool:
@@ -158,7 +159,16 @@ class VerificationAgent(BaseTableAgent):
                 "status": "not_good",
                 "errors": ["Candidate structure is empty or invalid."],
             }
-        report_text = json.dumps(report, ensure_ascii=False, indent=2)
+        repaired_structure_text = str(report.get("repaired_structure_yaml") or structure_text)
+        if repaired_structure_text != structure_text:
+            (iteration_dir / "structure_after.yaml").write_text(repaired_structure_text, encoding="utf-8")
+            (iteration_dir / "structure_repaired.yaml").write_text(repaired_structure_text, encoding="utf-8")
+            structure_text = repaired_structure_text
+        report_text = json.dumps(
+            {key: value for key, value in report.items() if key != "repaired_structure_yaml"},
+            ensure_ascii=False,
+            indent=2,
+        )
         (iteration_dir / "verification_output.json").write_text(report_text, encoding="utf-8")
         prompt = VERIFICATION_MAS_USER_PROMPT_TEMPLATE.format(
             metadata_text=metadata_text,
@@ -173,12 +183,38 @@ class VerificationAgent(BaseTableAgent):
         parsed = _parse_yaml_mapping(response.content)
         status = str(parsed.get("status") or "not_good").strip().lower()
         feedback = str(parsed.get("feedback") or response.content).strip()
-        null_fields = parsed.get("null_fields") or []
+        null_fields = report.get("null_fields") or parsed.get("null_fields") or []
         if not isinstance(null_fields, list):
             null_fields = []
-        if report.get("status") != "good":
+        semantic_structure_text, semantic_discarded, _, _ = extract_layout_structure(response.content)
+        semantic_updated = False
+        if semantic_structure_text and _is_valid_structure(semantic_structure_text):
+            semantic_updated = _canonical_yaml(semantic_structure_text) != _canonical_yaml(structure_text)
+            if semantic_updated:
+                structure_text = semantic_structure_text
+                (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
+                (iteration_dir / "structure_semantic.yaml").write_text(structure_text, encoding="utf-8")
+                if semantic_discarded:
+                    (iteration_dir / "verification_discarded.txt").write_text(semantic_discarded, encoding="utf-8")
+                semantic_report = _execute_verifier(verifier_path, workbook_path, sheet_name, iteration_dir / "structure_after.yaml")
+                semantic_report_text = json.dumps(
+                    {key: value for key, value in semantic_report.items() if key != "repaired_structure_yaml"},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                (iteration_dir / "verification_output_after_semantic.json").write_text(
+                    semantic_report_text,
+                    encoding="utf-8",
+                )
+                if semantic_report.get("status") == "good":
+                    report = semantic_report
+                    null_fields = report.get("null_fields") or parsed.get("null_fields") or []
+                    if not isinstance(null_fields, list):
+                        null_fields = []
+        semantic_accepts_update = semantic_updated and status == "good"
+        if report.get("status") != "good" and not semantic_accepts_update:
             status = "not_good"
-            feedback = "; ".join(report.get("errors") or [feedback])
+            feedback = str(report.get("feedback") or "; ".join(report.get("errors") or [feedback]))
         if status not in {"good", "not_good"}:
             status = "not_good"
         self.remember(AgentMessage(
@@ -188,7 +224,7 @@ class VerificationAgent(BaseTableAgent):
             iteration=iteration,
             metadata={"viewport": viewport_range, "status": status},
         ))
-        return VerificationResult(status, feedback, [str(value) for value in null_fields], report, response)
+        return VerificationResult(status, feedback, [str(value) for value in null_fields], report, response, structure_text)
 
 
 class QAAgent(BaseTableAgent):
@@ -250,7 +286,7 @@ import sys
 
 import openpyxl
 import yaml
-from openpyxl.utils.cell import range_boundaries
+from openpyxl.utils.cell import get_column_letter, range_boundaries
 
 
 def walk(value, path=""):
@@ -267,7 +303,12 @@ def walk(value, path=""):
 
 
 def norm(value):
-    return re.sub(r"\\s+", "", str(value or "")).casefold()
+    text = str(value or "").replace("\\\\n", "\\n")
+    return re.sub(r"\\s+", "", text).casefold()
+
+
+def clean_text(value):
+    return re.sub(r"\\s+", " ", str(value or "").replace("\\\\n", "\\n")).strip()
 
 
 def range_box(value):
@@ -275,6 +316,13 @@ def range_box(value):
     if min_col > max_col or min_row > max_row:
         raise ValueError(f"invalid range order: {value}")
     return min_col, min_row, max_col, max_row
+
+
+def box_to_range(box):
+    min_col, min_row, max_col, max_row = box
+    start = f"{get_column_letter(min_col)}{min_row}"
+    end = f"{get_column_letter(max_col)}{max_row}"
+    return start if start == end else f"{start}:{end}"
 
 
 def box_cells(box):
@@ -299,13 +347,71 @@ def contains(outer, inner):
     return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
 
 
-def cell_texts(worksheet, box):
-    texts = []
-    for row, col in sorted(box_cells(box)):
+def merged_box_for(worksheet, box):
+    cells = box_cells(box)
+    for merged in worksheet.merged_cells.ranges:
+        merged_box = (merged.min_col, merged.min_row, merged.max_col, merged.max_row)
+        if cells & box_cells(merged_box):
+            return merged_box
+    return None
+
+
+def next_text_box_right(worksheet, box, used_box):
+    row = box[1]
+    for col in range(box[2] + 1, used_box[2] + 1):
         value = worksheet.cell(row=row, column=col).value
         if value is not None and str(value).strip():
-            texts.append(str(value).strip())
+            candidate = (col, row, col, row)
+            return merged_box_for(worksheet, candidate) or candidate
+    return None
+
+
+def effective_value(worksheet, row, col):
+    value = worksheet.cell(row=row, column=col).value
+    if value is not None:
+        return value
+    for merged in worksheet.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return worksheet.cell(row=merged.min_row, column=merged.min_col).value
+    return None
+
+
+def cell_texts(worksheet, box):
+    texts = []
+    seen = set()
+    for row, col in sorted(box_cells(box)):
+        value = effective_value(worksheet, row, col)
+        if value is not None and str(value).strip():
+            text = clean_text(value)
+            if text not in seen:
+                texts.append(text)
+                seen.add(text)
     return texts
+
+
+def set_null(header, path, field_name, null_fields):
+    header[field_name] = None
+    null_fields.append(f"{path}.{field_name}")
+
+
+def repair_label(header, texts, actions, path):
+    if not texts:
+        return
+    extracted = clean_text(" ".join(texts))
+    current = str(header.get("label") or "")
+    if extracted and (norm(extracted) != norm(current) or clean_text(current) != current):
+        actions.append(f"{path}.label corrected to workbook text {extracted!r}")
+        header["label"] = extracted
+
+
+def repair_data_box(header_box, data_box, orientation, used_box):
+    if orientation == "row":
+        min_col = header_box[2] + 1
+        max_col = data_box[2] if data_box else used_box[2]
+        return min_col, header_box[1], max_col, header_box[3]
+    min_row = header_box[3] + 1
+    max_row = data_box[3] if data_box else used_box[3]
+    return header_box[0], min_row, header_box[2], max_row
 
 
 def walk_headers(structure):
@@ -330,7 +436,7 @@ def walk_header(header, path):
         yield from walk_header(child, f"{path}.sub_headers[{index}]")
 
 
-def check_header(worksheet, path, header, used_box, errors):
+def check_header(worksheet, path, header, used_box, errors, actions, null_fields):
     label = str(header.get("label") or "").strip()
     header_range = header.get("header_range") or header.get("range")
     data_range = header.get("data_range")
@@ -344,33 +450,118 @@ def check_header(worksheet, path, header, used_box, errors):
         try:
             header_box = range_box(header_range)
         except (TypeError, ValueError):
+            set_null(header, path, "header_range", null_fields)
+            if data_range is not None:
+                set_null(header, path, "data_range", null_fields)
             errors.append(f"{path}.header_range is not a valid A1 range: {header_range}")
         else:
+            original_header_box = header_box
+            merged_box = merged_box_for(worksheet, header_box)
+            if merged_box and merged_box != header_box:
+                merged_texts = cell_texts(worksheet, merged_box)
+                direct_value = worksheet.cell(row=original_header_box[1], column=original_header_box[0]).value
+                if (
+                    direct_value is None
+                    and label
+                    and merged_texts
+                    and not any(norm(label) in norm(text) for text in merged_texts)
+                ):
+                    next_box = next_text_box_right(worksheet, merged_box, used_box)
+                    if next_box is not None:
+                        actions.append(
+                            f"{path}.header_range moved from blank merged follower {header_range} "
+                            f"to next workbook header {box_to_range(next_box)}"
+                        )
+                        header_box = next_box
+                    else:
+                        header_box = merged_box
+                else:
+                    actions.append(
+                        f"{path}.header_range expanded from {header_range} to {box_to_range(merged_box)} "
+                        "using workbook merged cells"
+                    )
+                    header_box = merged_box
+                header["header_range"] = box_to_range(header_box)
+                header_range = header["header_range"]
             if not contains(used_box, header_box):
                 errors.append(f"{path}.header_range is outside used range: {header_range}")
             texts = cell_texts(worksheet, header_box)
             normalized_label = norm(label)
             if not texts:
+                set_null(header, path, "header_range", null_fields)
+                if data_range is not None:
+                    set_null(header, path, "data_range", null_fields)
                 errors.append(f"{path}.header_range contains no visible header text: {header_range}")
             elif normalized_label and not any(normalized_label in norm(text) for text in texts):
-                errors.append(f"{path}.header_range does not contain label {label!r}: {header_range}")
-            extras = [text for text in texts if normalized_label and normalized_label not in norm(text)]
-            if extras:
-                errors.append(f"{path}.header_range contains unrelated text {extras!r}: {header_range}")
+                repair_label(header, texts, actions, path)
+            else:
+                repair_label(header, texts, actions, path)
+            if len(texts) > 1:
+                set_null(header, path, "header_range", null_fields)
+                if data_range is not None:
+                    set_null(header, path, "data_range", null_fields)
+                errors.append(f"{path}.header_range contains multiple unrelated texts {texts!r}: {header_range}")
 
     if data_range is not None:
         try:
             data_box = range_box(data_range)
         except (TypeError, ValueError):
+            set_null(header, path, "data_range", null_fields)
             errors.append(f"{path}.data_range is not a valid A1 range: {data_range}")
         else:
             if not contains(used_box, data_box):
+                set_null(header, path, "data_range", null_fields)
                 errors.append(f"{path}.data_range is outside used range: {data_range}")
             if header_box is not None and intersects(data_box, header_box):
-                errors.append(f"{path}.data_range overlaps its header_range: {data_range} vs {header_range}")
+                repaired = repair_data_box(header_box, data_box, orientation, used_box)
+                if contains(used_box, repaired):
+                    actions.append(
+                        f"{path}.data_range shifted from {data_range} to {box_to_range(repaired)} "
+                        "to exclude header cells"
+                    )
+                    data_box = repaired
+                    header["data_range"] = box_to_range(data_box)
+                    data_range = header["data_range"]
+                else:
+                    set_null(header, path, "data_range", null_fields)
+                    errors.append(f"{path}.data_range overlaps its header_range: {data_range} vs {header_range}")
+            if header_box is not None and data_box is not None:
+                if orientation == "column" and (data_box[0] != header_box[0] or data_box[2] != header_box[2]):
+                    repaired = (header_box[0], data_box[1], header_box[2], data_box[3])
+                    actions.append(
+                        f"{path}.data_range realigned from {data_range} to {box_to_range(repaired)} "
+                        "to match header columns"
+                    )
+                    data_box = repaired
+                    header["data_range"] = box_to_range(data_box)
+                    data_range = header["data_range"]
+                if orientation == "row" and (data_box[1] != header_box[1] or data_box[3] != header_box[3]):
+                    repaired = (data_box[0], header_box[1], data_box[2], header_box[3])
+                    actions.append(
+                        f"{path}.data_range realigned from {data_range} to {box_to_range(repaired)} "
+                        "to match header rows"
+                    )
+                    data_box = repaired
+                    header["data_range"] = box_to_range(data_box)
+                    data_range = header["data_range"]
             data_texts = cell_texts(worksheet, data_box)
             if not data_texts:
-                errors.append(f"{path}.data_range contains no visible data: {data_range}")
+                if header_box is not None:
+                    repaired = repair_data_box(header_box, data_box, orientation, used_box)
+                    if contains(used_box, repaired) and cell_texts(worksheet, repaired):
+                        actions.append(
+                            f"{path}.data_range repaired from {data_range} to {box_to_range(repaired)} "
+                            "using the verified header span"
+                        )
+                        data_box = repaired
+                        header["data_range"] = box_to_range(data_box)
+                        data_range = header["data_range"]
+                    else:
+                        set_null(header, path, "data_range", null_fields)
+                        errors.append(f"{path}.data_range contains no visible data: {data_range}")
+                else:
+                    set_null(header, path, "data_range", null_fields)
+                    errors.append(f"{path}.data_range contains no visible data: {data_range}")
 
     sub_headers = header.get("sub_headers") or []
     child_header_boxes = []
@@ -399,12 +590,27 @@ def check_header(worksheet, path, header, used_box, errors):
     if data_box is not None:
         for child_path, child_header_range, child_header_box in child_header_boxes:
             if intersects(data_box, child_header_box):
-                errors.append(
-                    f"{path}.data_range overlaps {child_path}.header_range: "
-                    f"{data_range} vs {child_header_range}"
-                )
+                repaired = repair_data_box(child_header_box, data_box, orientation, used_box)
+                if contains(used_box, repaired):
+                    actions.append(
+                        f"{path}.data_range shifted from {data_range} to {box_to_range(repaired)} "
+                        f"to exclude {child_path}.header_range"
+                    )
+                    data_box = repaired
+                    header["data_range"] = box_to_range(data_box)
+                    data_range = header["data_range"]
+                else:
+                    set_null(header, path, "data_range", null_fields)
+                    errors.append(
+                        f"{path}.data_range overlaps {child_path}.header_range: "
+                        f"{data_range} vs {child_header_range}"
+                    )
         for child_path, child_data_range, child_data_box in child_data_boxes:
             if not contains(data_box, child_data_box):
+                child = header
+                for token in re.findall(r"sub_headers\\[(\\d+)\\]", child_path):
+                    child = child.get("sub_headers", [])[int(token)]
+                set_null(child, child_path, "data_range", null_fields)
                 errors.append(
                     f"{child_path}.data_range is not contained by parent {path}.data_range: "
                     f"{child_data_range} vs {data_range}"
@@ -414,22 +620,30 @@ def check_header(worksheet, path, header, used_box, errors):
         for child_path, child_header_range, child_header_box in child_header_boxes:
             if orientation == "column":
                 if child_header_box[0] < header_box[0] or child_header_box[2] > header_box[2]:
+                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
+                    set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range columns are outside parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
                 if child_header_box[1] <= header_box[3]:
+                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
+                    set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range must be below parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
             else:
                 if child_header_box[1] < header_box[1] or child_header_box[3] > header_box[3]:
+                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
+                    set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range rows are outside parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
                 if child_header_box[0] <= header_box[2]:
+                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
+                    set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range must be right of parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
@@ -440,8 +654,10 @@ workbook_path, sheet_name, structure_path = sys.argv[1:4]
 with open(structure_path, "r", encoding="utf-8") as handle:
     structure = yaml.safe_load(handle) or {}
 
-workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
+workbook = openpyxl.load_workbook(workbook_path, read_only=False, data_only=True)
 errors = []
+actions = []
+null_fields = []
 try:
     worksheet = workbook[sheet_name]
     used_box = range_box(worksheet.calculate_dimension())
@@ -454,9 +670,26 @@ try:
         if min_row < 1 or min_col < 1 or max_row > 1048576 or max_col > 16384:
             errors.append(f"{path} is outside Excel worksheet bounds: {value}")
     for path, header in walk_headers(structure):
-        check_header(worksheet, path, header, used_box, errors)
+        check_header(worksheet, path, header, used_box, errors, actions, null_fields)
 finally:
     workbook.close()
 
-print(json.dumps({"status": "not_good" if errors else "good", "errors": errors}))
+feedback_parts = []
+if actions:
+    feedback_parts.append("VerificationAgent repaired provable workbook-backed fields: " + "; ".join(actions))
+if errors:
+    feedback_parts.append(
+        "VerificationAgent could not repair these fields from workbook code alone. "
+        "LayoutAgent must fill only these exact null fields with concrete A1 ranges/text: "
+        + "; ".join(errors)
+    )
+
+print(json.dumps({
+    "status": "not_good" if errors or null_fields else "good",
+    "errors": errors,
+    "actions": actions,
+    "null_fields": list(dict.fromkeys(null_fields)),
+    "feedback": " ".join(feedback_parts) if feedback_parts else "Structure verified by workbook-backed code.",
+    "repaired_structure_yaml": yaml.safe_dump(structure, sort_keys=False, allow_unicode=True).strip(),
+}, ensure_ascii=False))
 '''

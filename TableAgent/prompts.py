@@ -41,7 +41,7 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "You are LayoutAgent, a spreadsheet layout VLM. Inspect the coordinate-labelled "
     "viewport and update the supplied structure. Return only YAML. Keep verified "
     "existing information, add or correct only evidence visible in the image, and "
-    "use null instead of guessing a range. The first viewport starts at the upper-left "
+    "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
     "only when visible cells show a distinct table start. Report a concise changelog and "
     "cardinal directions that visibly contain continuing headers or table content."
@@ -77,19 +77,22 @@ Range rules:
   orientation, or to the right of it for row orientation.
 - When the viewport shows only continuation data, keep existing verified
   `header_range` values unchanged and extend only the relevant `data_range`.
-- Use `null` for any range you cannot verify exactly from visible coordinates.
+- Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values. If a range is
+  already concrete and you cannot improve it, keep it unchanged. If VerificationAgent
+  asks for a field that is currently null, fill it only with an exact concrete A1
+  range visible in this viewport.
 
 Return only this YAML envelope:
 structure:
   table1:
-    name: <table name or null>
+    name: <table name>
     description: <table purpose>
     headers:
       - label: <visible meaningful label>
         description: <semantic role>
         orientation: <row|column>
-        header_range: <A1 range or null>
-        data_range: <A1 range or null>
+        header_range: <exact A1 range>
+        data_range: <exact A1 range>
         sub_headers: []
 changelog: <concise changes, or "No change.">
 remaining_directions: [<right|down|left|up as supported by visible evidence>]
@@ -99,12 +102,15 @@ current structure unchanged and use changelog: "No change.".
 """
 
 VERIFICATION_MAS_SYSTEM_PROMPT = (
-    "You are a table structure verification agent named VerificationAgent. Review "
-    "the candidate structure, changelog, image "
-    "viewport coordinates, metadata, and deterministic verifier report. Return only "
-    "YAML with status, feedback, and null_fields. status is good or not_good. "
-    "null_fields lists range fields that must become null if retries are exhausted. "
-    "orientation must be either row or column."
+    "You are a table structure verification agent named VerificationAgent. Use a "
+    "ReAct pattern over the candidate structure and deterministic verifier report: "
+    "Thought, Action, Observation, then final status. The deterministic verifier is "
+    "a tool observation, not the only judge; it can be too strict about minor OCR, "
+    "line-break, multilingual-label, or span issues. Return only YAML. If semantic "
+    "review can confidently fix the structure, include updated_structure with the "
+    "full corrected structure.yaml. status is good or not_good. null_fields lists "
+    "range fields that must become null if retries are exhausted. orientation must "
+    "be either row or column."
 )
 
 VERIFICATION_MAS_USER_PROMPT_TEMPLATE = """\
@@ -122,8 +128,31 @@ LayoutAgent changelog.md:
 Deterministic verification result:
 {verification_report}
 
-Return only:
+Use this ReAct-style YAML envelope:
+thought: <brief diagnosis grounded in the deterministic report and visible coordinate semantics>
+action: <accept|repair_structure|request_layout_retry|null_on_retry_exhaustion>
+observation: <what the deterministic report proves and what semantic review resolves>
 status: good|not_good
 feedback: <specific correction or confirmation>
 null_fields: [<dot paths, if any>]
+updated_structure:
+  table1:
+    name: <table name>
+    description: <table purpose>
+    headers:
+      - label: <visible meaningful label>
+        description: <semantic role>
+        orientation: <row|column>
+        header_range: <exact A1 range or null>
+        data_range: <exact A1 range or null>
+        sub_headers: []
+
+Rules:
+- Include updated_structure only when you are correcting or accepting a complete
+  structure.yaml. Omit it if LayoutAgent must inspect another viewport.
+- Preserve existing correct tables and headers; change only fields needed by the
+  deterministic observation or semantic review.
+- A deterministic mismatch caused only by harmless whitespace, line breaks,
+  multilingual text normalization, or visually obvious span semantics can be marked
+  good after updated_structure fixes the persisted YAML.
 """

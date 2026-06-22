@@ -141,6 +141,7 @@ class TableLayoutWorkflow:
                 iteration=iteration,
                 iteration_dir=iteration_dir,
             )
+            structure_text = verification.structure_text
             responses.append(verification.response)
             last_verification = {
                 "status": verification.status,
