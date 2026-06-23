@@ -120,7 +120,9 @@ behavior as a deliberate pipeline change and cover it with tests.
 Before repeats begin, the CLI calls `prepare_samples()`:
 
 1. Collect unique `.xlsx` files and run ExStruct once per workbook.
-2. Write each sheet's non-commented metadata contract to `metadata.yaml`.
+2. Write each sheet's non-commented metadata contract to `metadata.yaml`. If ExStruct
+   omits merged ranges, TableAgent falls back to openpyxl merged-cell geometry and
+   expands the used range to include those merged spans.
 3. Start at the top-left cell of the first table candidate (or used range fallback).
 4. Render a coordinate-labelled cell viewport, defaulting to 20 rows by 20 columns.
 5. Ask LayoutAgent to update `structure.yaml`, emit a changelog, and suggest directions.
@@ -160,6 +162,11 @@ structure is rerun through the deterministic verifier for diagnostics and writte
 `verification_output_after_semantic.json`. If the deterministic report still says
 `not_good` but semantic review marks the updated structure `good`, the workflow accepts
 the semantic decision and continues.
+
+Verifier tool failures are different from strict structural mismatches. The generated
+verifier runs with UTF-8 stdout/stderr, and a traceback, timeout, or invalid JSON is
+tagged as a tool error. Semantic review must not treat a verifier crash as evidence that
+the structure is good.
 
 If semantic review cannot produce a valid complete structure, the workflow keeps the
 candidate structure, feeds `feedback` back to LayoutAgent, and retries the same viewport
@@ -277,10 +284,12 @@ When changing a prompt:
 
 ## Configuration
 
-Defaults are defined in [`../configs/pipelines.yaml`](../configs/pipelines.yaml) and
-overridden by the root [`../config.yaml`](../config.yaml). `TableAgentConfig.from_config()`
-deep-merges explicit construction overrides over the loaded root configuration. The CLI
-then injects run-scoped artifact directories with `run_scoped_table_agent_config()`.
+All TableAgent defaults are defined in
+[`../configs/pipelines.yaml`](../configs/pipelines.yaml). The root
+[`../config.yaml`](../config.yaml) selects and defines model providers without
+duplicating pipeline settings. `TableAgentConfig.from_config()` deep-merges explicit
+construction overrides over those defaults. The CLI then injects run-scoped artifact
+directories with `run_scoped_table_agent_config()`.
 
 Key settings:
 
@@ -309,6 +318,9 @@ Key settings:
 | `viewport_rows` / `viewport_columns` | Viewport dimensions in cells (default 20×20) |
 | `shift_cells` | Cardinal movement distance in cells (default 15) |
 | `max_retry` | Maximum `stay` attempts before ranges become `null` (default 5) |
+
+Prepared-source metadata cache entries use `layout_workflow_version: 3`; older source
+artifacts are regenerated so missing merged-range metadata is not silently reused.
 
 The active answer and layout providers are selected by top-level `llm.provider` and
 `vlm.provider`. Their model blocks may also define `max_tokens`. To leave generation
@@ -395,8 +407,8 @@ Keep changes surgical and place them at the narrowest ownership boundary:
 - Change source indexing or candidate scoring in `pipeline/retrieval.py`.
 - Change SiFlex preprocessing and cache behavior in `pipeline/source_preparer.py`.
 - Change workbook/image behavior in `rendering/`.
-- Add settings to `TableAgentConfig`, `configs/pipelines.yaml`, and the root override as
-  needed; document the precedence.
+- Add pipeline settings to `TableAgentConfig` and `configs/pipelines.yaml`; keep model
+  provider definitions and selections in the local config.
 
 For behavior changes, test the observable contract rather than private implementation
 details. Useful existing coverage includes:

@@ -6,7 +6,13 @@ from pathlib import Path
 import openpyxl
 import yaml
 
-from TableAgent.agents import LayoutAgent, VerificationAgent, _VERIFIER_CODE, _execute_verifier
+from TableAgent.agents import (
+    LayoutAgent,
+    VerificationAgent,
+    _VERIFIER_CODE,
+    _execute_verifier,
+    _union_existing_data_ranges,
+)
 from TableAgent.config import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
 from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
@@ -191,6 +197,27 @@ def test_exstruct_payload_becomes_metadata_yaml(tmp_path: Path):
     assert list(yaml.safe_load(metadata.to_yaml())) == ["sheet_name", "used_range", "merged_ranges"]
 
 
+def test_exstruct_metadata_falls_back_to_workbook_merged_ranges(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _merged_header_workbook(workbook_path)
+    payload = {
+        "sheets": {
+            "Sheet1": {
+                "rows": [
+                    {"r": 1, "c": {"A": "Month Plan"}},
+                    {"r": 2, "c": {"A": "North", "B": "South"}},
+                ],
+                "merged_ranges": [],
+            }
+        }
+    }
+
+    metadata = ExStructMetadataExtractor("light").sheet_metadata(workbook_path, payload, "Sheet1")
+
+    assert metadata.used_range == "A1:B2"
+    assert metadata.merged_ranges == ["A1:B1"]
+
+
 def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     _hierarchical_workbook(workbook_path)
@@ -228,6 +255,35 @@ def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path
 
     assert report["status"] == "good"
     assert report["errors"] == []
+
+
+def test_verifier_outputs_unicode_without_windows_codepage_crash(tmp_path: Path):
+    workbook_path = tmp_path / "unicode.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet["A1"] = "Hạng mục 검사항목"
+    worksheet["A2"] = "Open"
+    workbook.save(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Unicode",
+            "description": "Unicode table",
+            "headers": [{
+                "label": "Hạng mục 검사항목",
+                "description": "Inspection item",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A2:A2",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["status"] == "good"
+    assert not report.get("tool_error")
 
 
 def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
@@ -420,7 +476,92 @@ def test_verification_agent_semantic_update_can_override_strict_deterministic_mi
 
     assert after_semantic["status"] == "not_good"
     assert result.status == "good"
-    assert yaml.safe_load(result.structure_text) == semantic_structure
+    accepted = yaml.safe_load(result.structure_text)
+    assert accepted["table1"]["name"] == "Sales semantic"
+    assert accepted["table1"]["headers"][0]["header_range"] == "A1:A2"
+    assert accepted["table1"]["headers"][0]["data_range"] == "A3:A10"
+
+
+def test_verification_agent_does_not_accept_semantic_good_on_tool_error(tmp_path: Path, monkeypatch):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+    iteration_dir = tmp_path / "tool-error"
+    iteration_dir.mkdir()
+    structure_text = yaml.safe_dump(structure, sort_keys=False)
+    (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
+
+    def broken_verifier(*args, **kwargs):
+        return {
+            "status": "not_good",
+            "errors": ["Traceback: verifier crashed"],
+            "tool_error": True,
+            "feedback": "Deterministic verifier tool failed before validating the structure.",
+        }
+
+    monkeypatch.setattr("TableAgent.agents._execute_verifier", broken_verifier)
+
+    result = VerificationAgent(SemanticRepairVerificationLLM(structure)).run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata_text=SheetMetadata("Sheet1", "A1:A10", []).to_yaml(),
+        structure_text=structure_text,
+        changelog="No change.",
+        viewport_range="A1:T20",
+        iteration=1,
+        iteration_dir=iteration_dir,
+    )
+
+    assert result.status == "not_good"
+    assert "tool failed" in result.feedback.lower()
+
+
+def test_data_range_updates_preserve_union_with_existing_range():
+    previous = yaml.safe_dump({
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A2:A20",
+                "sub_headers": [],
+            }],
+        }
+    }, sort_keys=False)
+    updated = yaml.safe_dump({
+        "table1": {
+            "name": "Sales",
+            "description": "Sales table",
+            "headers": [{
+                "label": "Region",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1:A1",
+                "data_range": "A16:A35",
+                "sub_headers": [],
+            }],
+        }
+    }, sort_keys=False)
+
+    merged = yaml.safe_load(_union_existing_data_ranges(previous, updated))
+
+    assert merged["table1"]["headers"][0]["data_range"] == "A2:A35"
 
 
 def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path):

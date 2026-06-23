@@ -40,6 +40,7 @@ logger = Logger(__name__)
 
 class TableAgentPipeline(BasePipeline):
     name = "table_agent"
+    prepare_samples_before_run = False
     answer_system_prompt = ANSWER_SYSTEM_PROMPT
     answer_user_prompt_template = ANSWER_USER_PROMPT_TEMPLATE
     reranker_system_prompt = RERANKER_SYSTEM_PROMPT
@@ -90,6 +91,7 @@ class TableAgentPipeline(BasePipeline):
         start_time = self.start_timer()
         responses: list[LLMResponse] = []
 
+        self.source_preparer.prepare([sample], regenerate_invalid=False)
         candidate = self.source_retriever.select(sample, responses, self._fit_context)
         if candidate is not None:
             return self._run_prepared_source(sample, candidate, responses, start_time)

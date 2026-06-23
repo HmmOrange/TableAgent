@@ -77,6 +77,14 @@ Range rules:
   orientation, or to the right of it for row orientation.
 - When the viewport shows only continuation data, keep existing verified
   `header_range` values unchanged and extend only the relevant `data_range`.
+  Never replace an existing `data_range` with only the current viewport slice.
+- When extending a `data_range`, use the union of the old range and newly visible
+  cells governed by the same header. Example: if an existing column range is A2:A20
+  and rows 16-35 continue the same data, the updated range must be A2:A35, not
+  A16:A35. For horizontal continuation, union columns the same way.
+- Do not create separate headers for blank cells inside a merged or visually spanned
+  header. Use the full span listed in metadata `merged_ranges` or visible in the
+  viewport, such as C1:L1, instead of C1:C1 plus fake continued headers.
 - Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values. If a range is
   already concrete and you cannot improve it, keep it unchanged. If VerificationAgent
   asks for a field that is currently null, fill it only with an exact concrete A1
@@ -96,6 +104,17 @@ structure:
         sub_headers: []
 changelog: <concise changes, or "No change.">
 remaining_directions: [<right|down|left|up as supported by visible evidence>]
+
+Rules for remaining_directions:
+- `remaining_directions` is only for unexplored perpendicular branches visible from
+  the current viewport. It is not for continuing the current movement axis.
+- If Movement direction is `right`, do not include `right` or `left`.
+- If Movement direction is `left`, do not include `left` or `right`.
+- If Movement direction is `down`, do not include `down` or `up`.
+- If Movement direction is `up`, do not include `up` or `down`.
+- The orchestrator separately decides whether to continue in the same movement
+  direction for fact checking, so never repeat the current direction here.
+- Do not repeat directions. Output at most two directions.
 
 If the viewport does not show a table or only shows empty/non-table context, keep the
 current structure unchanged and use changelog: "No change.".
@@ -155,4 +174,8 @@ Rules:
 - A deterministic mismatch caused only by harmless whitespace, line breaks,
   multilingual text normalization, or visually obvious span semantics can be marked
   good after updated_structure fixes the persisted YAML.
+- A deterministic verifier tool failure, traceback, timeout, or invalid JSON is not
+  proof that the structure is good. Treat it as an observation that the tool must be
+  fixed or rerun; do not mark status good unless updated_structure can be checked
+  against non-crashing deterministic observations.
 """

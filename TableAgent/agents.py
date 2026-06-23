@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from TableAgent.prompts import (
     LAYOUT_MAS_SYSTEM_PROMPT,
@@ -100,8 +103,11 @@ class LayoutAgent(BaseTableAgent):
         )
         iteration_dir.joinpath("layout_response.txt").write_text(response.content, encoding="utf-8")
         updated, discarded, directions, model_changelog = extract_layout_structure(response.content)
+        directions = _normalize_remaining_directions(directions, direction)
         if not _is_valid_structure(updated):
             updated = structure_text
+        else:
+            updated = _union_existing_data_ranges(structure_text, updated)
         changed = bool(updated.strip()) and _canonical_yaml(updated) != _canonical_yaml(structure_text)
         changelog = model_changelog or ("Structure updated." if changed else "No change.")
         if not changed:
@@ -114,6 +120,30 @@ class LayoutAgent(BaseTableAgent):
             metadata={"viewport": viewport_range, "directions": directions, "changed": changed},
         ))
         return LayoutResult(updated, changelog, directions, changed, response, discarded)
+
+
+def _normalize_remaining_directions(directions: list[str], current_direction: str) -> list[str]:
+    current = str(current_direction).strip().lower()
+    opposites = {
+        "right": "left",
+        "left": "right",
+        "down": "up",
+        "up": "down",
+    }
+    blocked = {current}
+    opposite = opposites.get(current)
+    if opposite is not None:
+        blocked.add(opposite)
+
+    normalized: list[str] = []
+    for direction in directions:
+        value = str(direction).strip().lower()
+        if value not in opposites or value in blocked or value in normalized:
+            continue
+        normalized.append(value)
+        if len(normalized) == 2:
+            break
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -189,6 +219,7 @@ class VerificationAgent(BaseTableAgent):
         semantic_structure_text, semantic_discarded, _, _ = extract_layout_structure(response.content)
         semantic_updated = False
         if semantic_structure_text and _is_valid_structure(semantic_structure_text):
+            semantic_structure_text = _union_existing_data_ranges(structure_text, semantic_structure_text)
             semantic_updated = _canonical_yaml(semantic_structure_text) != _canonical_yaml(structure_text)
             if semantic_updated:
                 structure_text = semantic_structure_text
@@ -211,7 +242,11 @@ class VerificationAgent(BaseTableAgent):
                     null_fields = report.get("null_fields") or parsed.get("null_fields") or []
                     if not isinstance(null_fields, list):
                         null_fields = []
-        semantic_accepts_update = semantic_updated and status == "good"
+        semantic_accepts_update = (
+            semantic_updated
+            and status == "good"
+            and not report.get("tool_error")
+        )
         if report.get("status") != "good" and not semantic_accepts_update:
             status = "not_good"
             feedback = str(report.get("feedback") or "; ".join(report.get("errors") or [feedback]))
@@ -253,12 +288,116 @@ def _canonical_yaml(text: str) -> Any:
         return text.strip()
 
 
+def _union_existing_data_ranges(previous_text: str, updated_text: str) -> str:
+    try:
+        previous = yaml.safe_load(previous_text) if previous_text.strip() else None
+        updated = yaml.safe_load(updated_text) if updated_text.strip() else None
+    except yaml.YAMLError:
+        return updated_text
+    if not isinstance(previous, dict) or not isinstance(updated, dict):
+        return updated_text
+
+    previous_headers = {
+        _header_identity(path, header): header
+        for path, header in _iter_structure_headers(previous)
+    }
+    changed = False
+    for path, header in _iter_structure_headers(updated):
+        prior = previous_headers.get(_header_identity(path, header))
+        if not prior:
+            continue
+        old_range = prior.get("data_range")
+        new_range = header.get("data_range")
+        orientation = str(header.get("orientation") or prior.get("orientation") or "column").lower()
+        unioned = _union_data_range(old_range, new_range, orientation)
+        if unioned and unioned != new_range:
+            header["data_range"] = unioned
+            changed = True
+    if not changed:
+        return updated_text
+    return yaml.safe_dump(updated, sort_keys=False, allow_unicode=True).strip()
+
+
+def _iter_structure_headers(structure: dict[str, Any]):
+    for table_key, table in structure.items():
+        if not isinstance(table, dict):
+            continue
+        headers = table.get("headers") or []
+        if not isinstance(headers, list):
+            continue
+        for index, header in enumerate(headers):
+            yield from _iter_header_tree(header, f"{table_key}.headers[{index}]")
+
+
+def _iter_header_tree(header: Any, path: str):
+    if not isinstance(header, dict):
+        return
+    yield path, header
+    sub_headers = header.get("sub_headers") or []
+    if not isinstance(sub_headers, list):
+        return
+    for index, child in enumerate(sub_headers):
+        yield from _iter_header_tree(child, f"{path}.sub_headers[{index}]")
+
+
+def _header_identity(path: str, header: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        path,
+        str(header.get("label") or "").strip().casefold(),
+        str(header.get("header_range") or header.get("range") or "").strip().upper(),
+    )
+
+
+def _union_data_range(old_range: Any, new_range: Any, orientation: str) -> str | None:
+    if not old_range or not new_range:
+        return None
+    try:
+        old_box = range_boundaries(str(old_range))
+        new_box = range_boundaries(str(new_range))
+    except (TypeError, ValueError):
+        return None
+
+    if orientation == "row":
+        if old_box[1] != new_box[1] or old_box[3] != new_box[3]:
+            return None
+    else:
+        if old_box[0] != new_box[0] or old_box[2] != new_box[2]:
+            return None
+    if not _boxes_overlap_or_touch(old_box, new_box):
+        return None
+    return _box_to_range((
+        min(old_box[0], new_box[0]),
+        min(old_box[1], new_box[1]),
+        max(old_box[2], new_box[2]),
+        max(old_box[3], new_box[3]),
+    ))
+
+
+def _boxes_overlap_or_touch(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    return not (
+        left[2] + 1 < right[0]
+        or right[2] + 1 < left[0]
+        or left[3] + 1 < right[1]
+        or right[3] + 1 < left[1]
+    )
+
+
+def _box_to_range(box: tuple[int, int, int, int]) -> str:
+    min_col, min_row, max_col, max_row = box
+    start = f"{get_column_letter(min_col)}{min_row}"
+    end = f"{get_column_letter(max_col)}{max_row}"
+    return start if start == end else f"{start}:{end}"
+
+
 def _execute_verifier(
     verifier_path: Path,
     workbook_path: Path,
     sheet_name: str,
     structure_path: Path,
 ) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     try:
         result = subprocess.run(
             [sys.executable, str(verifier_path), str(workbook_path), sheet_name, str(structure_path)],
@@ -266,16 +405,32 @@ def _execute_verifier(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"status": "not_good", "errors": [f"Verifier execution failed: {exc}"]}
+        return {
+            "status": "not_good",
+            "errors": [f"Verifier execution failed: {exc}"],
+            "tool_error": True,
+            "feedback": f"Deterministic verifier tool failed before validating the structure: {exc}",
+        }
     if result.returncode != 0:
-        return {"status": "not_good", "errors": [result.stderr.strip() or "Verifier failed."]}
+        return {
+            "status": "not_good",
+            "errors": [result.stderr.strip() or "Verifier failed."],
+            "tool_error": True,
+            "feedback": "Deterministic verifier tool failed before validating the structure.",
+        }
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {"status": "not_good", "errors": ["Verifier returned invalid JSON."]}
+        return {
+            "status": "not_good",
+            "errors": ["Verifier returned invalid JSON."],
+            "tool_error": True,
+            "feedback": "Deterministic verifier returned invalid JSON and did not validate the structure.",
+        }
 
 
 _VERIFIER_CODE = '''from __future__ import annotations
@@ -283,6 +438,12 @@ _VERIFIER_CODE = '''from __future__ import annotations
 import json
 import re
 import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
 
 import openpyxl
 import yaml

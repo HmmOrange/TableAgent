@@ -217,6 +217,48 @@ def test_table_agent_siflex_retrieval(tmp_path: Path):
     assert "doc_a.xlsx_SheetA/table.png" in output.metadata["image_path"]
 
 
+def test_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "SheetA"
+    worksheet["A1"] = "Apple"
+    workbook_path = tmp_path / "doc_a.xlsx"
+    workbook.save(workbook_path)
+
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/lazy",
+        table_id="siflex-table",
+        table_content="Apple",
+        question="Which sheet has Apple?",
+        answer=["SheetA"],
+        sample_path="data/SiFlex/golden_tests/compiled/golden_cases.json:cases[0]",
+        table_path=str(workbook_path),
+    )
+
+    llm = FakeLLM()
+    llm.generate_with_image = lambda prompt, image_path, system_prompt=None: LLMResponse(
+        content="SheetA", prompt_tokens=15, completion_tokens=3
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=llm,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        renderer=FakeRenderer(),
+    )
+
+    assert pipeline.prepare_samples_before_run is False
+    assert not (tmp_path / "sources").exists()
+
+    output = pipeline.run(sample)
+
+    assert output.predicted_answer == "SheetA"
+    assert (tmp_path / "sources" / "doc_a.xlsx_SheetA" / "structure.yaml").is_file()
+    assert output.metadata["workbook_path"] == str(workbook_path.resolve())
+
+
 def test_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: Path):
     import openpyxl
     wb = openpyxl.Workbook()
@@ -416,7 +458,7 @@ def test_table_agent_siflex_answer_prompt_formatting(tmp_path: Path):
     assert "Organize your final answer in a clear document structure" in prompt
 
 
-def test_table_agent_default_has_no_generation_cap_and_early_breaks(tmp_path: Path):
+def test_table_agent_default_applies_generation_cap_and_early_breaks(tmp_path: Path):
     llm = FakeLLM()
     llm.max_tokens = None
     layout_vlm = FakeLayoutVLM()
@@ -428,8 +470,8 @@ def test_table_agent_default_has_no_generation_cap_and_early_breaks(tmp_path: Pa
         config={"artifact_dir": str(tmp_path)},
         renderer=FakeRenderer(),
     )
-    assert llm.max_tokens is None
-    assert layout_vlm.max_tokens == 4096
+    assert llm.max_tokens == 2048
+    assert layout_vlm.max_tokens == 2048
 
     # Test fit_context truncation
     long_content = "X" * 70000
@@ -496,6 +538,7 @@ def test_table_agent_mas_prompts_assign_nulling_to_verifier():
         LAYOUT_MAS_SYSTEM_PROMPT,
         LAYOUT_MAS_USER_PROMPT_TEMPLATE,
         VERIFICATION_MAS_SYSTEM_PROMPT,
+        VERIFICATION_MAS_USER_PROMPT_TEMPLATE,
     )
 
     assert "never output null, UNKNOWN, or placeholder range values" in LAYOUT_MAS_SYSTEM_PROMPT
@@ -503,9 +546,12 @@ def test_table_agent_mas_prompts_assign_nulling_to_verifier():
     assert "data starts below all header and sub-header rows" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "must not include child `header_range` cells" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "use the union of the old range and newly visible" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "Do not create separate headers for blank cells inside a merged" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "null_fields" in VERIFICATION_MAS_SYSTEM_PROMPT
     assert "ReAct pattern" in VERIFICATION_MAS_SYSTEM_PROMPT
     assert "updated_structure" in VERIFICATION_MAS_SYSTEM_PROMPT
+    assert "tool failure" in VERIFICATION_MAS_USER_PROMPT_TEMPLATE
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
