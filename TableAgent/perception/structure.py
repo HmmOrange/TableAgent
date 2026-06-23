@@ -146,9 +146,9 @@ def _normalize_header(header: Any, *, include_sub_headers: bool) -> dict[str, An
     if not label:
         return None
 
-    orientation = str(header.get("orientation") or "mixed").strip().lower()
-    if orientation not in {"row", "column", "mixed"}:
-        orientation = "mixed"
+    orientation = str(header.get("orientation") or "column").strip().lower()
+    if orientation not in {"row", "column"}:
+        orientation = "column"
     cell_range = header.get("range")
     if cell_range is not None:
         cell_range = str(cell_range).strip() or None
@@ -246,23 +246,10 @@ def nullify_structure_ranges(structure_text: str, field_paths: list[str] | None 
     if not isinstance(parsed, dict):
         return structure_text
 
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in {"range", "header_range", "data_range"}:
-                    value[key] = None
-                else:
-                    visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-
     paths_applied = 0
     for field_path in field_paths or []:
         if _set_range_path_to_null(parsed, field_path):
             paths_applied += 1
-    if not field_paths or paths_applied == 0:
-        visit(parsed)
     return yaml.safe_dump(parsed, sort_keys=False, allow_unicode=True).strip()
 
 
@@ -337,9 +324,9 @@ def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[
     label = str(header.get("label") or "").strip()
     if not label:
         return None
-    orientation = str(header.get("orientation") or "mixed").strip().lower()
-    if orientation not in {"row", "column", "mixed"}:
-        orientation = "mixed"
+    orientation = str(header.get("orientation") or "column").strip().lower()
+    if orientation not in {"row", "column"}:
+        orientation = "column"
 
     normalized = {
         "label": label,

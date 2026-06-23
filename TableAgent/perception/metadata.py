@@ -14,8 +14,6 @@ class SheetMetadata:
     sheet_name: str
     used_range: str | None
     merged_ranges: list[str]
-    number_formats: dict[str, list[str]]
-    table_candidates: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -45,12 +43,14 @@ class ExStructMetadataExtractor:
         sheet_name: str,
     ) -> SheetMetadata:
         sheet = (workbook_payload.get("sheets") or {}).get(sheet_name) or {}
+        workbook_range, workbook_merges = _workbook_sheet_geometry(workbook_path, sheet_name)
+        exstruct_range = _used_range_from_rows(sheet.get("rows") or [])
+        exstruct_merges = [str(value) for value in sheet.get("merged_ranges") or []]
+        merged_ranges = exstruct_merges or workbook_merges
         return SheetMetadata(
             sheet_name=sheet_name,
-            used_range=_used_range_from_rows(sheet.get("rows") or []),
-            merged_ranges=[str(value) for value in sheet.get("merged_ranges") or []],
-            number_formats=_number_formats(workbook_path, sheet_name),
-            table_candidates=[str(value) for value in sheet.get("table_candidates") or []],
+            used_range=_expand_range_to_merges(exstruct_range, merged_ranges) or workbook_range,
+            merged_ranges=merged_ranges,
         )
 
 
@@ -86,19 +86,41 @@ def _used_range_from_rows(rows: list[dict[str, Any]]) -> str | None:
     return f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
 
 
-def _number_formats(workbook_path: Path, sheet_name: str) -> dict[str, list[str]]:
-    """ExStruct 0.8 does not expose formats, so retain them from the source workbook."""
+def _workbook_sheet_geometry(workbook_path: Path, sheet_name: str) -> tuple[str | None, list[str]]:
     import openpyxl
 
-    workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=False)
+    workbook = openpyxl.load_workbook(workbook_path, read_only=False, data_only=False)
     try:
         worksheet = workbook[sheet_name]
-        formats: dict[str, list[str]] = {}
-        for row in worksheet.iter_rows():
-            for cell in row:
-                if cell.value is None or cell.number_format == "General":
-                    continue
-                formats.setdefault(str(cell.number_format), []).append(cell.coordinate)
-        return formats
+        used_range = worksheet.calculate_dimension()
+        if used_range == "A1:A1" and worksheet["A1"].value is None:
+            used_range = None
+        merged_ranges = [str(cell_range) for cell_range in worksheet.merged_cells.ranges]
+        return used_range, merged_ranges
     finally:
         workbook.close()
+
+
+def _expand_range_to_merges(used_range: str | None, merged_ranges: list[str]) -> str | None:
+    if not used_range:
+        return None
+    from openpyxl.utils.cell import range_boundaries
+
+    min_col, min_row, max_col, max_row = range_boundaries(used_range)
+    for merged_range in merged_ranges:
+        try:
+            merge_min_col, merge_min_row, merge_max_col, merge_max_row = range_boundaries(merged_range)
+        except (TypeError, ValueError):
+            continue
+        if (
+            merge_max_row < min_row
+            or merge_min_row > max_row
+            or merge_max_col < min_col
+            or merge_min_col > max_col
+        ):
+            continue
+        min_col = min(min_col, merge_min_col)
+        min_row = min(min_row, merge_min_row)
+        max_col = max(max_col, merge_max_col)
+        max_row = max(max_row, merge_max_row)
+    return f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"

@@ -11,35 +11,6 @@ class PromptBuilder:
         self.settings = settings
         self.templates = templates
 
-    def layout_prompt(self, sample: EvalSample, table_context: str, feedback: str) -> str:
-        feedback_block = f"\nPrevious verification feedback:\n{feedback}\n" if feedback else ""
-        return self.templates.layout_user_prompt_template.format(
-            table_context=table_context,
-            question=sample.question,
-            feedback_block=feedback_block,
-        )
-
-    def verification_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
-        return self.templates.verification_user_prompt_template.format(
-            table_context=table_context,
-            question=sample.question,
-            structure_text=structure_text,
-        )
-
-    def source_layout_prompt(self, table_context: str, feedback: str) -> str:
-        return self.templates.layout_user_prompt_template.format(
-            table_context=table_context,
-            question="Analyze the structure, rows, columns, headers, and metadata of this table.",
-            feedback_block=f"\nPrevious verification feedback:\n{feedback}\n" if feedback else "",
-        )
-
-    def source_verification_prompt(self, table_context: str, structure_text: str) -> str:
-        return self.templates.verification_user_prompt_template.format(
-            table_context=table_context,
-            question="Analyze the structure, rows, columns, headers, and metadata of this table.",
-            structure_text=structure_text,
-        )
-
     def answer_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
         if is_siflex(sample):
             return self._siflex_answer_prompt(sample, table_context, structure_text)

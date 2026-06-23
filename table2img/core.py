@@ -41,6 +41,12 @@ class RenderResult:
     browser_path: Path
 
 
+@dataclass(frozen=True)
+class _FontFace:
+    font: Any
+    codepoints: frozenset[int] | None
+
+
 def table_to_image(
     input_path: str | Path,
     output_path: str | Path | None = None,
@@ -431,7 +437,9 @@ def wrap_html(fragment: str, *, title: str = "") -> str:
     body {{
       color: #111827;
       display: inline-block;
-      font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR",
+        "NanumGothic", "Microsoft YaHei", "Noto Sans CJK SC",
+        "Arial Unicode MS", "Segoe UI", "Noto Sans", Arial, sans-serif;
       font-size: 14px;
       line-height: 1.35;
       padding: 24px;
@@ -763,16 +771,16 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
 
     factor = max(1.0, float(scale))
     font_size = max(12, round(14 * factor))
-    regular_font = _load_table_font(ImageFont, font_size, bold=False)
-    bold_font = _load_table_font(ImageFont, font_size, bold=True)
+    regular_font = _load_table_fonts(ImageFont, font_size, bold=False)
+    bold_font = _load_table_fonts(ImageFont, font_size, bold=True)
     padding = round(8 * factor)
 
     column_widths = [round(90 * factor)] * max_column
     for cell in cells:
         if cell["colspan"] != 1:
             continue
-        font = bold_font if cell["header"] else regular_font
-        text_width = _text_size(cell["text"], font)[0] + padding * 2
+        font_faces = bold_font if cell["header"] else regular_font
+        text_width = _text_size(cell["text"], font_faces)[0] + padding * 2
         column_widths[cell["column"]] = min(round(360 * factor), max(column_widths[cell["column"]], text_width))
 
     wrapped = {}
@@ -801,30 +809,99 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
         bottom = y_positions[min(len(rows), cell["row"] + cell["rowspan"])]
         fill = "#e5e7eb" if cell["header"] else "white"
         draw.rectangle((left, top, right, bottom), fill=fill, outline="#4b5563", width=max(1, round(factor)))
-        draw.multiline_text(
+        _draw_text_with_fallback(
+            draw,
             (left + padding, top + padding),
             wrapped[index],
+            bold_font if cell["header"] else regular_font,
             fill="#111827",
-            font=bold_font if cell["header"] else regular_font,
             spacing=round(3 * factor),
         )
     image.save(output_path, format="PNG")
 
 
-def _load_table_font(image_font, size: int, *, bold: bool):
+def _load_table_fonts(image_font, size: int, *, bold: bool) -> list[_FontFace]:
     candidates = [
         Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
+        Path("C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        Path("C:/Windows/Fonts/malgunbd.ttf" if bold else "C:/Windows/Fonts/malgun.ttf"),
+        Path("C:/Windows/Fonts/NanumGothicBold.ttf" if bold else "C:/Windows/Fonts/NanumGothic.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf" if bold else "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+        Path("C:/Windows/Fonts/arialuni.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
+    faces = []
     for candidate in candidates:
         if candidate.is_file():
-            return image_font.truetype(str(candidate), size=size)
-    return image_font.load_default()
+            faces.append(_FontFace(
+                image_font.truetype(str(candidate), size=size),
+                _font_codepoints(candidate),
+            ))
+    if faces:
+        return faces
+    return [_FontFace(image_font.load_default(), None)]
 
 
-def _text_size(text: str, font) -> tuple[int, int]:
-    box = font.getbbox(text or " ")
-    return box[2] - box[0], box[3] - box[1]
+def _font_codepoints(path: Path) -> frozenset[int] | None:
+    try:
+        from fontTools.ttLib import TTFont
+
+        font = TTFont(str(path), lazy=True, fontNumber=0)
+        try:
+            codepoints = {
+                codepoint
+                for table in font["cmap"].tables
+                for codepoint in table.cmap
+            }
+        finally:
+            font.close()
+        return frozenset(codepoints)
+    except Exception:
+        return None
+
+
+def _text_size(text: str, font_faces: list[_FontFace]) -> tuple[int, int]:
+    lines = str(text or " ").splitlines() or [" "]
+    widths = []
+    heights = []
+    for line in lines:
+        width = 0
+        line_height = 0
+        for char in line or " ":
+            font = _font_for_char(font_faces, char)
+            box = font.getbbox(char)
+            width += box[2] - box[0]
+            line_height = max(line_height, box[3] - box[1])
+        widths.append(width)
+        heights.append(line_height)
+    return max(widths, default=0), sum(heights)
+
+
+def _draw_text_with_fallback(draw, xy: tuple[int, int], text: str, font_faces: list[_FontFace], *, fill: str, spacing: int) -> None:
+    x, y = xy
+    line_height = _text_size("Ag", font_faces)[1] + spacing
+    for line in str(text).splitlines() or [""]:
+        current_x = x
+        for char in line:
+            font = _font_for_char(font_faces, char)
+            draw.text((current_x, y), char, fill=fill, font=font)
+            box = font.getbbox(char)
+            current_x += box[2] - box[0]
+        y += line_height
+
+
+def _font_for_char(font_faces: list[_FontFace], char: str):
+    codepoint = ord(char)
+    for face in font_faces:
+        if face.codepoints is None or codepoint in face.codepoints:
+            return face.font
+    return font_faces[0].font
+
+
+def _load_table_font(image_font, size: int, *, bold: bool):
+    return _load_table_fonts(image_font, size, bold=bold)[0].font
 
 
 def _detect_format(path: Path, input_format: str) -> str:

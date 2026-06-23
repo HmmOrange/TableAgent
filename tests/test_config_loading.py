@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import pytest
+import yaml
 
 from configs import load_config, resolve_llm_config, resolve_vlm_config
 
@@ -21,32 +24,33 @@ def test_config_example_loads_modular_files(monkeypatch):
     assert embedding_cfg["base_url"] == "http://localhost:8024/v1"
 
 
-def test_legacy_root_config_path_falls_back_to_configs(monkeypatch):
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:8024/v1")
+def test_root_config_keeps_pipeline_and_dataset_settings_modular():
+    root_payload = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
     config = load_config("config.yaml")
 
-    # Check that resolving layout VLM for table_agent yields qwen_local_vlm via top-level fallback
+    assert "datasets" not in root_payload
+    assert "table_agent" not in root_payload
+    assert "spreadsheet_agent" not in root_payload
+    assert "straptor" not in root_payload
+    assert "siflex_judge" not in root_payload
+    assert config["datasets"]["hitab"]["xlsx_dir"] == "data/HiTab_xlsx"
+    assert config["table_agent"]["generation_max_tokens"] == 2048
+
     provider_name, _ = resolve_vlm_config(config, "table_agent")
-    assert provider_name == "qwen_local_vlm"
-
-    # Check that resolving embedding for straptor yields openai_embedding via top-level fallback
-    from configs.embedding_config import resolve_embedding_config
-    embedding_provider, embedding_cfg = resolve_embedding_config(config, "straptor")
-    assert embedding_provider == "openai_embedding"
-    assert embedding_cfg["base_url"] == "http://localhost:8001/v1"
+    assert provider_name == "gemma_local_vlm"
 
 
-def test_table_agent_root_config_disables_token_caps():
+def test_table_agent_root_config_applies_pipeline_generation_cap():
     config = load_config("config.yaml")
 
     llm_provider_name, llm_config = resolve_llm_config(config, "table_agent")
     vlm_provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
 
-    assert llm_provider_name == "qwen_local"
+    assert llm_provider_name == "gemma_local"
     assert llm_config["max_tokens"] is None
-    assert vlm_provider_name == "qwen_local_vlm"
+    assert vlm_provider_name == "gemma_local_vlm"
     assert vlm_config["max_tokens"] is None
-    assert config["table_agent"]["generation_max_tokens"] is None
+    assert config["table_agent"]["generation_max_tokens"] == 2048
 
 
 def test_resolve_vlm_provider_from_vlm_models(monkeypatch):

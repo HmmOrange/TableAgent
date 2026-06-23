@@ -23,7 +23,7 @@ class SourcePreparer:
         self.analyze_sheet = analyze_sheet
         self.metadata_extractor = metadata_extractor or ExStructMetadataExtractor(settings.exstruct_mode)
 
-    def prepare(self, samples: list[EvalSample], logger: Any | None = None) -> None:
+    def prepare(self, samples: list[EvalSample], logger: Any | None = None, *, regenerate_invalid: bool = True) -> None:
         if not samples or not is_siflex(samples[0]):
             return
 
@@ -40,8 +40,11 @@ class SourcePreparer:
                 sheet_dir = self.source_dir(source_path, sheet_name)
                 sheet_dir.mkdir(parents=True, exist_ok=True)
                 paths = self._paths(sheet_dir)
-                has_current_structure = self._has_current_valid_structure(
-                    paths["structure"], paths["metadata_json"]
+                structure_exists = paths["structure"].is_file()
+                has_current_structure = (
+                    self._has_current_valid_structure(paths["structure"], paths["metadata_json"])
+                    if regenerate_invalid or not structure_exists
+                    else False
                 )
                 try:
                     metadata = self.metadata_extractor.sheet_metadata(
@@ -58,6 +61,8 @@ class SourcePreparer:
                     continue
 
                 if has_current_structure:
+                    continue
+                if structure_exists and not regenerate_invalid:
                     continue
                 if paths["error"].is_file():
                     continue
@@ -110,7 +115,7 @@ class SourcePreparer:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return False
-        if metadata.get("layout_workflow_version") != 2:
+        if metadata.get("layout_workflow_version") != 3:
             return False
         cached = structure_path.read_text(encoding="utf-8")
         if _is_valid_structure(cached):
@@ -152,7 +157,8 @@ class SourcePreparer:
             "sheet_name": sheet_name,
             "safe_filename": safe_name(source_path.name),
             "safe_sheetname": safe_name(sheet_name),
-            "layout_workflow_version": 2,
-            **metadata.to_dict(),
+            "layout_workflow_version": 3,
+            "used_range": metadata.used_range,
+            "merged_ranges": metadata.merged_ranges,
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
