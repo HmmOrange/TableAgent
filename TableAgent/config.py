@@ -34,6 +34,13 @@ class TableAgentConfig:
     viewport_columns: int
     shift_cells: int
     max_retry: int
+    qa_max_retries: int
+    qa_max_experience_records: int
+    qa_log_path: Path | None
+    qa_max_observation_chars: int
+    qa_max_error_chars: int
+    qa_max_value_repr_chars: int
+
 
     @classmethod
     def from_config(cls, override: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -63,6 +70,12 @@ class TableAgentConfig:
             viewport_columns=int(merged.get("viewport_columns", 20)),
             shift_cells=int(merged.get("shift_cells", 15)),
             max_retry=int(merged.get("max_retry", 5)),
+            qa_max_retries=int(merged.get("qa_max_retries", 3)),
+            qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
+            qa_log_path=_optional_path(merged.get("qa_log_path")),
+            qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
+            qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
+            qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
         )
 
 
