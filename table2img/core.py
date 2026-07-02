@@ -225,7 +225,7 @@ def document_from_xlsx(
     workbook = openpyxl.load_workbook(input_path, data_only=True)
     if sheet is None:
         worksheet = workbook.active
-    elif isinstance(sheet, int) or str(sheet).isdigit():
+    elif isinstance(sheet, int):
         worksheet = workbook.worksheets[int(sheet)]
     else:
         worksheet = workbook[str(sheet)]
