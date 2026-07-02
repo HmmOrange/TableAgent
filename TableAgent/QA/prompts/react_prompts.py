@@ -12,6 +12,12 @@ Available library imports:
 Do not attempt to import `os`, `subprocess`, `sys`, `pathlib`, `shutil`, `socket` or other system/IO modules.
 
 Observation policy:
+- `table_id` and `table_df` are preloaded for the selected table. Inspect `table_df`
+  directly before attempting any other data-loading method. Never search the file
+  system or import IO/system modules.
+- A table ID such as `table_1` is not an A1 range. To inspect a whole table by ID,
+  call `operators.read_table_as_dataframe(table_id, has_headers=False)`. Pass only
+  A1 strings such as `A1:D20` or Header range objects to `read_range*` methods.
 - Do not print whole tables, whole DataFrames, or long lists.
 - Prefer selective inspection: `.shape`, `.columns`, `.head()`, `.tail()`, `.describe()`, filtered rows, counts, and aggregates.
 - The notebook returns compact observations. If an output says it was truncated, run a narrower follow-up cell instead of asking for the entire output.

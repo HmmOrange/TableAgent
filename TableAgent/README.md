@@ -23,7 +23,7 @@ uv run ise-table --dataset siflex --pipeline table_agent --limit 5 --repeats 1
 Run the focused tests with:
 
 ```bash
-uv run pytest tests/test_table_agent_mas.py tests/test_table_agent_pipeline.py -q
+uv run pytest table2img/tests/test_core.py tests/test_table_agent_mas.py tests/test_table_agent_pipeline.py -q
 ```
 
 ## Architecture
@@ -101,7 +101,8 @@ retrieved:
 2. Convert the sample to `table.xlsx`.
 3. Derive lightweight sheet metadata from the workbook.
 4. Render coordinate-labelled viewports, copying the first viewport to `table.png` and
-   `table.html`.
+   `table.html`. Edge viewports are clipped to `used_range`, so a small sheet does not
+   produce rows or columns of blank cells merely to fill the configured viewport.
 5. Ask LayoutAgent to update the structure, emit a changelog, and suggest directions.
 6. Have VerificationAgent run deterministic range checks, review the observation with
    a ReAct-style semantic pass, and optionally apply an `updated_structure`.
@@ -124,12 +125,13 @@ Before repeats begin, the CLI calls `prepare_samples()`:
    omits merged ranges, TableAgent falls back to openpyxl merged-cell geometry and
    expands the used range to include those merged spans.
 3. Start at the top-left cell of the first table candidate (or used range fallback).
-4. Render a coordinate-labelled cell viewport, defaulting to 20 rows by 20 columns.
+4. Render a coordinate-labelled cell viewport, defaulting to 50 rows by 50 columns and
+   clipping the captured range at the sheet's `used_range`.
 5. Ask LayoutAgent to update `structure.yaml`, emit a changelog, and suggest directions.
 6. Have VerificationAgent write and execute `verification.py`, then perform semantic
    ReAct review over the deterministic report.
 7. Traverse `stay`, `right`, `down`, `left`, and `up` through a priority queue. Cardinal
-   shifts default to 15 cells. A direction receives one extra attempt after its first
+   shifts default to 45 cells. A direction receives one extra attempt after its first
    verified zero-change viewport and stops after the second.
 8. Retry a failed viewport with `stay` up to `max_retry`; after exhaustion, set
    unverifiable ranges to `null`.
@@ -315,12 +317,27 @@ Key settings:
 | `retrieval_top_k` | Maximum candidates sent to the reranker |
 | `retrieval_candidate_max_chars` | Text preview budget per candidate |
 | `exstruct_mode` | ExStruct extraction mode for source preparation |
-| `viewport_rows` / `viewport_columns` | Viewport dimensions in cells (default 20×20) |
-| `shift_cells` | Cardinal movement distance in cells (default 15) |
+| `viewport_rows` / `viewport_columns` | Viewport dimensions in cells (default 50×50) |
+| `shift_cells` | Cardinal movement distance in cells (default 45) |
 | `max_retry` | Maximum `stay` attempts before ranges become `null` (default 5) |
 
-Prepared-source metadata cache entries use `layout_workflow_version: 3`; older source
-artifacts are regenerated so missing merged-range metadata is not silently reused.
+### Workbook image fidelity
+
+XLSX rendering preserves merged cells, solid fills, font color/weight/style/size,
+horizontal and vertical alignment, explicit column widths, and explicit row heights.
+This metadata is honored by both the configured Pillow backend and the browser backend.
+If a viewport cuts through a merged cell, its visible fragment retains the anchor value
+and style.
+
+All cell text is kept as UTF-8 in the generated HTML. Pillow selects fonts per character,
+detects missing glyphs without requiring `fontTools`, and searches installed system fonts
+when the preferred multilingual stack does not cover a script. The host still needs at
+least one font containing each requested script; on minimal Linux images, install the
+relevant Noto font families (for example, Noto Sans CJK).
+
+Prepared-source metadata cache entries use `layout_workflow_version: 4`; older source
+artifacts are regenerated so stale rendering or merged-range metadata is not silently
+reused.
 
 The active answer and layout providers are selected by top-level `llm.provider` and
 `vlm.provider`. Their model blocks may also define `max_tokens`. To leave generation

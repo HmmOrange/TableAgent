@@ -41,6 +41,20 @@ class Viewport:
             f"{get_column_letter(end_column)}{end_row}"
         )
 
+    def clipped_a1_range(self, table_range: str | None) -> str:
+        """Return the visible part of this viewport inside the worksheet used range."""
+        if not table_range:
+            return self.a1_range
+        min_col, min_row, max_col, max_row = range_boundaries(table_range)
+        start_col = max(self.column, min_col)
+        start_row = max(self.row, min_row)
+        end_col = min(self.column + self.columns - 1, max_col)
+        end_row = min(self.row + self.rows - 1, max_row)
+        return (
+            f"{get_column_letter(start_col)}{start_row}:"
+            f"{get_column_letter(end_col)}{end_row}"
+        )
+
     @property
     def key(self) -> tuple[int, int]:
         return self.row, self.column

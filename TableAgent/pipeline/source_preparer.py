@@ -11,6 +11,8 @@ from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetad
 from TableAgent.perception.structure import _is_valid_structure
 from TableAgent.pipeline.common import is_siflex, safe_name
 
+LAYOUT_WORKFLOW_VERSION = 4
+
 
 class SourcePreparer:
     def __init__(
@@ -115,7 +117,7 @@ class SourcePreparer:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return False
-        if metadata.get("layout_workflow_version") != 3:
+        if metadata.get("layout_workflow_version") != LAYOUT_WORKFLOW_VERSION:
             return False
         cached = structure_path.read_text(encoding="utf-8")
         if _is_valid_structure(cached):
@@ -157,7 +159,7 @@ class SourcePreparer:
             "sheet_name": sheet_name,
             "safe_filename": safe_name(source_path.name),
             "safe_sheetname": safe_name(sheet_name),
-            "layout_workflow_version": 3,
+            "layout_workflow_version": LAYOUT_WORKFLOW_VERSION,
             "used_range": metadata.used_range,
             "merged_ranges": metadata.merged_ranges,
         }

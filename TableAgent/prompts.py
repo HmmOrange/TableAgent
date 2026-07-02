@@ -43,8 +43,9 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "existing information, add or correct only evidence visible in the image, and "
     "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
-    "only when visible cells show a distinct table start. Report a concise changelog and "
-    "cardinal directions that visibly contain continuing headers or table content."
+    "when visible cells show a distinct table start. Report a concise changelog and "
+    "cardinal directions only when the visible edge shows a potential header continuing "
+    "in that direction."
 )
 
 LAYOUT_MAS_USER_PROMPT_TEMPLATE = """\
@@ -58,6 +59,9 @@ Current structure.yaml:
 {structure_text}
 {feedback_block}
 Range rules:
+- `orientation` describes where the governed data extends from the header: use
+  `column` when values continue downward (including a leftmost label column), and
+  `row` only when values continue horizontally to the right.
 - `header_range` is only the cell or merged/spanned cells that visibly contain the
   header label. It must not include data cells, neighboring headers, or an entire
   visible column/row block.
@@ -93,21 +97,31 @@ Range rules:
 Return only this YAML envelope:
 structure:
   table1:
+    id: <unique stable snake_case table identifier>
     name: <table name>
     description: <table purpose>
+    sheet: <exact worksheet name from metadata>
     headers:
-      - label: <visible meaningful label>
+      - id: <unique stable snake_case identifier>
+        label: <visible meaningful label>
         description: <semantic role>
         orientation: <row|column>
         header_range: <exact A1 range>
         data_range: <exact A1 range>
         sub_headers: []
+  tables2:
+    <table details here if exists>
 changelog: <concise changes, or "No change.">
 remaining_directions: [<right|down|left|up as supported by visible evidence>]
 
 Rules for remaining_directions:
 - `remaining_directions` is only for unexplored perpendicular branches visible from
   the current viewport. It is not for continuing the current movement axis.
+- Include a direction only when cells at that visible edge show a potential header:
+  a label-bearing, merged/spanned, or distinctly header-formatted row or column that
+  appears to continue beyond the viewport in that direction.
+- Data values, blank cells, worksheet bounds, or table content without potential
+  header evidence are not sufficient. If no direction has such evidence, return `[]`.
 - If Movement direction is `right`, do not include `right` or `left`.
 - If Movement direction is `left`, do not include `left` or `right`.
 - If Movement direction is `down`, do not include `down` or `up`.
@@ -156,10 +170,13 @@ feedback: <specific correction or confirmation>
 null_fields: [<dot paths, if any>]
 updated_structure:
   table1:
+    id: <preserved unique stable snake_case table identifier>
     name: <table name>
     description: <table purpose>
+    sheet: <exact worksheet name from metadata>
     headers:
-      - label: <visible meaningful label>
+      - id: <preserved unique stable snake_case identifier>
+        label: <visible meaningful label>
         description: <semantic role>
         orientation: <row|column>
         header_range: <exact A1 range or null>
@@ -171,6 +188,8 @@ Rules:
   structure.yaml. Omit it if LayoutAgent must inspect another viewport.
 - Preserve existing correct tables and headers; change only fields needed by the
   deterministic observation or semantic review.
+- Preserve every existing table and header `id`; assign a unique stable snake_case
+  `id` only when an item is newly created or an older structure does not have one.
 - A deterministic mismatch caused only by harmless whitespace, line breaks,
   multilingual text normalization, or visually obvious span semantics can be marked
   good after updated_structure fixes the persisted YAML.

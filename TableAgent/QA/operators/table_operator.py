@@ -53,6 +53,43 @@ class TableOperators(BaseOperator):
     def get_header(self, table_id: str, header_id: str) -> Optional[Header]:
         return self._structure.get_header(table_id, header_id)
 
+    def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
+        """Read the bounding range covered by a table's verified headers and data."""
+        headers = self.list_headers(table_id)
+        ranges = [cell_range for header in headers for cell_range in (header.header_range, header.data_range)]
+        if not ranges:
+            return pd.DataFrame()
+        sheet = ranges[0].sheet
+        table_range = CellRange(
+            min(cell_range.start_row for cell_range in ranges),
+            min(cell_range.start_col for cell_range in ranges),
+            max(cell_range.end_row for cell_range in ranges),
+            max(cell_range.end_col for cell_range in ranges),
+            sheet,
+        )
+        if not has_headers:
+            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+
+        data_start_row = max(header.header_range.end_row for header in headers) + 1
+        data_range = CellRange(
+            data_start_row,
+            table_range.start_col,
+            table_range.end_row,
+            table_range.end_col,
+            sheet,
+        )
+        rows = self._workbook.read_range(data_range)
+        column_ids = []
+        for column in range(data_range.start_col, data_range.end_col + 1):
+            candidates = [
+                header
+                for header in headers
+                if header.header_range.start_col <= column <= header.header_range.end_col
+            ]
+            candidates.sort(key=lambda header: header.header_range.end_col - header.header_range.start_col)
+            column_ids.append(candidates[0].id if candidates else f"col_{column}")
+        return pd.DataFrame(rows, columns=column_ids)
+
     # Range operators
     def resolve_ranges(
         self,

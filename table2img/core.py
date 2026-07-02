@@ -45,6 +45,7 @@ class RenderResult:
 class _FontFace:
     font: Any
     codepoints: frozenset[int] | None
+    missing_glyph: tuple[tuple[int, int], bytes] | None = None
 
 
 def table_to_image(
@@ -243,6 +244,9 @@ def document_from_xlsx(
         )
     else:
         rows_iter = list(worksheet.iter_rows())
+    cell_styles: list[list[str]] = []
+    column_widths: list[int | None] = []
+    row_heights: list[int | None] = []
     if not rows_iter:
         rows = []
         merged_regions = []
@@ -255,10 +259,15 @@ def document_from_xlsx(
 
         col_letters = [get_column_letter(cell.column) for cell in first_row]
         new_rows = [[""] + col_letters]
+        cell_styles = [[""] * (len(first_row) + 1)]
+        column_widths = [42] + [_xlsx_column_width(worksheet, cell.column) for cell in first_row]
+        row_heights = [24]
         for row in rows_iter:
             row_num = str(row[0].row)
             row_values = [cell.value if cell.value is not None else "" for cell in row]
             new_rows.append([row_num] + row_values)
+            cell_styles.append([""] + [_xlsx_cell_style(cell) for cell in row])
+            row_heights.append(_xlsx_row_height(worksheet, row[0].row))
         rows = new_rows
 
         merged_regions = []
@@ -271,6 +280,11 @@ def document_from_xlsx(
             clipped_last_col = min(merged.max_col, end_col)
             if clipped_first_row > clipped_last_row or clipped_first_col > clipped_last_col:
                 continue
+            anchor = worksheet.cell(merged.min_row, merged.min_col)
+            new_rows[clipped_first_row - start_row + 1][clipped_first_col - start_col + 1] = (
+                anchor.value if anchor.value is not None else ""
+            )
+            cell_styles[clipped_first_row - start_row + 1][clipped_first_col - start_col + 1] = _xlsx_cell_style(anchor)
             merged_regions.append({
                 "first_row": clipped_first_row - start_row + 1,
                 "last_row": clipped_last_row - start_row + 1,
@@ -282,6 +296,9 @@ def document_from_xlsx(
             [cell.value if cell.value is not None else "" for cell in row]
             for row in rows_iter
         ]
+        cell_styles = [[_xlsx_cell_style(cell) for cell in row] for row in rows_iter]
+        column_widths = [_xlsx_column_width(worksheet, cell.column) for cell in rows_iter[0]]
+        row_heights = [_xlsx_row_height(worksheet, row[0].row) for row in rows_iter]
         start_row = rows_iter[0][0].row
         start_col = rows_iter[0][0].column
         end_row = rows_iter[-1][0].row
@@ -294,6 +311,11 @@ def document_from_xlsx(
             clipped_last_col = min(merged.max_col, end_col)
             if clipped_first_row > clipped_last_row or clipped_first_col > clipped_last_col:
                 continue
+            anchor = worksheet.cell(merged.min_row, merged.min_col)
+            rows[clipped_first_row - start_row][clipped_first_col - start_col] = (
+                anchor.value if anchor.value is not None else ""
+            )
+            cell_styles[clipped_first_row - start_row][clipped_first_col - start_col] = _xlsx_cell_style(anchor)
             merged_regions.append({
                 "first_row": clipped_first_row - start_row,
                 "last_row": clipped_last_row - start_row,
@@ -307,6 +329,9 @@ def document_from_xlsx(
         title=worksheet.title,
         merged_regions=merged_regions,
         add_coordinates=add_coordinates,
+        cell_styles=cell_styles,
+        column_widths=column_widths,
+        row_heights=row_heights,
     )
     width, height = estimate_rows_size(rows)
     workbook.close()
@@ -317,6 +342,64 @@ def document_from_xlsx(
         estimated_width=width,
         estimated_height=height,
     )
+
+
+def _xlsx_column_width(worksheet: Any, column: int) -> int | None:
+    from openpyxl.utils import get_column_letter
+
+    dimension = worksheet.column_dimensions.get(get_column_letter(column))
+    if dimension is None or dimension.width is None:
+        return None
+    return max(1, round(float(dimension.width) * 7 + 5))
+
+
+def _xlsx_row_height(worksheet: Any, row: int) -> int | None:
+    dimension = worksheet.row_dimensions.get(row)
+    if dimension is None or dimension.height is None:
+        return None
+    return max(1, round(float(dimension.height) * 96 / 72))
+
+
+def _xlsx_color(color: Any) -> str | None:
+    if color is None:
+        return None
+    if color.type == "rgb" and color.rgb:
+        return f"#{str(color.rgb)[-6:]}"
+    if color.type == "indexed" and color.indexed is not None:
+        from openpyxl.styles.colors import COLOR_INDEX
+
+        index = int(color.indexed)
+        if 0 <= index < len(COLOR_INDEX):
+            return f"#{COLOR_INDEX[index][-6:]}"
+    return None
+
+
+def _xlsx_cell_style(cell: Any) -> str:
+    declarations = []
+    fill = cell.fill
+    if fill and fill.patternType == "solid":
+        color = _xlsx_color(fill.fgColor)
+        if color:
+            declarations.append(f"background-color: {color}")
+    font = cell.font
+    color = _xlsx_color(font.color)
+    if color:
+        declarations.append(f"color: {color}")
+    if font.bold:
+        declarations.append("font-weight: 700")
+    if font.italic:
+        declarations.append("font-style: italic")
+    if font.sz:
+        declarations.append(f"font-size: {float(font.sz):g}pt")
+    alignment = cell.alignment
+    if alignment.horizontal in {"left", "center", "right", "justify"}:
+        declarations.append(f"text-align: {alignment.horizontal}")
+    if alignment.vertical in {"top", "center", "bottom"}:
+        vertical = "middle" if alignment.vertical == "center" else alignment.vertical
+        declarations.append(f"vertical-align: {vertical}")
+    if alignment.wrap_text is False:
+        declarations.append("white-space: nowrap")
+    return "; ".join(declarations)
 
 
 def document_from_rows(rows: Iterable[Iterable[Any] | dict[str, Any]], *, source_format: str) -> TableDocument:
@@ -369,6 +452,9 @@ def rows_to_html(
     title: str = "",
     merged_regions: list[dict[str, Any]] | None = None,
     add_coordinates: bool = False,
+    cell_styles: list[list[str]] | None = None,
+    column_widths: list[int | None] | None = None,
+    row_heights: list[int | None] | None = None,
 ) -> str:
     rows = _rectangularize(rows)
     merge_map: dict[tuple[int, int], tuple[int, int]] = {}
@@ -396,11 +482,20 @@ def rows_to_html(
                     covered.add((row_index, col_index))
 
     lines = ["<table>"]
+    if column_widths:
+        lines.append("<colgroup>")
+        for width in column_widths:
+            style = f' style="width: {width}px"' if width else ""
+            lines.append(f"<col{style}>")
+        lines.append("</colgroup>")
     if title:
         lines.append(f"<caption>{html.escape(title)}</caption>")
 
     for row_index, row in enumerate(rows):
-        lines.append("<tr>")
+        row_style = ""
+        if row_heights and row_index < len(row_heights) and row_heights[row_index]:
+            row_style = f' style="height: {row_heights[row_index]}px"'
+        lines.append(f"<tr{row_style}>")
         for col_index, cell in enumerate(row):
             if (row_index, col_index) in covered:
                 continue
@@ -412,6 +507,10 @@ def rows_to_html(
                 attrs.append(f'colspan="{colspan}"')
             if add_coordinates and (row_index == 0 or col_index == 0):
                 attrs.append('class="excel-coord"')
+            if cell_styles and row_index < len(cell_styles) and col_index < len(cell_styles[row_index]):
+                style = cell_styles[row_index][col_index]
+                if style:
+                    attrs.append(f'style="{html.escape(style, quote=True)}"')
             attr_text = " " + " ".join(attrs) if attrs else ""
             text = _nbsp_pad(_clean_text(cell))
             lines.append(f"<td{attr_text}>{html.escape(text)}</td>")
@@ -438,8 +537,9 @@ def wrap_html(fragment: str, *, title: str = "") -> str:
       color: #111827;
       display: inline-block;
       font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR",
-        "NanumGothic", "Microsoft YaHei", "Noto Sans CJK SC",
-        "Arial Unicode MS", "Segoe UI", "Noto Sans", Arial, sans-serif;
+        "NanumGothic", "Meiryo", "Microsoft JhengHei", "Microsoft YaHei",
+        "Nirmala UI", "Leelawadee UI", "Ebrima", "Noto Sans CJK SC",
+        "Arial Unicode MS", "Segoe UI", "Noto Sans", system-ui, Arial, sans-serif;
       font-size: 14px;
       line-height: 1.35;
       padding: 24px;
@@ -630,7 +730,9 @@ def estimate_rows_size(rows: list[list[Any]]) -> tuple[int, int]:
             max_lines = max(max_lines, max(1, (len(text) // 42) + 1))
         row_heights.append(28 + max_lines * 13)
 
-    width = int(sum(col_widths) + 72)
+    # CSS min-width applies to the content box; account for horizontal padding and
+    # borders as well so a browser viewport never clips the final columns.
+    width = int(sum(max(68, value + 20) for value in col_widths) + 48)
     height = int(sum(row_heights) + 96)
     return width, height
 
@@ -755,13 +857,15 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
             for covered_row in range(row_index, row_index + rowspan):
                 for covered_column in range(column_index, column_index + colspan):
                     occupied.add((covered_row, covered_column))
+            classes = set(cell.get("class", []))
             cells.append({
                 "row": row_index,
                 "column": column_index,
                 "rowspan": rowspan,
                 "colspan": colspan,
                 "text": cell.get_text(" ", strip=True),
-                "header": cell.name == "th" or row_index == 0,
+                "header": cell.name == "th" or row_index == 0 or "excel-coord" in classes,
+                "style": _parse_css_declarations(cell.get("style", "")),
             })
             column_index += colspan
             max_column = max(max_column, column_index)
@@ -771,11 +875,17 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
 
     factor = max(1.0, float(scale))
     font_size = max(12, round(14 * factor))
-    regular_font = _load_table_fonts(ImageFont, font_size, bold=False)
-    bold_font = _load_table_fonts(ImageFont, font_size, bold=True)
+    characters = {char for cell in cells for char in cell["text"]}
+    regular_font = _load_table_fonts(ImageFont, font_size, bold=False, characters=characters)
+    bold_font = _load_table_fonts(ImageFont, font_size, bold=True, characters=characters)
     padding = round(8 * factor)
 
     column_widths = [round(90 * factor)] * max_column
+    col_elements = table.find_all("col")
+    for column_index, column in enumerate(col_elements[:max_column]):
+        width = _css_pixels(_parse_css_declarations(column.get("style", "")).get("width"))
+        if width:
+            column_widths[column_index] = round(width * factor)
     for cell in cells:
         if cell["colspan"] != 1:
             continue
@@ -785,6 +895,10 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
 
     wrapped = {}
     row_heights = [round(38 * factor)] * len(rows)
+    for row_index, row in enumerate(rows):
+        height = _css_pixels(_parse_css_declarations(row.get("style", "")).get("height"))
+        if height:
+            row_heights[row_index] = round(height * factor)
     for index, cell in enumerate(cells):
         available_width = sum(column_widths[cell["column"]:cell["column"] + cell["colspan"]]) - padding * 2
         chars = max(8, int(available_width / max(1, font_size * 0.58)))
@@ -807,38 +921,105 @@ def _capture_with_pillow(html_path: Path, output_path: Path, *, scale: float) ->
         top = y_positions[cell["row"]]
         right = x_positions[cell["column"] + cell["colspan"]]
         bottom = y_positions[min(len(rows), cell["row"] + cell["rowspan"])]
-        fill = "#e5e7eb" if cell["header"] else "white"
+        style = cell["style"]
+        fill = style.get("background-color", "#e5e7eb" if cell["header"] else "white")
+        text_fill = style.get("color", "#111827")
+        is_bold = cell["header"] or style.get("font-weight") in {"bold", "600", "700", "800", "900"}
         draw.rectangle((left, top, right, bottom), fill=fill, outline="#4b5563", width=max(1, round(factor)))
+        text_width, _ = _text_size(wrapped[index], bold_font if is_bold else regular_font)
+        text_x = left + padding
+        if style.get("text-align") == "center":
+            text_x = left + max(padding, (right - left - text_width) / 2)
+        elif style.get("text-align") == "right":
+            text_x = right - padding - text_width
         _draw_text_with_fallback(
             draw,
-            (left + padding, top + padding),
+            (text_x, top + padding),
             wrapped[index],
-            bold_font if cell["header"] else regular_font,
-            fill="#111827",
+            bold_font if is_bold else regular_font,
+            fill=text_fill,
             spacing=round(3 * factor),
         )
     image.save(output_path, format="PNG")
 
 
-def _load_table_fonts(image_font, size: int, *, bold: bool) -> list[_FontFace]:
+def _parse_css_declarations(style: str) -> dict[str, str]:
+    declarations = {}
+    for item in str(style or "").split(";"):
+        name, separator, value = item.partition(":")
+        if separator and name.strip() and value.strip():
+            declarations[name.strip().lower()] = value.strip()
+    return declarations
+
+
+def _css_pixels(value: str | None) -> float | None:
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)px", str(value or "").strip())
+    return float(match.group(1)) if match else None
+
+
+def _load_table_fonts(
+    image_font,
+    size: int,
+    *,
+    bold: bool,
+    characters: set[str] | None = None,
+) -> list[_FontFace]:
     candidates = [
         Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
         Path("C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf"),
         Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
         Path("C:/Windows/Fonts/malgunbd.ttf" if bold else "C:/Windows/Fonts/malgun.ttf"),
         Path("C:/Windows/Fonts/NanumGothicBold.ttf" if bold else "C:/Windows/Fonts/NanumGothic.ttf"),
+        Path("C:/Windows/Fonts/meiryob.ttc" if bold else "C:/Windows/Fonts/meiryo.ttc"),
+        Path("C:/Windows/Fonts/msjhbd.ttc" if bold else "C:/Windows/Fonts/msjh.ttc"),
+        Path("C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/NirmalaB.ttf" if bold else "C:/Windows/Fonts/Nirmala.ttf"),
+        Path("C:/Windows/Fonts/leelawdb.ttf" if bold else "C:/Windows/Fonts/leelawad.ttf"),
+        Path("C:/Windows/Fonts/ebrimabd.ttf" if bold else "C:/Windows/Fonts/ebrima.ttf"),
+        Path("C:/Windows/Fonts/gadugib.ttf" if bold else "C:/Windows/Fonts/gadugi.ttf"),
+        Path("C:/Windows/Fonts/seguisb.ttf" if bold else "C:/Windows/Fonts/seguisym.ttf"),
+        Path("C:/Windows/Fonts/seguiemj.ttf"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf" if bold else "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
         Path("C:/Windows/Fonts/arialuni.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     faces = []
+    loaded_paths = set()
     for candidate in candidates:
         if candidate.is_file():
+            font = image_font.truetype(str(candidate), size=size)
             faces.append(_FontFace(
-                image_font.truetype(str(candidate), size=size),
+                font,
                 _font_codepoints(candidate),
+                _glyph_signature(font, "\U0010ffff"),
             ))
+            loaded_paths.add(candidate.resolve())
+    missing = {
+        char for char in characters or set()
+        if not char.isspace() and not any(_face_has_glyph(face, char) for face in faces)
+    }
+    if missing:
+        for candidate in _system_font_candidates():
+            if candidate.resolve() in loaded_paths:
+                continue
+            try:
+                font = image_font.truetype(str(candidate), size=size)
+            except OSError:
+                continue
+            face = _FontFace(
+                font,
+                _font_codepoints(candidate),
+                _glyph_signature(font, "\U0010ffff"),
+            )
+            supported = {char for char in missing if _face_has_glyph(face, char)}
+            if not supported:
+                continue
+            faces.append(face)
+            loaded_paths.add(candidate.resolve())
+            missing.difference_update(supported)
+            if not missing:
+                break
     if faces:
         return faces
     return [_FontFace(image_font.load_default(), None)]
@@ -893,11 +1074,53 @@ def _draw_text_with_fallback(draw, xy: tuple[int, int], text: str, font_faces: l
 
 
 def _font_for_char(font_faces: list[_FontFace], char: str):
-    codepoint = ord(char)
     for face in font_faces:
-        if face.codepoints is None or codepoint in face.codepoints:
+        if _face_has_glyph(face, char):
             return face.font
     return font_faces[0].font
+
+
+def _face_has_glyph(face: _FontFace, char: str) -> bool:
+    if char.isspace() or ord(char) < 32:
+        return True
+    if face.codepoints is not None:
+        return ord(char) in face.codepoints
+    signature = _glyph_signature(face.font, char)
+    if signature is None:
+        return False
+    return face.missing_glyph is None or signature != face.missing_glyph
+
+
+def _glyph_signature(font: Any, char: str) -> tuple[tuple[int, int], bytes] | None:
+    """Fingerprint a glyph so fallback works even when fontTools is unavailable."""
+    try:
+        mask = font.getmask(char, mode="L")
+        return mask.size, bytes(mask)
+    except (OSError, ValueError):
+        return None
+
+
+def _system_font_candidates() -> list[Path]:
+    windows_root = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    roots = [
+        windows_root,
+        Path("/usr/share/fonts"),
+        Path.home() / ".fonts",
+        Path("/Library/Fonts"),
+        Path.home() / "Library/Fonts",
+    ]
+    candidates = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            candidates.extend(
+                path for path in root.rglob("*")
+                if path.suffix.lower() in {".ttf", ".ttc", ".otf"}
+            )
+        except OSError:
+            continue
+    return sorted(set(candidates), key=lambda path: str(path).lower())
 
 
 def _load_table_font(image_font, size: int, *, bold: bool):

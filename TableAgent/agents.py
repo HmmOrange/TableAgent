@@ -211,8 +211,12 @@ class VerificationAgent(BaseTableAgent):
         response = self.llm.generate(prompt=prompt, system_prompt=VERIFICATION_MAS_SYSTEM_PROMPT)
         (iteration_dir / "verification_response.yaml").write_text(response.content, encoding="utf-8")
         parsed = _parse_yaml_mapping(response.content)
-        status = str(parsed.get("status") or "not_good").strip().lower()
+        parsed_status = parsed.get("status")
+        status = str(parsed_status or "not_good").strip().lower()
         feedback = str(parsed.get("feedback") or response.content).strip()
+        if parsed_status is None and report.get("status") == "good":
+            status = "good"
+            feedback = str(report.get("feedback") or "Deterministic verification passed.")
         null_fields = report.get("null_fields") or parsed.get("null_fields") or []
         if not isinstance(null_fields, list):
             null_fields = []

@@ -9,6 +9,11 @@ from TableAgent.QA.actions.llm_code_generation import get_structure_summary
 from TableAgent.QA.prompts.planner_prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.schema.subtask import SubTask
 
+PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
+Return only one JSON object with a non-empty `subtasks` list. Each subtask must have
+`id`, `description`, `layer` (`inspect` or `synthesis`), and `depends_on` (a list).
+Include at least one inspect subtask and a final synthesis subtask. No prose."""
+
 
 def parse_planner_output(content: str) -> list[SubTask]:
     json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
@@ -88,11 +93,22 @@ class WriteQAPlanAction(BasePlanAction):
         try:
             subtasks = parse_planner_output(raw_response)
         except ValueError as exc:
-            self.env.logger.log_event("planner_error", {
-                "error": str(exc),
-                "raw_response": raw_response,
-            })
-            raise
+            repair_prompt = (
+                f"Question: {request.question}\nTable id: {request.table_id}\n"
+                "Convert the attempted plan below into the required concise JSON.\n\n"
+                f"Attempted plan:\n{raw_response[-6000:]}"
+            )
+            repair_response = self.llm_client.generate(repair_prompt, system_prompt=PLAN_REPAIR_SYSTEM_PROMPT)
+            raw_response = repair_response.content
+            self.env.logger.log_event("planner_repair_response", {"content": raw_response})
+            try:
+                subtasks = parse_planner_output(raw_response)
+            except ValueError:
+                self.env.logger.log_event("planner_error", {
+                    "error": str(exc),
+                    "raw_response": raw_response,
+                })
+                raise exc
 
         for subtask in subtasks:
             if not subtask.metadata:

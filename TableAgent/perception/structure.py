@@ -287,14 +287,17 @@ def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
         if not isinstance(headers, list) or not headers:
             return None
         normalized_headers = []
+        used_ids: set[str] = set()
         for header in headers:
-            normalized = _normalize_layout_header(header, include_sub_headers=True)
+            normalized = _normalize_layout_header(header, include_sub_headers=True, used_ids=used_ids)
             if normalized is None:
                 return None
             normalized_headers.append(normalized)
         normalized_tables[key] = {
+            "id": str(table.get("id") or key).strip(),
             "name": str(table.get("name") or "").strip() or None,
             "description": str(table.get("description") or "").strip(),
+            "sheet": str(table.get("sheet") or "").strip() or None,
             "headers": normalized_headers,
         }
     return normalized_tables
@@ -318,7 +321,12 @@ def _table_mappings(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return tables
 
 
-def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[str, Any] | None:
+def _normalize_layout_header(
+    header: Any,
+    *,
+    include_sub_headers: bool,
+    used_ids: set[str],
+) -> dict[str, Any] | None:
     if not isinstance(header, dict):
         return None
     label = str(header.get("label") or "").strip()
@@ -328,7 +336,16 @@ def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[
     if orientation not in {"row", "column"}:
         orientation = "column"
 
+    base_id = re.sub(r"[^a-z0-9]+", "_", str(header.get("id") or label).strip().lower()).strip("_") or "header"
+    header_id = base_id
+    suffix = 2
+    while header_id in used_ids:
+        header_id = f"{base_id}_{suffix}"
+        suffix += 1
+    used_ids.add(header_id)
+
     normalized = {
+        "id": header_id,
         "label": label,
         "description": str(header.get("description") or "").strip(),
         "orientation": orientation,
@@ -341,7 +358,7 @@ def _normalize_layout_header(header: Any, *, include_sub_headers: bool) -> dict[
             return None
         normalized_sub_headers = []
         for sub_header in sub_headers:
-            child = _normalize_layout_header(sub_header, include_sub_headers=False)
+            child = _normalize_layout_header(sub_header, include_sub_headers=False, used_ids=used_ids)
             if child is None:
                 return None
             normalized_sub_headers.append(child)

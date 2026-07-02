@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 import openpyxl
+import yaml
 from datasets.base import EvalSample
 from pipelines.base import BasePipeline, PipelineOutput
 from TableAgent.prompts import (
@@ -20,6 +22,7 @@ from utils.log.logger import Logger
 
 from TableAgent.config import TableAgentConfig
 from TableAgent.agents import LayoutAgent, QAAgent, VerificationAgent
+from TableAgent.QA.runner import TableQARunner
 from TableAgent.perception.metadata import SheetMetadata
 from TableAgent.perception.structure import _is_valid_structure
 from TableAgent.pipeline.common import (
@@ -119,8 +122,12 @@ class TableAgentPipeline(BasePipeline):
         image_path = sample_dir / "table.png"
         html_path = sample_dir / "table.html"
         table_context = self._fit_context(sample.table_content)
-        answer_response = self.qa_agent.run(
-            prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
+        answer_response, qa_info = self._run_verified_qa(
+            question=sample.question,
+            structure_path=structure_path,
+            workbook_path=workbook.path,
+            qa_artifact_dir=sample_dir / "qa",
+            fallback_prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
         )
         responses.append(answer_response)
 
@@ -146,6 +153,7 @@ class TableAgentPipeline(BasePipeline):
                 "changelog_path": display_path(workflow_result.changelog_path),
                 "events_path": display_path(workflow_result.events_path),
                 "iteration_artifact_dir": display_path(sample_dir / "iterations"),
+                "qa": qa_info,
             },
         )
 
@@ -188,10 +196,14 @@ class TableAgentPipeline(BasePipeline):
     ) -> PipelineOutput:
         image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
         fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
-        answer_response = self.qa_agent.run(
-            prompt=image_prompt,
-            image_path=candidate.image_path,
-            fallback_prompt=fallback_prompt,
+        answer_response, qa_info = self._run_verified_qa(
+            question=sample.question,
+            structure_path=candidate.directory / "structure.yaml",
+            workbook_path=candidate.workbook_path,
+            qa_artifact_dir=candidate.directory / "qa",
+            fallback_prompt=image_prompt,
+            fallback_image_path=candidate.image_path,
+            fallback_text_prompt=fallback_prompt,
         )
         responses.append(answer_response)
         retrieval_info = {"score": candidate.score, "fallback_used": getattr(candidate, "fallback_used", False)}
@@ -223,8 +235,89 @@ class TableAgentPipeline(BasePipeline):
                 "changelog_path": display_path(candidate.directory / "changelog.md"),
                 "events_path": display_path(candidate.directory / "events.jsonl"),
                 "iteration_artifact_dir": display_path(candidate.directory / "iterations"),
+                "qa": qa_info,
             },
         )
+
+    def _run_verified_qa(
+        self,
+        *,
+        question: str,
+        structure_path: Path,
+        workbook_path: Path,
+        qa_artifact_dir: Path,
+        fallback_prompt: str,
+        fallback_image_path: Path | None = None,
+        fallback_text_prompt: str | None = None,
+    ) -> tuple[LLMResponse, dict[str, Any]]:
+        """Run the notebook QA phase against the persisted verified structure."""
+        runner = None
+        try:
+            runner = TableQARunner(
+                structure_path=str(structure_path),
+                workbook_path=str(workbook_path),
+                llm_client=self.llm,
+                config={
+                    "qa_artifact_dir": str(qa_artifact_dir),
+                    "table_id": self._select_table_id(structure_path, question),
+                },
+            )
+            result = runner.run(question)
+            qa_info = {
+                "success": result.success,
+                "error": result.error,
+                "execution_time": result.execution_time,
+                "artifacts": result.artifacts,
+                "fallback_used": not result.success,
+            }
+            if result.success and result.final_answer is not None:
+                return LLMResponse(content=result.final_answer), qa_info
+        except Exception as exc:
+            qa_info = {
+                "success": False,
+                "error": str(exc),
+                "artifacts": {},
+                "fallback_used": True,
+            }
+        finally:
+            if runner is not None:
+                runner.env.workbook.close()
+
+        response = self.qa_agent.run(
+            prompt=fallback_prompt,
+            image_path=fallback_image_path,
+            fallback_prompt=fallback_text_prompt,
+        )
+        return response, qa_info
+
+    @staticmethod
+    def _select_table_id(structure_path: Path, question: str) -> str | None:
+        """Choose the most question-relevant table in a multi-table structure."""
+        try:
+            payload = yaml.safe_load(structure_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        query_terms = set(re.findall(r"[a-z0-9]+", question.lower()))
+        best: tuple[int, str] | None = None
+        for key, table in payload.items():
+            if not isinstance(table, dict):
+                continue
+            table_id = str(table.get("id") or key)
+            searchable = " ".join(
+                [table_id, str(table.get("name") or ""), str(table.get("description") or "")]
+                + [
+                    " ".join(str(header.get(field) or "") for field in ("id", "label", "description"))
+                    for header in table.get("headers") or []
+                    if isinstance(header, dict)
+                ]
+            )
+            score = len(query_terms & set(re.findall(r"[a-z0-9]+", searchable.lower())))
+            candidate = (score, table_id)
+            if best is None or candidate > best:
+                best = candidate
+        return best[1] if best else None
 
     def _generate_answer_with_image(self, *, prompt: str, image_path: Path, fallback_prompt: str | None = None) -> LLMResponse:
         return self.qa_agent.run(prompt=prompt, image_path=image_path, fallback_prompt=fallback_prompt)

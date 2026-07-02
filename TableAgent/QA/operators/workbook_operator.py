@@ -10,6 +10,7 @@ class WorkbookOperator(BaseOperator):
     name = "workbook"
     description = "Read workbook cells from an A1 range or CellRange; use selective ranges to keep observations compact."
     examples = (
+        "operators.read_table_as_dataframe(table_id, has_headers=False) -> pandas.DataFrame",
         "operators.read_range(range_or_a1, sheet='') -> list[list[Any]]",
         "operators.read_range_flat(range_or_a1, sheet='') -> list[Any]",
         "operators.read_range_as_dataframe(range_or_a1, sheet='', has_headers=True) -> pandas.DataFrame",

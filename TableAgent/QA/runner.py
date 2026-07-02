@@ -140,6 +140,13 @@ class TableQARunner:
         table_id = self.table_id
         if not table_id:
             table_id = self.env.default_table_id()
+        table_df = self.env.operators.read_table_as_dataframe(table_id, has_headers=True)
+        self.env.execution_namespace["table_id"] = table_id
+        self.env.execution_namespace["table_df"] = table_df
+        safe_table_var = re.sub(r"[^a-zA-Z0-9_]", "_", table_id)
+        self.env.execution_namespace[safe_table_var] = table_df
+        spaced_table_var = re.sub(r"(?<=\D)(\d+)$", r"_\1", safe_table_var)
+        self.env.execution_namespace[spaced_table_var] = table_df
             
         # 1. Plan
         try:

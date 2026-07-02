@@ -28,15 +28,18 @@ def load_table_structures(yaml_path: str) -> Dict[str, Dict[str, Any]]:
     
     parsed = {}
     for table_key, table_data in data.items():
-        # Use the table key or name as the sheet name if not specified
-        sheet_name = table_data.get("name", table_key)
+        # Prefer the exact worksheet name emitted by the layout phase.
+        sheet_name = table_data.get("sheet") or table_data.get("name", table_key)
         headers = []
         for h_dict in table_data.get("headers", []):
             headers.append(parse_header_dict(h_dict, sheet_name))
         
-        parsed[table_key] = {
+        table_id = str(table_data.get("id") or table_key)
+        parsed[table_id] = {
+            "id": table_id,
             "name": table_data.get("name", table_key),
             "description": table_data.get("description", ""),
+            "sheet": sheet_name,
             "headers": headers
         }
     return parsed

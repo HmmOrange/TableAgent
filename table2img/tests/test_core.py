@@ -5,10 +5,46 @@ from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from table2img.core import _capture_with_chrome_cli, document_from_json, find_browsers, render_document, rows_from_markdown
+from table2img.core import (
+    _FontFace,
+    _capture_with_chrome_cli,
+    _font_for_char,
+    _glyph_signature,
+    document_from_json,
+    document_from_xlsx,
+    find_browsers,
+    render_document,
+    rows_from_markdown,
+)
 
 
 class Table2ImgCoreTests(unittest.TestCase):
+    def test_font_fallback_without_fonttools_skips_missing_glyph(self):
+        class Mask:
+            size = (1, 1)
+
+            def __init__(self, value):
+                self.value = value
+
+            def __bytes__(self):
+                return self.value
+
+        class Font:
+            def __init__(self, supported):
+                self.supported = supported
+
+            def getmask(self, char, mode="L"):
+                return Mask(char.encode("utf-8") if char in self.supported else b"missing")
+
+        latin = Font({"A"})
+        korean = Font({"한"})
+        faces = [
+            _FontFace(latin, None, _glyph_signature(latin, "\U0010ffff")),
+            _FontFace(korean, None, _glyph_signature(korean, "\U0010ffff")),
+        ]
+
+        self.assertIs(_font_for_char(faces, "한"), korean)
+
     def test_pillow_backend_renders_without_launching_browser(self):
         with TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "table.png"
@@ -124,6 +160,44 @@ class Table2ImgCoreTests(unittest.TestCase):
             self.assertIn('class="excel-coord"', doc.html)
             self.assertIn("ValB2", doc.html)
             self.assertIn("ValC3", doc.html)
+
+    def test_document_from_xlsx_preserves_style_merge_dimensions_and_unicode(self):
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "styled.xlsx"
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet["A1"] = "Tiếng Việt / 한국어"
+            sheet["A1"].fill = PatternFill("solid", fgColor="FF00CC66")
+            sheet["A1"].font = Font(bold=True, color="FFFF0000")
+            sheet["A1"].alignment = Alignment(horizontal="center")
+            sheet.merge_cells("A1:B1")
+            sheet.column_dimensions["A"].width = 24
+            sheet.row_dimensions[1].height = 30
+            workbook.save(path)
+
+            document = document_from_xlsx(path, add_coordinates=False)
+            clipped = document_from_xlsx(path, add_coordinates=False, cell_range="B1:B1")
+
+            self.assertIn('colspan="2"', document.html)
+            self.assertIn("Tiếng Việt / 한국어", document.html)
+            self.assertIn("background-color: #00CC66", document.html)
+            self.assertIn("color: #FF0000", document.html)
+            self.assertIn("font-weight: 700", document.html)
+            self.assertIn("text-align: center", document.html)
+            self.assertIn('style="width: 173px"', document.html)
+            self.assertIn('style="height: 40px"', document.html)
+            self.assertIn("Tiếng Việt / 한국어", clipped.html)
+
+            output = Path(tmpdir) / "styled.png"
+            render_document(document, output, backend="pillow", scale=1)
+            from PIL import Image
+
+            with Image.open(output) as image:
+                colors = {color for _, color in image.getcolors(maxcolors=image.width * image.height)}
+            self.assertTrue({(0, 204, 102), (0, 204, 102, 255)} & colors)
 
 
 if __name__ == "__main__":

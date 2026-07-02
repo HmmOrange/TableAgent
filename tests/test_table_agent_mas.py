@@ -163,6 +163,7 @@ def _run_verifier(tmp_path: Path, workbook_path: Path, structure: dict) -> dict:
 def test_direction_queue_uses_required_priority():
     queue = DirectionQueue()
     viewport = Viewport(1, 1, 20, 20)
+    assert viewport.clipped_a1_range("A1:B3") == "A1:B3"
     for direction in [Direction.UP, Direction.LEFT, Direction.DOWN, Direction.RIGHT, Direction.STAY]:
         queue.push(TraversalTask(direction, viewport.shifted(direction, 15)))
 
@@ -587,9 +588,9 @@ def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path)
 
     events = [json.loads(line) for line in (tmp_path / "artifacts" / "events.jsonl").read_text().splitlines()]
     assert [(event["direction"], event["viewport"]) for event in events] == [
-        ("stay", "A1:T20"),
-        ("right", "P1:AI20"),
-        ("right", "AE1:AX20"),
+        ("stay", "A1:T10"),
+        ("right", "P1:AI10"),
+        ("right", "AE1:AN10"),
     ]
     assert result.iterations == 3
     assert (tmp_path / "artifacts" / "metadata.yaml").is_file()
@@ -654,5 +655,5 @@ def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path)
     )
 
     events = [json.loads(line) for line in (tmp_path / "bounded-artifacts" / "events.jsonl").read_text().splitlines()]
-    assert [event["viewport"] for event in events] == ["A1:T20", "A16:T35", "A31:T50"]
+    assert [event["viewport"] for event in events] == ["A1:Q20", "A16:Q35", "A31:Q50"]
     assert all(event["direction"] != "right" for event in events)

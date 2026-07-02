@@ -91,17 +91,18 @@ class TableLayoutWorkflow:
             task = queue.pop()
             if task.direction != Direction.STAY and task.viewport.key in successful_viewports:
                 continue
+            viewport_range = task.viewport.clipped_a1_range(table_range)
             iteration += 1
             iteration_dir = iterations_dir / (
                 f"{iteration:04d}_{task.direction.name.lower()}_"
-                f"{task.viewport.a1_range.replace(':', '_')}"
+                f"{viewport_range.replace(':', '_')}"
             )
             iteration_dir.mkdir(parents=True, exist_ok=True)
             image_path = iteration_dir / "viewport.png"
             render_result = self.renderer.source_viewport_to_image(
                 workbook_path,
                 sheet_name,
-                task.viewport.a1_range,
+                viewport_range,
                 image_path,
             )
             if first_image is None:
@@ -118,7 +119,7 @@ class TableLayoutWorkflow:
                 metadata_text=metadata_text,
                 structure_text=structure_text,
                 image_path=image_path,
-                viewport_range=task.viewport.a1_range,
+                viewport_range=viewport_range,
                 direction=task.direction.name.lower(),
                 feedback=feedback_by_viewport.get(task.viewport.key, ""),
                 iteration=iteration,
@@ -137,7 +138,7 @@ class TableLayoutWorkflow:
                 metadata_text=metadata_text,
                 structure_text=structure_text,
                 changelog=layout.changelog,
-                viewport_range=task.viewport.a1_range,
+                viewport_range=viewport_range,
                 iteration=iteration,
                 iteration_dir=iteration_dir,
             )
@@ -146,12 +147,12 @@ class TableLayoutWorkflow:
             last_verification = {
                 "status": verification.status,
                 "feedback": verification.feedback,
-                "viewport": task.viewport.a1_range,
+                "viewport": viewport_range,
             }
             self._append_event(events_path, {
                 "iteration": iteration,
                 "direction": task.direction.name.lower(),
-                "viewport": task.viewport.a1_range,
+                "viewport": viewport_range,
                 "changed": layout.changed,
                 "layout_directions": layout.directions,
                 "verification": last_verification,
@@ -168,9 +169,25 @@ class TableLayoutWorkflow:
                     structure_text = nullify_structure_ranges(structure_text, verification.null_fields)
                     (iteration_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
                     cumulative_changes.append(
-                        f"## Iteration {iteration} — {task.viewport.a1_range}\n\n"
+                        f"## Iteration {iteration} — {viewport_range}\n\n"
                         "Verification retries exhausted; unverifiable ranges were set to null."
                     )
+                    # Do not let one imperfect viewport truncate the rest of a larger
+                    # sheet. Continue into every in-bounds frontier so later viewports
+                    # can extend and repair the accumulated structure.
+                    successful_viewports.add(task.viewport.key)
+                    frontier = frontier_directions(table_range, task.viewport)
+                    suggested = [Direction.parse(value) for value in layout.directions]
+                    discovered = [direction for direction in suggested if direction in frontier] or frontier
+                    for direction in discovered:
+                        if direction != Direction.STAY:
+                            self._enqueue_shift(
+                                queue,
+                                task.viewport,
+                                direction,
+                                successful_viewports,
+                                table_range,
+                            )
                 continue
 
             structure_path.write_text(structure_text, encoding="utf-8")
@@ -180,7 +197,7 @@ class TableLayoutWorkflow:
             if layout.changed:
                 cumulative_changes.append(
                     f"## Iteration {iteration} — {task.direction.name.lower()} "
-                    f"{task.viewport.a1_range}\n\n{layout.changelog}"
+                    f"{viewport_range}\n\n{layout.changelog}"
                 )
 
             frontier = frontier_directions(table_range, task.viewport)
