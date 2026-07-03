@@ -56,7 +56,12 @@ class TableOperators(BaseOperator):
     def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
         """Read the bounding range covered by a table's verified headers and data."""
         headers = self.list_headers(table_id)
-        ranges = [cell_range for header in headers for cell_range in (header.header_range, header.data_range)]
+        ranges = [
+            cell_range
+            for header in headers
+            for cell_range in (header.header_range, header.data_range)
+            if cell_range is not None
+        ]
         if not ranges:
             return pd.DataFrame()
         sheet = ranges[0].sheet
@@ -70,7 +75,13 @@ class TableOperators(BaseOperator):
         if not has_headers:
             return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
 
-        data_start_row = max(header.header_range.end_row for header in headers) + 1
+        header_ranges = [header.header_range for header in headers if header.header_range is not None]
+        if not header_ranges:
+            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+
+        data_start_row = max(header_range.end_row for header_range in header_ranges) + 1
+        if data_start_row > table_range.end_row:
+            return pd.DataFrame()
         data_range = CellRange(
             data_start_row,
             table_range.start_col,
@@ -84,9 +95,10 @@ class TableOperators(BaseOperator):
             candidates = [
                 header
                 for header in headers
-                if header.header_range.start_col <= column <= header.header_range.end_col
+                if header.header_range is not None
+                and header.header_range.start_col <= column <= header.header_range.end_col
             ]
-            candidates.sort(key=lambda header: header.header_range.end_col - header.header_range.start_col)
+            candidates.sort(key=lambda header: header.header_range.end_col - header.header_range.start_col)  # type: ignore[union-attr]
             column_ids.append(candidates[0].id if candidates else f"col_{column}")
         return pd.DataFrame(rows, columns=column_ids)
 

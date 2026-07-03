@@ -250,6 +250,93 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     assert output.token_usage == {"prompt": 55, "completion": 22}
 
 
+def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, monkeypatch):
+    import openpyxl
+    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
+
+    captured_configs = []
+
+    class _WorkbookHandle:
+        def close(self):
+            pass
+
+    class _Env:
+        workbook = _WorkbookHandle()
+
+    class CapturingRunner:
+        def __init__(self, *, structure_path, workbook_path, llm_client, config):
+            captured_configs.append(config)
+            self.env = _Env()
+
+        def run(self, question):
+            class Result:
+                success = True
+                final_answer = "ok"
+                error = None
+                execution_time = 0.0
+                token_usage = {"prompt": 1, "completion": 1}
+                artifacts = {}
+
+            return Result()
+
+        def token_usage(self):
+            return {"prompt": 1, "completion": 1}
+
+    monkeypatch.setattr(pipeline_module, "TableQARunner", CapturingRunner)
+
+    workbook_path = tmp_path / "book.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "Metric"
+    ws["B1"] = "Value"
+    wb.save(workbook_path)
+
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text(
+        yaml.safe_dump(
+            {
+                "table1": {
+                    "id": "table1",
+                    "name": "Wrong lexical match",
+                    "description": "This table should not be preselected.",
+                    "sheet": "Sheet1",
+                    "headers": [],
+                },
+                "table2": {
+                    "id": "table2",
+                    "name": "Right table",
+                    "description": "The table inspect layer should choose this later.",
+                    "sheet": "Sheet1",
+                    "headers": [],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path)},
+        renderer=FakeRenderer(),
+    )
+
+    response, qa_info = pipeline._run_verified_qa(
+        question="Which table is right?",
+        structure_path=structure_path,
+        workbook_path=workbook_path,
+        qa_artifact_dir=tmp_path / "qa",
+        fallback_prompt="fallback",
+    )
+
+    assert response.content == "ok"
+    assert qa_info["success"] is True
+    assert captured_configs
+    assert "table_id" not in captured_configs[0]
+
+
 def test_table_agent_siflex_retrieval(tmp_path: Path):
     import openpyxl
     # Create two dummy workbooks
@@ -1166,7 +1253,6 @@ def test_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["workbook_sheets"] == ["HighLexical"]
     assert output2.metadata["workbook_path"] == str(path_b.resolve())
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
-
 
 
 

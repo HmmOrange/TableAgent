@@ -2,12 +2,21 @@ from __future__ import annotations
 import yaml
 from typing import Any, Dict, List
 from TableAgent.schema.header import Header
-from TableAgent.schema.range import CellRange
 from TableAgent.utils.excel_utils import parse_a1_range
 
+
+def _parse_optional_a1_range(value: Any, sheet_name: str = ""):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none"}:
+        return None
+    return parse_a1_range(text, sheet_name)
+
+
 def parse_header_dict(d: Dict[str, Any], sheet_name: str = "") -> Header:
-    header_range = parse_a1_range(d["header_range"], sheet_name)
-    data_range = parse_a1_range(d["data_range"], sheet_name)
+    header_range = _parse_optional_a1_range(d.get("header_range"), sheet_name)
+    data_range = _parse_optional_a1_range(d.get("data_range"), sheet_name)
     sub_headers = [parse_header_dict(sub, sheet_name) for sub in d.get("sub_headers", [])]
     return Header(
         id=str(d["id"]),

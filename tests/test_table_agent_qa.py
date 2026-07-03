@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import pytest
+from pathlib import Path
 
 from TableAgent.schema import AxisSelection, Cell, CellRange, Header, ExperienceRecord
 from TableAgent.utils import (
@@ -133,6 +134,64 @@ def test_load_structures():
     assert len(name_hdr.sub_headers) == 3
     assert name_hdr.sub_headers[0].id == "first_name"
     assert name_hdr.sub_headers[0].orientation == "column"
+
+
+def test_load_structures_allows_null_ranges(tmp_path: Path):
+    import openpyxl
+    import yaml
+
+    workbook_path = tmp_path / "book.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "Metric"
+    ws["B1"] = "Value"
+    ws["A2"] = "Revenue"
+    ws["B2"] = 100
+    wb.save(workbook_path)
+
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text(
+        yaml.safe_dump(
+            {
+                "table1": {
+                    "id": "table1",
+                    "name": "Table 1",
+                    "description": "Contains one valid header and one null-range header.",
+                    "sheet": "Sheet1",
+                    "headers": [
+                        {
+                            "id": "metric",
+                            "label": "Metric",
+                            "description": "Metric name",
+                            "orientation": "column",
+                            "header_range": "A1",
+                            "data_range": "A2:A2",
+                            "sub_headers": [],
+                        },
+                        {
+                            "id": "missing",
+                            "label": "Missing",
+                            "description": "Unverified sparse field",
+                            "orientation": "column",
+                            "header_range": None,
+                            "data_range": None,
+                            "sub_headers": [],
+                        },
+                    ],
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    headers = env.operators.list_headers("table1")
+
+    assert headers[1].header_range is None
+    assert headers[1].data_range is None
+    assert env.operators.read_table_as_dataframe("table1", has_headers=False).shape == (2, 1)
 
 def test_environment_and_operators():
     env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)

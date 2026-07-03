@@ -266,7 +266,6 @@ class TableAgentPipeline(BasePipeline):
                 llm_client=self.llm,
                 config={
                     "qa_artifact_dir": str(qa_artifact_dir),
-                    "table_id": self._select_table_id(structure_path, question),
                 },
             )
             result = runner.run(question)

@@ -9,8 +9,8 @@ class Header:
     label: str
     description: str
     orientation: str  # 'column', 'column_group', 'row', 'row_group'
-    header_range: CellRange
-    data_range: CellRange
+    header_range: Optional[CellRange]
+    data_range: Optional[CellRange]
     sub_headers: List[Header] = field(default_factory=list)
 
     def __repr__(self) -> str:
