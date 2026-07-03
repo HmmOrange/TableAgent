@@ -28,7 +28,7 @@ Format:
 	      "id": "inspect_condition_a",
 	      "layer": "inspect",
 	      "depends_on": ["select_relevant_tables"],
-	      "description": "Find/filter the first required field or condition."
+	      "description": "Find/filter the required field or condition."
 	    },
     {
       "id": "inspect_target_values",
