@@ -161,6 +161,22 @@ class Table2ImgCoreTests(unittest.TestCase):
             self.assertIn("ValB2", doc.html)
             self.assertIn("ValC3", doc.html)
 
+    def test_document_from_xlsx_numeric_string_selects_sheet_by_name(self):
+        import openpyxl
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "numeric-sheet.xlsx"
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "1308"
+            sheet["A1"] = "numeric sheet name"
+            workbook.save(path)
+
+            document = document_from_xlsx(path, sheet="1308")
+
+            self.assertEqual(document.title, "1308")
+            self.assertIn("numeric sheet name", document.html)
+
     def test_document_from_xlsx_preserves_style_merge_dimensions_and_unicode(self):
         import openpyxl
         from openpyxl.styles import Alignment, Font, PatternFill
