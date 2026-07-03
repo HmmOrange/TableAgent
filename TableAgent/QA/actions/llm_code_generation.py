@@ -45,8 +45,10 @@ def get_structure_summary(env: Any, table_id: str) -> str:
         return f"Table '{table_id}' not found."
 
     summary_lines = []
+    summary_lines.append(f"Table ID: {table_id}")
     summary_lines.append(f"Table Name: {struct.get('name')}")
     summary_lines.append(f"Description: {struct.get('description')}")
+    summary_lines.append(f"Sheet: {struct.get('sheet')}")
     summary_lines.append("Headers:")
 
     def format_header(h, indent=2):
@@ -60,6 +62,42 @@ def get_structure_summary(env: Any, table_id: str) -> str:
         format_header(h)
 
     return "\n".join(summary_lines)
+
+
+def get_table_catalog_summary(env: Any) -> str:
+    table_ids = env.operators.list_tables() if hasattr(env, "operators") else list(getattr(env, "structures", {}).keys())
+    if not table_ids:
+        return "No tables are available."
+
+    lines = []
+    for table_id in table_ids:
+        struct = env.get_table_structure(table_id)
+        headers = struct.get("headers", []) if struct else []
+        header_bits = []
+        for header in headers[:20]:
+            label = getattr(header, "label", "")
+            h_id = getattr(header, "id", "")
+            desc = getattr(header, "description", "")
+            bit = f"{label} ({h_id})" if h_id else str(label)
+            if desc:
+                bit += f": {desc}"
+            header_bits.append(bit)
+        if len(headers) > 20:
+            header_bits.append(f"... {len(headers) - 20} more headers")
+        lines.append(
+            "\n".join([
+                f"- table_id: {table_id}",
+                f"  name: {struct.get('name', '') if struct else ''}",
+                f"  description: {struct.get('description', '') if struct else ''}",
+                f"  sheet: {struct.get('sheet', '') if struct else ''}",
+                f"  headers: {'; '.join(header_bits) if header_bits else '(none)'}",
+            ])
+        )
+    return "\n".join(lines)
+
+
+def get_selected_structure_summary(env: Any, table_ids: list[str]) -> str:
+    return "\n\n".join(get_structure_summary(env, table_id) for table_id in table_ids)
 
 
 def get_prior_outcomes(env: Any) -> str:
@@ -121,15 +159,64 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             raise ValueError("Environment not set on LLMCodeGenerationAction.")
         operator_catalog = get_operator_catalog(self.env)
 
-        if request.layer == "inspect":
+        if request.layer == "table_inspect":
             if request.round_num == 1:
-                table_id = None
+                table_catalog = get_table_catalog_summary(self.env)
+                available_vars = list(self.env.notebook.namespace.keys())
+                available_vars = [
+                    v for v in available_vars
+                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np"}
+                ]
+                prior_outcomes = get_prior_outcomes(self.env)
+                formatted_experience = self.env.experience_pool.format()
+                prompt = REACT_USER_PROMPT_TEMPLATE.format(
+                    question=request.question,
+                    subtask_description=(
+                        f"Subtask: {request.subtask_id}.\n"
+                        "Choose the relevant table_id or table_ids from this catalog.\n"
+                        "Your code must set `selected_table_ids` to a non-empty list of valid table_id strings. "
+                        "Also print a compact explanation of the selection.\n\n"
+                        f"Table catalog:\n{table_catalog}\n\n"
+                        f"Experience:\n{formatted_experience}"
+                    ),
+                    available_variables=", ".join(available_vars) if available_vars else "None",
+                    prior_outcomes=prior_outcomes,
+                )
+                system_prompt = REACT_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
+            else:
+                last_cell = self.env.notebook.cells[-1] if self.env.notebook.cells else None
+                failed_code = last_cell.code if last_cell else ""
+                if last_cell:
+                    observation = self.env.notebook.observation_for_cell(last_cell)
+                    error_msg = observation.format()
+                else:
+                    error_msg = "Unknown execution error"
+                prompt = REVISION_USER_PROMPT_TEMPLATE.format(
+                    question=request.question,
+                    subtask_description=(
+                        f"Subtask: {request.subtask_id}\n"
+                        "Revise the table selection code. It must set `selected_table_ids` to a non-empty list of valid table_id strings.\n"
+                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
+                    ),
+                    failed_code=failed_code,
+                    error_message=error_msg,
+                )
+                system_prompt = REACT_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
+        elif request.layer == "inspect":
+            if request.round_num == 1:
+                table_ids = None
                 if request.subtask and hasattr(request.subtask, "metadata") and isinstance(request.subtask.metadata, dict):
-                    table_id = request.subtask.metadata.get("table_id")
-                if not table_id:
-                    table_id = self.env.default_table_id()
+                    table_ids = request.subtask.metadata.get("table_ids")
+                    if not table_ids and request.subtask.metadata.get("table_id"):
+                        table_ids = [request.subtask.metadata.get("table_id")]
+                if not table_ids:
+                    table_ids = self.env.execution_namespace.get("selected_table_ids")
+                if isinstance(table_ids, str):
+                    table_ids = [table_ids]
+                if not table_ids:
+                    table_ids = [self.env.default_table_id()]
 
-                struct_summary = get_structure_summary(self.env, table_id)
+                struct_summary = get_selected_structure_summary(self.env, [str(table_id) for table_id in table_ids])
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars

@@ -5,14 +5,14 @@ import re
 from typing import Any, List, Optional
 
 from TableAgent.QA.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
-from TableAgent.QA.actions.llm_code_generation import get_structure_summary
+from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
 from TableAgent.QA.prompts.planner_prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.schema.subtask import SubTask
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
 Return only one JSON object with a non-empty `subtasks` list. Each subtask must have
-`id`, `description`, `layer` (`inspect` or `synthesis`), and `depends_on` (a list).
-Include at least one inspect subtask and a final synthesis subtask. No prose."""
+    `id`, `description`, `layer` (`table_inspect`, `inspect`, or `synthesis`), and `depends_on` (a list).
+    Include one table_inspect subtask, at least one inspect subtask, and a final synthesis subtask. No prose."""
 
 
 def parse_planner_output(content: str) -> list[SubTask]:
@@ -38,8 +38,10 @@ def parse_planner_output(content: str) -> list[SubTask]:
         if not description:
             raise ValueError(f"Subtask '{subtask_id}' must include a non-empty 'description'.")
         layer = item.get("layer", "inspect")
-        if layer not in ("inspect", "synthesis"):
-            raise ValueError(f"Subtask '{subtask_id}' has invalid layer {layer!r}; expected 'inspect' or 'synthesis'.")
+        if layer not in ("table_inspect", "inspect", "synthesis"):
+            raise ValueError(
+                f"Subtask '{subtask_id}' has invalid layer {layer!r}; expected 'table_inspect', 'inspect', or 'synthesis'."
+            )
         subtasks.append(SubTask(
             id=subtask_id,
             description=description,
@@ -81,9 +83,17 @@ class WriteQAPlanAction(BasePlanAction):
         if not self.llm_client:
             raise ValueError("WriteQAPlanAction requires an llm_client.")
 
-        struct_summary = get_structure_summary(self.env, request.table_id)
+        table_catalog = get_table_catalog_summary(self.env)
+        if request.table_id:
+            struct_summary = get_structure_summary(self.env, request.table_id)
+        else:
+            struct_summary = "\n\n".join(
+                get_structure_summary(self.env, table_id)
+                for table_id in self.env.operators.list_tables()
+            )
         prompt = PLANNER_USER_PROMPT_TEMPLATE.format(
             question=request.question,
+            table_catalog=table_catalog,
             table_structure=struct_summary,
         )
         self.env.logger.log_event("planner_prompt", {"prompt": prompt, "system_prompt": PLANNER_SYSTEM_PROMPT})
@@ -110,10 +120,33 @@ class WriteQAPlanAction(BasePlanAction):
                 })
                 raise exc
 
+        needs_table_inspect = len(self.env.operators.list_tables()) > 1
+        if needs_table_inspect and not any(subtask.layer == "table_inspect" for subtask in subtasks):
+            subtasks.insert(0, SubTask(
+                id="select_relevant_tables",
+                description="Select the relevant table_id or table_ids for the question.",
+                layer="table_inspect",
+                depends_on=[],
+                status="pending",
+            ))
+            for subtask in subtasks[1:]:
+                if subtask.layer == "inspect" and "select_relevant_tables" not in subtask.depends_on:
+                    subtask.depends_on.insert(0, "select_relevant_tables")
+        elif needs_table_inspect:
+            table_inspect_id = next(
+                (subtask.id for subtask in subtasks if subtask.layer == "table_inspect"),
+                None,
+            )
+            if table_inspect_id:
+                for subtask in subtasks:
+                    if subtask.layer == "inspect" and table_inspect_id not in subtask.depends_on:
+                        subtask.depends_on.insert(0, table_inspect_id)
+
         for subtask in subtasks:
             if not subtask.metadata:
                 subtask.metadata = {}
-            subtask.metadata.setdefault("table_id", request.table_id)
+            if request.table_id and subtask.layer != "table_inspect":
+                subtask.metadata.setdefault("table_id", request.table_id)
 
         self.env.logger.log_event("planning_complete", {
             "subtasks": [str(s) for s in subtasks],

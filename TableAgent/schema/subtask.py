@@ -6,7 +6,7 @@ from typing import List, Optional, Literal
 class SubTask:
     id: str
     description: str
-    layer: Literal["inspect", "synthesis"]
+    layer: Literal["table_inspect", "inspect", "synthesis"]
     depends_on: List[str] = field(default_factory=list)
     status: Literal["pending", "running", "success", "failed"] = "pending"
     code_attempt: Optional[str] = None

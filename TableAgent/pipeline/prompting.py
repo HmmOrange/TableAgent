@@ -23,14 +23,17 @@ class PromptBuilder:
     def candidate_prompt_text(self, candidates: list[SourceCandidate], fit_context) -> str:
         lines = []
         for index, candidate in enumerate(candidates):
-            preview = fit_context(candidate.sheet_text)[: self.settings.retrieval_candidate_max_chars]
+            card = candidate.retrieval_card or fit_context(candidate.sheet_text)[: self.settings.retrieval_candidate_max_chars]
+            card = card[: self.settings.retrieval_candidate_max_chars]
             lines.append(
                 f"Candidate {index}:\n"
                 f"workbook: {candidate.workbook_path.name}\n"
                 f"sheet: {candidate.sheet_name}\n"
-                f"lexical_score: {candidate.score}\n"
-                f"structure.yaml:\n{candidate.structure_text}\n"
-                f"text preview:\n{preview}"
+                f"score: {candidate.score}\n"
+                f"lexical_score: {candidate.lexical_score}\n"
+                f"embedding_score: {candidate.embedding_score}\n"
+                f"embedding_used: {candidate.embedding_used}\n"
+                f"retrieval_card:\n{card}"
             )
         return "\n\n".join(lines)
 

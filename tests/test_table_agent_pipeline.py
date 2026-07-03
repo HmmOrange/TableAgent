@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -52,6 +53,78 @@ class FakeLLM:
                 completion_tokens=2,
             )
         return LLMResponse(content="100", prompt_tokens=6, completion_tokens=1)
+
+
+class SuccessfulQALLM(FakeLLM):
+    def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
+        self.calls.append((prompt, system_prompt))
+        if system_prompt and "verification agent" in system_prompt:
+            return LLMResponse(
+                content="status: good\nfeedback: Structure uses meaningful detected labels.\n",
+                prompt_tokens=4,
+                completion_tokens=2,
+            )
+        if system_prompt and "expert spreadsheet data planner" in system_prompt:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "subtasks": [
+                            {
+                                "id": "inspect_table",
+                                "layer": "inspect",
+                                "depends_on": [],
+                                "description": "Inspect the available table.",
+                            },
+                            {
+                                "id": "synthesize_answer",
+                                "layer": "synthesis",
+                                "depends_on": ["inspect_table"],
+                                "description": "Compute the final answer.",
+                            },
+                        ]
+                    },
+                    sort_keys=False,
+                ),
+                prompt_tokens=7,
+                completion_tokens=3,
+            )
+        if system_prompt and "spreadsheet analysis ReAct agent" in system_prompt:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "reasoning": "Inspect a compact preloaded table summary.",
+                        "code": "inspected_shape = table_df.shape\nprint(inspected_shape)",
+                        "description": "Stores and prints the table shape.",
+                    }
+                ),
+                prompt_tokens=11,
+                completion_tokens=4,
+            )
+        if system_prompt and "spreadsheet synthesis agent" in system_prompt:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "reasoning": "The sample answer is directly computed for this fixture.",
+                        "code": "final_answer = '100'\nprint(final_answer)",
+                        "description": "Sets the final answer.",
+                    }
+                ),
+                prompt_tokens=13,
+                completion_tokens=4,
+            )
+        if system_prompt and "strict table-QA reviewer" in system_prompt:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "accepted": True,
+                        "score": 1.0,
+                        "feedback": "Accepted.",
+                    }
+                ),
+                prompt_tokens=5,
+                completion_tokens=2,
+            )
+        return super().generate(prompt, system_prompt=system_prompt)
 
 
 class FakeLayoutVLM:
@@ -148,7 +221,33 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert len(renderer.calls) == 1
     assert len(layout_vlm.calls) == 1
     assert layout_vlm.calls[0][1].name == "viewport.png"
-    assert output.token_usage == {"prompt": 20, "completion": 8}
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 12, "completion": 2}
+    assert output.token_usage == {"prompt": 32, "completion": 10}
+
+
+def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/1",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=SuccessfulQALLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        renderer=FakeRenderer(),
+    )
+
+    output = pipeline.run(sample)
+
+    assert output.predicted_answer == "100"
+    assert output.metadata["qa"]["success"] is True
+    assert output.metadata["qa"]["fallback_used"] is False
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 41, "completion": 15}
+    assert output.token_usage == {"prompt": 55, "completion": 22}
 
 
 def test_table_agent_siflex_retrieval(tmp_path: Path):
@@ -1067,8 +1166,6 @@ def test_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["workbook_sheets"] == ["HighLexical"]
     assert output2.metadata["workbook_path"] == str(path_b.resolve())
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
-
-
 
 
 

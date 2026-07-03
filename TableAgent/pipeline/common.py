@@ -20,6 +20,10 @@ class SourceCandidate:
     structure_text: str
     sheet_text: str
     score: float
+    lexical_score: float = 0.0
+    embedding_score: float = 0.0
+    embedding_used: bool = False
+    retrieval_card: str = ""
 
 
 def safe_name(value: str) -> str:

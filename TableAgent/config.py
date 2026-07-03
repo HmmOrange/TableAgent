@@ -40,6 +40,9 @@ class TableAgentConfig:
     qa_max_observation_chars: int
     qa_max_error_chars: int
     qa_max_value_repr_chars: int
+    retrieval_embedding_provider: str | None
+    retrieval_lexical_weight: float
+    retrieval_embedding_weight: float
 
 
     @classmethod
@@ -76,6 +79,9 @@ class TableAgentConfig:
             qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
             qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
+            retrieval_embedding_provider=merged.get("retrieval_embedding_provider"),
+            retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.5)),
+            retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.5)),
         )
 
 

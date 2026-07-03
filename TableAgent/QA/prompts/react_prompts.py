@@ -12,9 +12,13 @@ Available library imports:
 Do not attempt to import `os`, `subprocess`, `sys`, `pathlib`, `shutil`, `socket` or other system/IO modules.
 
 Observation policy:
-- `table_id` and `table_df` are preloaded for the selected table. Inspect `table_df`
-  directly before attempting any other data-loading method. Never search the file
-  system or import IO/system modules.
+- For `table_inspect` subtasks, use the provided table catalog and set
+  `selected_table_ids` to a non-empty list of relevant table_id strings.
+- For field `inspect` subtasks, `selected_table_ids` contains the chosen tables.
+  `table_id` and `table_df` are preloaded for the first selected table for
+  compatibility; `table_dfs` maps every selected table_id to a DataFrame.
+  Inspect these variables before attempting any other data-loading method.
+  Never search the file system or import IO/system modules.
 - A table ID such as `table_1` is not an A1 range. To inspect a whole table by ID,
   call `operators.read_table_as_dataframe(table_id, has_headers=False)`. Pass only
   A1 strings such as `A1:D20` or Header range objects to `read_range*` methods.

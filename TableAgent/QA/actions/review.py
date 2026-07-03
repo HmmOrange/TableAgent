@@ -101,6 +101,19 @@ class ReviewSubtaskAction(BaseReviewAction):
                 score=0.0,
             )
 
+        if request.subtask.layer == "table_inspect":
+            selected = self.env.execution_namespace.get("selected_table_ids")
+            has_selection = bool(selected) and (
+                isinstance(selected, str)
+                or isinstance(selected, (list, tuple, set))
+            )
+            if not has_selection:
+                return ReviewResult(
+                    accepted=False,
+                    feedback="Execution succeeded, but `selected_table_ids` was not set to a non-empty table_id list.",
+                    score=0.2,
+                )
+
         if request.subtask.layer == "inspect":
             has_signal = bool(request.execution.namespace_updates) or bool(request.execution.output.strip())
             if not has_signal:

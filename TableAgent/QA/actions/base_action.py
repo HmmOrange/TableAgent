@@ -41,7 +41,7 @@ class CodeExecutionResult:
 @dataclass(frozen=True)
 class PlanGenerationRequest:
     question: str
-    table_id: str
+    table_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

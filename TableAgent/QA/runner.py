@@ -16,6 +16,30 @@ from TableAgent.QA.actions.review import ReviewSubtaskAction
 from TableAgent.schema.qa import QAResult
 from TableAgent.schema.subtask import SubTask
 
+
+class TokenCountingLLM:
+    """Proxy an LLM client while accumulating token usage from its responses."""
+    def __init__(self, client: Any):
+        self.client = client
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.client, name)
+
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> Any:
+        response = self.client.generate(prompt, system_prompt=system_prompt)
+        self.prompt_tokens += int(getattr(response, "prompt_tokens", 0) or 0)
+        self.completion_tokens += int(getattr(response, "completion_tokens", 0) or 0)
+        return response
+
+    def token_usage(self) -> dict[str, int]:
+        return {
+            "prompt": self.prompt_tokens,
+            "completion": self.completion_tokens,
+        }
+
+
 class TableQARunner:
     """
     High-level orchestrator that coordinates the QA workflow:
@@ -63,6 +87,7 @@ class TableQARunner:
             explicit_artifact_root = config.get("qa_artifact_dir") or agent_cfg.get("qa_artifact_dir")
             if explicit_artifact_root:
                 artifact_root = Path(str(explicit_artifact_root))
+        self.console_progress = bool(config.get("qa_console_progress", False)) if isinstance(config, dict) else False
         self.qa_artifact_root = artifact_root
 
         self.env = QAEnvironment(
@@ -84,8 +109,8 @@ class TableQARunner:
             "max_value_repr_chars": max_value_repr_chars,
         })
         
-        self.llm_client = llm_client
-        self.planner = TableQAPlanner(self.env, llm_client=llm_client)
+        self.llm_client = TokenCountingLLM(llm_client) if llm_client is not None else None
+        self.planner = TableQAPlanner(self.env, llm_client=self.llm_client)
         
         # Store table_id if provided in config
         self.table_id = None
@@ -97,10 +122,10 @@ class TableQARunner:
         # Initialize default code generation action if none was provided.
         code_action = code_action or policy
         if code_action is None:
-            if llm_client is None:
+            if self.llm_client is None:
                 raise ValueError("Either llm_client or code_action must be provided to TableQARunner.")
             from TableAgent.QA.actions.llm_code_generation import LLMCodeGenerationAction
-            code_action = LLMCodeGenerationAction(llm_client, self.env)
+            code_action = LLMCodeGenerationAction(self.llm_client, self.env)
         else:
             # Set the env on compatible actions.
             if hasattr(code_action, "env") or hasattr(code_action, "__dict__"):
@@ -108,9 +133,14 @@ class TableQARunner:
                     code_action.env = self.env
                 except Exception:
                     pass
+            if self.llm_client is not None and getattr(code_action, "llm_client", None) is llm_client:
+                try:
+                    code_action.llm_client = self.llm_client
+                except Exception:
+                    pass
 
         execute_action = ExecuteNotebookCodeAction(self.env)
-        review_action = ReviewSubtaskAction(self.env, llm_client=llm_client)
+        review_action = ReviewSubtaskAction(self.env, llm_client=self.llm_client)
         self.agent = TableQAAgent(
             self.env,
             code_action=code_action,
@@ -135,22 +165,20 @@ class TableQARunner:
             "run_id": run_id,
             "artifact_dir": str(run_dir),
         })
+        self._progress(f"[qa] run start | artifact_dir={run_dir}")
         start_time = time.time()
         
         table_id = self.table_id
-        if not table_id:
-            table_id = self.env.default_table_id()
-        table_df = self.env.operators.read_table_as_dataframe(table_id, has_headers=True)
-        self.env.execution_namespace["table_id"] = table_id
-        self.env.execution_namespace["table_df"] = table_df
-        safe_table_var = re.sub(r"[^a-zA-Z0-9_]", "_", table_id)
-        self.env.execution_namespace[safe_table_var] = table_df
-        spaced_table_var = re.sub(r"(?<=\D)(\d+)$", r"_\1", safe_table_var)
-        self.env.execution_namespace[spaced_table_var] = table_df
+        all_table_ids = self.env.operators.list_tables()
+        self.env.execution_namespace["all_table_ids"] = all_table_ids
+        self.env.execution_namespace["selected_table_ids"] = [table_id] if table_id else []
+        if table_id:
+            self._set_active_tables([table_id])
             
         # 1. Plan
         try:
             plan = self.planner.plan(question, table_id=table_id)
+            self._progress(f"[qa] planning done | subtasks={[(subtask.id, subtask.layer) for subtask in plan]}")
         except Exception as exc:
             execution_time = time.time() - start_time
             error_msg = f"Planning failed: {exc}"
@@ -162,6 +190,7 @@ class TableQARunner:
                 success=False,
                 error=error_msg,
                 execution_time=execution_time,
+                token_usage=self._token_usage(),
             )
             self.env.logger.log_event("run_complete", {
                 "success": False,
@@ -186,6 +215,7 @@ class TableQARunner:
                 success=False,
                 error=str(exc),
                 execution_time=execution_time,
+                token_usage=self._token_usage(),
             )
             result.logs = self.env.logger.events
             self.env.logger.log_event("run_complete", {
@@ -213,6 +243,7 @@ class TableQARunner:
                 success = False
                 error_msg = f"Subtask '{subtask.id}' has unfinished dependencies: {missing_deps}"
                 break
+            self._progress(f"[qa] subtask start | id={subtask.id} | layer={subtask.layer}")
             self.env.logger.log_event("subtask_start", {
                 "subtask_id": subtask.id,
                 "layer": subtask.layer,
@@ -223,7 +254,25 @@ class TableQARunner:
             if subtask.layer == "synthesis":
                 output = self.synthesis_agent.run_subtask(question, subtask)
             else:
+                if subtask.layer == "inspect":
+                    selected_table_ids = self._selected_table_ids()
+                    if not selected_table_ids:
+                        selected_table_ids = [self.env.default_table_id()]
+                        self._set_active_tables(selected_table_ids)
+                    if not subtask.metadata:
+                        subtask.metadata = {}
+                    subtask.metadata.setdefault("table_ids", selected_table_ids)
+                    subtask.metadata.setdefault("table_id", selected_table_ids[0])
                 output = self.agent.run_subtask(question, subtask)
+                if output.success and subtask.layer == "table_inspect":
+                    selected_table_ids = self._selected_table_ids()
+                    if not selected_table_ids:
+                        selected_table_ids = [self.env.default_table_id()]
+                    self._set_active_tables(selected_table_ids)
+            self._progress(
+                f"[qa] subtask done | id={subtask.id} | success={output.success} | "
+                f"updates={list(output.namespace_updates.keys())}"
+            )
                 
             subtask_outputs.append(output)
             
@@ -262,7 +311,8 @@ class TableQARunner:
             final_answer=final_answer,
             success=success,
             error=error_msg,
-            execution_time=execution_time
+            execution_time=execution_time,
+            token_usage=self._token_usage(),
         )
         
         # Expose logs/events on the result object
@@ -276,8 +326,58 @@ class TableQARunner:
         })
 
         self._persist_run_artifacts(result, run_dir, event_start_index)
+        self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
         
         return result
+
+    def _progress(self, message: str) -> None:
+        if self.console_progress:
+            print(message, flush=True)
+
+    def _selected_table_ids(self) -> list[str]:
+        raw = self.env.execution_namespace.get("selected_table_ids")
+        if isinstance(raw, str):
+            candidates = [raw]
+        elif isinstance(raw, (list, tuple, set)):
+            candidates = [str(item) for item in raw]
+        else:
+            candidates = []
+        valid = set(self.env.operators.list_tables())
+        selected = []
+        for table_id in candidates:
+            if table_id in valid and table_id not in selected:
+                selected.append(table_id)
+        return selected
+
+    def _set_active_tables(self, table_ids: list[str]) -> None:
+        valid = set(self.env.operators.list_tables())
+        selected = [table_id for table_id in table_ids if table_id in valid]
+        if not selected:
+            selected = [self.env.default_table_id()]
+
+        self._progress(f"[qa] preload tables start | table_ids={selected}")
+        table_dfs = {
+            table_id: self.env.operators.read_table_as_dataframe(table_id, has_headers=True)
+            for table_id in selected
+        }
+        primary_table_id = selected[0]
+        primary_df = table_dfs[primary_table_id]
+
+        self.env.execution_namespace["selected_table_ids"] = selected
+        self.env.execution_namespace["table_ids"] = selected
+        self.env.execution_namespace["table_dfs"] = table_dfs
+        self.env.execution_namespace["table_id"] = primary_table_id
+        self.env.execution_namespace["table_df"] = primary_df
+
+        for table_id, table_df in table_dfs.items():
+            safe_table_var = re.sub(r"[^a-zA-Z0-9_]", "_", table_id)
+            self.env.execution_namespace[safe_table_var] = table_df
+            spaced_table_var = re.sub(r"(?<=\D)(\d+)$", r"_\1", safe_table_var)
+            self.env.execution_namespace[spaced_table_var] = table_df
+        self._progress(
+            "[qa] preload tables done | "
+            + ", ".join(f"{table_id}:shape={getattr(table_df, 'shape', None)}" for table_id, table_df in table_dfs.items())
+        )
 
     def _topological_sort(self, plan: List[SubTask]) -> List[SubTask]:
         by_id = {}
@@ -369,6 +469,7 @@ class TableQARunner:
             "final_answer": result.final_answer,
             "error": result.error,
             "execution_time": result.execution_time,
+            "token_usage": result.token_usage,
             "artifacts": artifacts,
             "plan": [self._subtask_to_dict(subtask) for subtask in result.plan],
             "subtask_outputs": [
@@ -419,3 +520,11 @@ class TableQARunner:
             json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n",
             encoding="utf-8",
         )
+
+    def token_usage(self) -> dict[str, int]:
+        return self._token_usage()
+
+    def _token_usage(self) -> dict[str, int]:
+        if self.llm_client is None:
+            return {"prompt": 0, "completion": 0}
+        return self.llm_client.token_usage()

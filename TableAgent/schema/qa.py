@@ -23,6 +23,7 @@ class QAResult:
     error: Optional[str] = None
     execution_time: float = 0.0
     artifacts: Dict[str, str] = field(default_factory=dict)
+    token_usage: Dict[str, int] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return f"QAResult(success={self.success}, final_answer='{self.final_answer}')"

@@ -206,7 +206,13 @@ class TableAgentPipeline(BasePipeline):
             fallback_text_prompt=fallback_prompt,
         )
         responses.append(answer_response)
-        retrieval_info = {"score": candidate.score, "fallback_used": getattr(candidate, "fallback_used", False)}
+        retrieval_info = {
+            "score": candidate.score,
+            "lexical_score": getattr(candidate, "lexical_score", candidate.score),
+            "embedding_score": getattr(candidate, "embedding_score", 0.0),
+            "embedding_used": getattr(candidate, "embedding_used", False),
+            "fallback_used": getattr(candidate, "fallback_used", False),
+        }
         if hasattr(candidate, "reranker_selected_index"):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
             retrieval_info["reranker_rationale"] = getattr(candidate, "reranker_rationale", "")
@@ -252,6 +258,7 @@ class TableAgentPipeline(BasePipeline):
     ) -> tuple[LLMResponse, dict[str, Any]]:
         """Run the notebook QA phase against the persisted verified structure."""
         runner = None
+        qa_token_usage = {"prompt": 0, "completion": 0}
         try:
             runner = TableQARunner(
                 structure_path=str(structure_path),
@@ -263,19 +270,28 @@ class TableAgentPipeline(BasePipeline):
                 },
             )
             result = runner.run(question)
+            qa_token_usage = result.token_usage
             qa_info = {
                 "success": result.success,
                 "error": result.error,
                 "execution_time": result.execution_time,
+                "token_usage": result.token_usage,
                 "artifacts": result.artifacts,
                 "fallback_used": not result.success,
             }
             if result.success and result.final_answer is not None:
-                return LLMResponse(content=result.final_answer), qa_info
+                return LLMResponse(
+                    content=result.final_answer,
+                    prompt_tokens=int(result.token_usage.get("prompt", 0) or 0),
+                    completion_tokens=int(result.token_usage.get("completion", 0) or 0),
+                ), qa_info
         except Exception as exc:
+            if runner is not None:
+                qa_token_usage = runner.token_usage()
             qa_info = {
                 "success": False,
                 "error": str(exc),
+                "token_usage": qa_token_usage,
                 "artifacts": {},
                 "fallback_used": True,
             }
@@ -288,6 +304,8 @@ class TableAgentPipeline(BasePipeline):
             image_path=fallback_image_path,
             fallback_prompt=fallback_text_prompt,
         )
+        response.prompt_tokens += int(qa_token_usage.get("prompt", 0) or 0)
+        response.completion_tokens += int(qa_token_usage.get("completion", 0) or 0)
         return response, qa_info
 
     @staticmethod
