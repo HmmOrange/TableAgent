@@ -71,13 +71,72 @@ class TableAgentPipeline(BasePipeline):
             self.workbook_renderer,
             self.layout_agent,
             self.verification_agent,
+            progress_callback=self._progress,
         )
-        self.source_preparer = SourcePreparer(self.settings, self._analyze_source_sheet)
+        self.source_preparer = SourcePreparer(
+            self.settings,
+            self._analyze_source_sheet,
+            progress_callback=self._progress,
+        )
         self.source_retriever = SourceRetriever(self.settings, self.llm, self, self.prompts)
+        self._progress_callback: Callable[[str], None] | None = None
         self._apply_generation_cap()
 
     def prepare_samples(self, samples: list[EvalSample], logger: Any | None = None) -> None:
         self.source_preparer.prepare(samples, logger=logger)
+
+    def set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
+        self._progress_callback = callback
+
+    def _progress(self, stage: str, **fields: Any) -> None:
+        if self._progress_callback is None:
+            return
+        labels = {
+            "prepare": "prepare",
+            "prepare_extract": "prepare:extract",
+            "prepare_metadata": "prepare:metadata",
+            "prepare_cached": "prepare:cached",
+            "prepare_error": "prepare:error",
+            "prepare_layout": "prepare:layout",
+            "retrieval": "retrieve",
+            "rerank": "rerank",
+            "render": "render",
+            "layout": "layout",
+            "verify": "verify",
+            "qa": "qa",
+            "answer": "answer",
+            "done": "done",
+        }
+        parts = [labels.get(stage, stage)]
+        if stage in {"prepare_layout", "render", "layout", "verify"}:
+            ordered_fields = [
+                ("range", "range"),
+                ("iteration", "iter"),
+                ("direction", "dir"),
+                ("workbook", "book"),
+                ("sheet", "sheet"),
+                ("sample", "sample"),
+            ]
+        else:
+            ordered_fields = [
+                ("sample", "sample"),
+                ("workbook", "book"),
+                ("sheet", "sheet"),
+                ("range", "range"),
+                ("iteration", "iter"),
+                ("direction", "dir"),
+            ]
+        for key, label in ordered_fields:
+            value = fields.get(key)
+            if value is None or value == "":
+                continue
+            text = str(value)
+            if key == "sample" and len(text) > 28:
+                text = text[:25] + "..."
+            elif key in {"workbook", "sheet"} and len(text) > 24:
+                text = text[:21] + "..."
+            parts.append(f"{label}={text}")
+        self._progress_callback(" | ".join(parts))
 
     def set_run_id(self, run_id: int) -> Path:
         if run_id < 1:
@@ -94,7 +153,9 @@ class TableAgentPipeline(BasePipeline):
         start_time = self.start_timer()
         responses: list[LLMResponse] = []
 
+        self._progress("prepare", sample=sample.sample_id)
         self.source_preparer.prepare([sample], regenerate_invalid=False)
+        self._progress("retrieval", sample=sample.sample_id)
         candidate = self.source_retriever.select(sample, responses, self._fit_context)
         if candidate is not None:
             return self._run_prepared_source(sample, candidate, responses, start_time)
@@ -122,6 +183,7 @@ class TableAgentPipeline(BasePipeline):
         image_path = sample_dir / "table.png"
         html_path = sample_dir / "table.html"
         table_context = self._fit_context(sample.table_content)
+        self._progress("qa", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
         answer_response, qa_info = self._run_verified_qa(
             question=sample.question,
             structure_path=structure_path,
@@ -130,6 +192,7 @@ class TableAgentPipeline(BasePipeline):
             fallback_prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
         )
         responses.append(answer_response)
+        self._progress("done", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
 
         return PipelineOutput(
             sample_id=sample.sample_id,
@@ -150,6 +213,9 @@ class TableAgentPipeline(BasePipeline):
                 "artifact_dir": display_path(sample_dir),
                 "image_tiles": read_image_tiles(sample_dir),
                 "metadata_yaml_path": display_path(sample_dir / "metadata.yaml"),
+                "render_metadata_path": display_path(sample_dir / "table.metadata.json")
+                if (sample_dir / "table.metadata.json").is_file()
+                else None,
                 "changelog_path": display_path(workflow_result.changelog_path),
                 "events_path": display_path(workflow_result.events_path),
                 "iteration_artifact_dir": display_path(sample_dir / "iterations"),
@@ -179,6 +245,7 @@ class TableAgentPipeline(BasePipeline):
         metadata: SheetMetadata,
         sheet_dir: Path,
     ) -> str:
+        self._progress("prepare", workbook=source_path.name, sheet=sheet_name, range=metadata.used_range)
         result = self.layout_workflow.run(
             workbook_path=source_path,
             sheet_name=sheet_name,
@@ -196,6 +263,12 @@ class TableAgentPipeline(BasePipeline):
     ) -> PipelineOutput:
         image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
         fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
+        self._progress(
+            "qa",
+            sample=sample.sample_id,
+            workbook=candidate.workbook_path.name,
+            sheet=candidate.sheet_name,
+        )
         answer_response, qa_info = self._run_verified_qa(
             question=sample.question,
             structure_path=candidate.directory / "structure.yaml",
@@ -206,6 +279,12 @@ class TableAgentPipeline(BasePipeline):
             fallback_text_prompt=fallback_prompt,
         )
         responses.append(answer_response)
+        self._progress(
+            "done",
+            sample=sample.sample_id,
+            workbook=candidate.workbook_path.name,
+            sheet=candidate.sheet_name,
+        )
         retrieval_info = {
             "score": candidate.score,
             "lexical_score": getattr(candidate, "lexical_score", candidate.score),
@@ -238,6 +317,9 @@ class TableAgentPipeline(BasePipeline):
                 "image_tiles": read_image_tiles(candidate.directory),
                 "retrieval_info": retrieval_info,
                 "metadata_yaml_path": display_path(candidate.directory / "metadata.yaml"),
+                "render_metadata_path": display_path(candidate.directory / "table.metadata.json")
+                if (candidate.directory / "table.metadata.json").is_file()
+                else None,
                 "changelog_path": display_path(candidate.directory / "changelog.md"),
                 "events_path": display_path(candidate.directory / "events.jsonl"),
                 "iteration_artifact_dir": display_path(candidate.directory / "iterations"),

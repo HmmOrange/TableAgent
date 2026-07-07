@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import openpyxl
 import yaml
+from PIL import Image
 
 from TableAgent.agents import (
     LayoutAgent,
@@ -15,9 +18,10 @@ from TableAgent.agents import (
 )
 from TableAgent.config import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
+from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow, _has_enough_data
 from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport
 from TableAgent.rendering.workbook import WorkbookRenderer
+from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
 from table2img.core import RenderResult
 from utils.llm.base import LLMResponse
 
@@ -92,6 +96,14 @@ class RecordingRenderer:
         return RenderResult(image_path, html_path, 100, 80, Path("fake"))
 
 
+def _patch_libreoffice_workbook_render(monkeypatch):
+    def fake_render(workbook_path, sheet_name, cell_range, image_path, **kwargs):
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (100, 80), "white").save(image_path)
+
+    monkeypatch.setattr("TableAgent.rendering.workbook._render_xlsx_range_with_libreoffice", fake_render)
+
+
 def _settings(tmp_path: Path, **override) -> TableAgentConfig:
     return TableAgentConfig.from_config({
         "artifact_dir": str(tmp_path),
@@ -116,6 +128,90 @@ def _workbook(path: Path) -> None:
     workbook.save(path)
 
 
+def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch, tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet["B2"] = "Revenue"
+    worksheet["D5"] = 100
+    workbook.save(workbook_path)
+    workbook.close()
+
+    image_path = tmp_path / "render.png"
+    calls = {}
+
+    monkeypatch.setattr(
+        "TableAgent.rendering.workbook._resolve_libreoffice_path",
+        lambda path: Path("C:/LibreOffice/program/soffice.exe"),
+    )
+
+    def fake_run(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+        outdir = Path(command[command.index("--outdir") + 1])
+        prepared = Path(command[-1])
+        pdf_path = outdir / prepared.with_suffix(".pdf").name
+        pdf_path.write_bytes(b"%PDF-1.4")
+
+        saved = openpyxl.load_workbook(prepared)
+        try:
+            sheet = saved["Sheet1"]
+            calls["print_area"] = str(sheet.print_area)
+            calls["headings"] = sheet.print_options.headings
+            calls["grid_lines"] = sheet.print_options.gridLines
+            calls["fit_to_width"] = sheet.page_setup.fitToWidth
+            calls["fit_to_height"] = sheet.page_setup.fitToHeight
+        finally:
+            saved.close()
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeBitmap:
+        def to_pil(self):
+            return Image.new("RGB", (100, 80), "white")
+
+    class FakePage:
+        def render(self, *, scale):
+            calls["scale"] = scale
+            return FakeBitmap()
+
+    class FakePdf:
+        def __init__(self, path):
+            calls["pdf_path"] = path
+
+        def __getitem__(self, index):
+            calls["page_index"] = index
+            return FakePage()
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setitem(sys.modules, "pypdfium2", types.SimpleNamespace(PdfDocument=FakePdf))
+
+    _render_xlsx_range_with_libreoffice(
+        workbook_path,
+        "Sheet1",
+        "B2:D5",
+        image_path,
+        libreoffice_path=Path("soffice.exe"),
+        resolution=240,
+        timeout_seconds=30,
+        show_coordinates=True,
+    )
+
+    assert image_path.is_file()
+    assert calls["command"][0] == "C:\\LibreOffice\\program\\soffice.exe"
+    assert calls["print_area"] == "'Sheet1'!$B$2:$D$5"
+    assert calls["headings"] is True
+    assert calls["grid_lines"] is True
+    assert calls["fit_to_width"] == 1
+    assert calls["fit_to_height"] == 1
+    assert calls["scale"] == 384 / 72
+    assert calls["page_index"] == 0
+    assert calls["closed"] is True
+
+
 def _hierarchical_workbook(path: Path) -> None:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
@@ -125,6 +221,19 @@ def _hierarchical_workbook(path: Path) -> None:
     worksheet["B2"] = "Out"
     worksheet["A3"] = 1
     worksheet["B3"] = 2
+    workbook.save(path)
+
+
+def _wide_hierarchical_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:D1")
+    worksheet["A1"] = "Quarter"
+    for cell, value in zip(("A2", "B2", "C2", "D2"), ("Jan", "Feb", "Mar", "Apr")):
+        worksheet[cell] = value
+    for col in range(1, 5):
+        worksheet.cell(row=3, column=col).value = col
     workbook.save(path)
 
 
@@ -256,6 +365,66 @@ def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path
 
     assert report["status"] == "good"
     assert report["errors"] == []
+
+
+def test_verifier_rejects_missing_visible_layered_subheaders(tmp_path: Path):
+    workbook_path = tmp_path / "wide.xlsx"
+    _wide_hierarchical_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Quarter",
+            "description": "Quarterly data",
+            "headers": [{
+                "label": "Quarter",
+                "description": "Quarter group",
+                "orientation": "column",
+                "header_range": "A1:D1",
+                "data_range": "A3:D3",
+                "sub_headers": [{
+                    "label": "Jan",
+                    "description": "January",
+                    "orientation": "column",
+                    "header_range": "A2:A2",
+                    "data_range": "A3:A3",
+                }],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["status"] == "not_good"
+    assert any("do not cover visible layered header cells" in error for error in report["errors"])
+
+
+def test_verifier_rejects_subheader_without_data_range(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _hierarchical_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Movement",
+            "description": "Movement by month",
+            "headers": [{
+                "label": "Month",
+                "description": "Month group",
+                "orientation": "column",
+                "header_range": "A1:B1",
+                "data_range": "A3:B3",
+                "sub_headers": [{
+                    "label": "In",
+                    "description": "Inbound",
+                    "orientation": "column",
+                    "header_range": "A2:A2",
+                    "data_range": None,
+                }],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["status"] == "not_good"
+    assert "table1.headers[0].sub_headers[0].data_range" in report["null_fields"]
 
 
 def test_verifier_outputs_unicode_without_windows_codepage_crash(tmp_path: Path):
@@ -421,8 +590,11 @@ def test_verification_agent_applies_semantic_updated_structure(tmp_path: Path):
     )
 
     assert result.status == "good"
-    assert yaml.safe_load(result.structure_text) == repaired_structure
-    assert yaml.safe_load((iteration_dir / "structure_after.yaml").read_text(encoding="utf-8")) == repaired_structure
+    accepted = yaml.safe_load(result.structure_text)
+    persisted = yaml.safe_load((iteration_dir / "structure_after.yaml").read_text(encoding="utf-8"))
+    assert accepted["table1"]["headers"][0]["header_range"] == "A1:A1"
+    assert accepted["table1"]["headers"][0]["data_range"] == "A2:A10"
+    assert persisted == accepted
     assert (iteration_dir / "structure_semantic.yaml").is_file()
     assert (iteration_dir / "verification_output_after_semantic.json").is_file()
 
@@ -565,7 +737,8 @@ def test_data_range_updates_preserve_union_with_existing_range():
     assert merged["table1"]["headers"][0]["data_range"] == "A2:A35"
 
 
-def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path):
+def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monkeypatch):
+    _patch_libreoffice_workbook_render(monkeypatch)
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path)
@@ -589,10 +762,8 @@ def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path)
     events = [json.loads(line) for line in (tmp_path / "artifacts" / "events.jsonl").read_text().splitlines()]
     assert [(event["direction"], event["viewport"]) for event in events] == [
         ("stay", "A1:T10"),
-        ("right", "P1:AI10"),
-        ("right", "AE1:AN10"),
     ]
-    assert result.iterations == 3
+    assert result.iterations == 1
     assert (tmp_path / "artifacts" / "metadata.yaml").is_file()
     assert (tmp_path / "artifacts" / "changelog.md").is_file()
     for iteration_dir in (tmp_path / "artifacts" / "iterations").iterdir():
@@ -602,7 +773,8 @@ def test_workflow_continues_direction_once_after_first_no_change(tmp_path: Path)
         assert (iteration_dir / "verification_output.json").is_file()
 
 
-def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path):
+def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path, monkeypatch):
+    _patch_libreoffice_workbook_render(monkeypatch)
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path, max_retry=2)
@@ -629,7 +801,8 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path):
     assert "retries exhausted" in (tmp_path / "retry-artifacts" / "changelog.md").read_text().lower()
 
 
-def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path):
+def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path, monkeypatch):
+    _patch_libreoffice_workbook_render(monkeypatch)
     class RightSuggestingLayoutVLM(StaticLayoutVLM):
         def generate_with_image(self, prompt, image_path, system_prompt=None):
             response = yaml.safe_load(super().generate_with_image(prompt, image_path, system_prompt).content)
@@ -655,5 +828,56 @@ def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path)
     )
 
     events = [json.loads(line) for line in (tmp_path / "bounded-artifacts" / "events.jsonl").read_text().splitlines()]
-    assert [event["viewport"] for event in events] == ["A1:Q20", "A16:Q35", "A31:Q50"]
+    assert [event["viewport"] for event in events] == ["A1:Q20"]
     assert all(event["direction"] != "right" for event in events)
+
+
+def test_has_enough_data_uses_value_coverage_not_styles(tmp_path: Path):
+    workbook_path = tmp_path / "coverage.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    for row in range(1, 11):
+        for col in range(1, 11):
+            worksheet.cell(row=row, column=col).border = openpyxl.styles.Border(
+                left=openpyxl.styles.Side(style="thin")
+            )
+    for row in range(1, 6):
+        worksheet.cell(row=row, column=1).value = f"Row {row}"
+    workbook.save(workbook_path)
+    workbook.close()
+
+    assert _has_enough_data(workbook_path, "Sheet1", "A1:J10")
+    assert not _has_enough_data(workbook_path, "Sheet1", "B1:J10")
+
+
+def test_workflow_discards_vlm_suggested_empty_range(tmp_path: Path, monkeypatch):
+    _patch_libreoffice_workbook_render(monkeypatch)
+
+    class RightSuggestingLayoutVLM(StaticLayoutVLM):
+        def generate_with_image(self, prompt, image_path, system_prompt=None):
+            response = yaml.safe_load(super().generate_with_image(prompt, image_path, system_prompt).content)
+            response["remaining_directions"] = ["right"]
+            return LLMResponse(content=yaml.safe_dump(response, sort_keys=False))
+
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    settings = _settings(tmp_path)
+    renderer = WorkbookRenderer(settings, RecordingRenderer(), logger=None)
+    workflow = TableLayoutWorkflow(
+        settings,
+        renderer,
+        LayoutAgent(RightSuggestingLayoutVLM()),
+        VerificationAgent(GoodVerificationLLM()),
+    )
+
+    result = workflow.run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata=SheetMetadata("Sheet1", "A1:AN10", []),
+        output_dir=tmp_path / "empty-right-artifacts",
+    )
+
+    events = [json.loads(line) for line in (tmp_path / "empty-right-artifacts" / "events.jsonl").read_text().splitlines()]
+    assert [event["viewport"] for event in events] == ["A1:T10"]
+    assert result.iterations == 1

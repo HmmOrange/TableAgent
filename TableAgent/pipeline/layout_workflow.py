@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+import openpyxl
 from openpyxl.utils.cell import range_boundaries
 
 from TableAgent.agents import LayoutAgent, VerificationAgent
@@ -42,11 +43,20 @@ class TableLayoutWorkflow:
         renderer: WorkbookRenderer,
         layout_agent: LayoutAgent,
         verification_agent: VerificationAgent,
+        progress_callback: Callable[..., None] | None = None,
     ):
         self.settings = settings
         self.renderer = renderer
         self.layout_agent = layout_agent
         self.verification_agent = verification_agent
+        self.progress_callback = progress_callback
+
+    def set_progress_callback(self, callback: Callable[..., None] | None) -> None:
+        self.progress_callback = callback
+
+    def _progress(self, stage: str, **fields: Any) -> None:
+        if self.progress_callback:
+            self.progress_callback(stage=stage, **fields)
 
     def run(
         self,
@@ -93,6 +103,14 @@ class TableLayoutWorkflow:
                 continue
             viewport_range = task.viewport.clipped_a1_range(table_range)
             iteration += 1
+            progress_fields = {
+                "workbook": workbook_path.name,
+                "sheet": sheet_name,
+                "range": viewport_range,
+                "iteration": iteration,
+                "direction": task.direction.name.lower(),
+            }
+            self._progress("render", **progress_fields)
             iteration_dir = iterations_dir / (
                 f"{iteration:04d}_{task.direction.name.lower()}_"
                 f"{viewport_range.replace(':', '_')}"
@@ -108,6 +126,12 @@ class TableLayoutWorkflow:
             if first_image is None:
                 first_image = image_path
                 (output_dir / "table.png").write_bytes(image_path.read_bytes())
+                render_metadata_path = image_path.with_suffix(".metadata.json")
+                if render_metadata_path.is_file():
+                    (output_dir / "table.metadata.json").write_text(
+                        render_metadata_path.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
                 if render_result.html_path and render_result.html_path.is_file():
                     (output_dir / "table.html").write_text(
                         render_result.html_path.read_text(encoding="utf-8"),
@@ -115,6 +139,7 @@ class TableLayoutWorkflow:
                     )
 
             (iteration_dir / "structure_before.yaml").write_text(structure_text, encoding="utf-8")
+            self._progress("layout", **progress_fields)
             layout = self.layout_agent.run(
                 metadata_text=metadata_text,
                 structure_text=structure_text,
@@ -132,6 +157,7 @@ class TableLayoutWorkflow:
             if layout.discarded:
                 (iteration_dir / "layout_discarded.txt").write_text(layout.discarded, encoding="utf-8")
 
+            self._progress("verify", **progress_fields)
             verification = self.verification_agent.run(
                 workbook_path=workbook_path,
                 sheet_name=sheet_name,
@@ -154,7 +180,9 @@ class TableLayoutWorkflow:
                 "direction": task.direction.name.lower(),
                 "viewport": viewport_range,
                 "changed": layout.changed,
+                "layout_token_capped": layout.response.token_capped,
                 "layout_directions": layout.directions,
+                "verification_token_capped": verification.response.token_capped,
                 "verification": last_verification,
                 "queue_size": len(queue),
             })
@@ -178,7 +206,7 @@ class TableLayoutWorkflow:
                     successful_viewports.add(task.viewport.key)
                     frontier = frontier_directions(table_range, task.viewport)
                     suggested = [Direction.parse(value) for value in layout.directions]
-                    discovered = [direction for direction in suggested if direction in frontier] or frontier
+                    discovered = [direction for direction in suggested if direction in frontier]
                     for direction in discovered:
                         if direction != Direction.STAY:
                             self._enqueue_shift(
@@ -187,6 +215,8 @@ class TableLayoutWorkflow:
                                 direction,
                                 successful_viewports,
                                 table_range,
+                                workbook_path,
+                                sheet_name,
                             )
                 continue
 
@@ -204,20 +234,32 @@ class TableLayoutWorkflow:
             if task.direction != Direction.STAY and task.direction in frontier:
                 if layout.changed:
                     zero_change_runs[task.direction] = 0
-                    self._enqueue_shift(queue, task.viewport, task.direction, successful_viewports, table_range)
+                    self._enqueue_shift(
+                        queue,
+                        task.viewport,
+                        task.direction,
+                        successful_viewports,
+                        table_range,
+                        workbook_path,
+                        sheet_name,
+                    )
                 else:
                     zero_change_runs[task.direction] += 1
-                    if zero_change_runs[task.direction] == 1:
-                        self._enqueue_shift(queue, task.viewport, task.direction, successful_viewports, table_range)
 
             suggested = [Direction.parse(value) for value in layout.directions]
             discovered = [direction for direction in suggested if direction in frontier]
-            if not discovered:
-                discovered = frontier
             for direction in discovered:
                 if direction in {Direction.STAY, task.direction}:
                     continue
-                self._enqueue_shift(queue, task.viewport, direction, successful_viewports, table_range)
+                self._enqueue_shift(
+                    queue,
+                    task.viewport,
+                    direction,
+                    successful_viewports,
+                    table_range,
+                    workbook_path,
+                    sheet_name,
+                )
 
         if structure_text.strip():
             structure_path.write_text(structure_text, encoding="utf-8")
@@ -242,9 +284,14 @@ class TableLayoutWorkflow:
         direction: Direction,
         successful_viewports: set[tuple[int, int]],
         table_range: str | None,
+        workbook_path: Path,
+        sheet_name: str,
     ) -> None:
         target = viewport.shifted(direction, self.settings.shift_cells)
         if target.key in successful_viewports or not _intersects(target, table_range):
+            return
+        target_range = target.clipped_a1_range(table_range)
+        if not _has_enough_data(workbook_path, sheet_name, target_range):
             return
         queue.push(TraversalTask(direction, target))
 
@@ -266,3 +313,38 @@ def _intersects(viewport: Viewport, table_range: str | None) -> bool:
         or viewport_max_col < min_col
         or viewport.column > max_col
     )
+
+
+def _has_enough_data(
+    workbook_path: Path,
+    sheet_name: str,
+    cell_range: str,
+    *,
+    min_coverage: float = 0.4,
+) -> bool:
+    """Return whether a candidate viewport has enough real values to process."""
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=False)
+    try:
+        worksheet = workbook[sheet_name]
+        rows_with_values: set[int] = set()
+        cols_with_values: set[int] = set()
+        for row in worksheet.iter_rows(
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
+        ):
+            for cell in row:
+                value = cell.value
+                if value is not None and str(value).strip():
+                    rows_with_values.add(cell.row)
+                    cols_with_values.add(cell.column)
+        row_count = max(1, max_row - min_row + 1)
+        col_count = max(1, max_col - min_col + 1)
+        return (
+            len(rows_with_values) / row_count >= min_coverage
+            or len(cols_with_values) / col_count >= min_coverage
+        )
+    finally:
+        workbook.close()

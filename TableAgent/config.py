@@ -19,6 +19,9 @@ class TableAgentConfig:
     image_scale: float
     render_backend: str
     render_timeout_seconds: float
+    libreoffice_path: Path | None
+    libreoffice_image_resolution: int
+    workbook_show_coordinates: bool
     generation_max_tokens: int | None
     max_image_dimension: int | None
     max_viewport_width: int
@@ -58,6 +61,11 @@ class TableAgentConfig:
             image_scale=float(_required(merged, "image_scale")),
             render_backend=str(merged.get("render_backend", "auto")).strip().lower(),
             render_timeout_seconds=float(_required(merged, "render_timeout_seconds")),
+            libreoffice_path=_optional_path(merged.get("libreoffice_path")),
+            libreoffice_image_resolution=int(
+                merged.get("libreoffice_image_resolution", merged.get("aspose_image_resolution", 192))
+            ),
+            workbook_show_coordinates=_bool(merged.get("workbook_show_coordinates", True)),
             generation_max_tokens=_optional_int(merged.get("generation_max_tokens")),
             max_image_dimension=_optional_int(merged.get("max_image_dimension")),
             max_viewport_width=int(_required(merged, "max_viewport_width")),
@@ -72,7 +80,7 @@ class TableAgentConfig:
             viewport_rows=int(merged.get("viewport_rows", 20)),
             viewport_columns=int(merged.get("viewport_columns", 20)),
             shift_cells=int(merged.get("shift_cells", 15)),
-            max_retry=int(merged.get("max_retry", 5)),
+            max_retry=int(merged.get("max_retry", 3)),
             qa_max_retries=int(merged.get("qa_max_retries", 3)),
             qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
             qa_log_path=_optional_path(merged.get("qa_log_path")),
@@ -125,13 +133,7 @@ def resolve_table_agent_run_roots(
     requested_output_dir = Path(output_dir)
     if pipeline_name != "table_agent":
         return requested_output_dir, Path("logs")
-
-    agent_config = config.get("table_agent", {})
-    if not isinstance(agent_config, dict):
-        return requested_output_dir, Path("logs")
-    if requested_output_dir == Path("outputs"):
-        requested_output_dir = Path(str(agent_config.get("evaluation_output_dir", output_dir)))
-    return requested_output_dir, Path(str(agent_config.get("log_dir", "logs")))
+    return requested_output_dir, requested_output_dir
 
 
 def _required(config: dict[str, Any], key: str) -> Any:

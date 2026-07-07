@@ -20,10 +20,16 @@ class SourcePreparer:
         settings: TableAgentConfig,
         analyze_sheet: Callable[[Path, str, SheetMetadata, Path], str],
         metadata_extractor: ExStructMetadataExtractor | None = None,
+        progress_callback: Callable[..., None] | None = None,
     ):
         self.settings = settings
         self.analyze_sheet = analyze_sheet
         self.metadata_extractor = metadata_extractor or ExStructMetadataExtractor(settings.exstruct_mode)
+        self.progress_callback = progress_callback
+
+    def _progress(self, stage: str, **fields: Any) -> None:
+        if self.progress_callback:
+            self.progress_callback(stage, **fields)
 
     def prepare(self, samples: list[EvalSample], logger: Any | None = None, *, regenerate_invalid: bool = True) -> None:
         if not samples or not is_siflex(samples[0]):
@@ -31,6 +37,7 @@ class SourcePreparer:
 
         for source_path in self._source_paths(samples):
             try:
+                self._progress("prepare_extract", workbook=source_path.name)
                 workbook_payload = self.metadata_extractor.extract(source_path)
             except Exception as exc:
                 if logger:
@@ -39,6 +46,7 @@ class SourcePreparer:
 
             sheets = workbook_payload.get("sheets") or {}
             for sheet_name in sheets:
+                self._progress("prepare_metadata", workbook=source_path.name, sheet=sheet_name)
                 sheet_dir = self.source_dir(source_path, sheet_name)
                 sheet_dir.mkdir(parents=True, exist_ok=True)
                 paths = self._paths(sheet_dir)
@@ -63,13 +71,17 @@ class SourcePreparer:
                     continue
 
                 if has_current_structure:
+                    self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)
                     continue
                 if structure_exists and not regenerate_invalid:
+                    self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)
                     continue
                 if paths["error"].is_file():
+                    self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
                     continue
 
                 try:
+                    self._progress("prepare_layout", workbook=source_path.name, sheet=sheet_name, range=metadata.used_range)
                     structure_text = self.analyze_sheet(source_path, sheet_name, metadata, sheet_dir)
                 except Exception as exc:
                     structure_text = ""

@@ -559,6 +559,17 @@ def set_null(header, path, field_name, null_fields):
     null_fields.append(f"{path}.{field_name}")
 
 
+def header_at_path(root, child_path):
+    child = root
+    for token in re.findall(r"sub_headers\\[(\\d+)\\]", child_path):
+        sub_headers = child.get("sub_headers", [])
+        index = int(token)
+        if not isinstance(sub_headers, list) or index >= len(sub_headers):
+            return None
+        child = sub_headers[index]
+    return child if isinstance(child, dict) else None
+
+
 def repair_label(header, texts, actions, path):
     if not texts:
         return
@@ -599,6 +610,48 @@ def walk_header(header, path):
         return
     for index, child in enumerate(sub_headers):
         yield from walk_header(child, f"{path}.sub_headers[{index}]")
+
+
+def header_text_boxes_in_band(worksheet, band_box):
+    boxes = []
+    seen = set()
+    min_col, min_row, max_col, max_row = band_box
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            value = effective_value(worksheet, row, col)
+            if value is None or not str(value).strip():
+                continue
+            box = merged_box_for(worksheet, (col, row, col, row)) or (col, row, col, row)
+            key = (box, clean_text(value))
+            if key not in seen:
+                boxes.append((box, clean_text(value)))
+                seen.add(key)
+    return boxes
+
+
+def visible_subheader_gaps(worksheet, parent_box, child_header_boxes, data_box, orientation):
+    if not child_header_boxes:
+        return []
+    boxes = [item[2] for item in child_header_boxes]
+    if orientation == "row":
+        start_col = min(box[0] for box in boxes)
+        end_col = max(box[2] for box in boxes)
+        if data_box is not None:
+            end_col = min(end_col, data_box[0] - 1)
+        band_box = (start_col, parent_box[1], end_col, parent_box[3])
+    else:
+        start_row = min(box[1] for box in boxes)
+        end_row = max(box[3] for box in boxes)
+        if data_box is not None:
+            end_row = min(end_row, data_box[1] - 1)
+        band_box = (parent_box[0], start_row, parent_box[2], end_row)
+    if band_box[0] > band_box[2] or band_box[1] > band_box[3]:
+        return []
+    gaps = []
+    for text_box, text in header_text_boxes_in_band(worksheet, band_box):
+        if not any(contains(child_box, text_box) for child_box in boxes):
+            gaps.append((box_to_range(text_box), text))
+    return gaps
 
 
 def check_header(worksheet, path, header, used_box, errors, actions, null_fields):
@@ -739,6 +792,9 @@ def check_header(worksheet, path, header, used_box, errors, actions, null_fields
                 continue
             child_header_range = child.get("header_range") or child.get("range")
             child_data_range = child.get("data_range")
+            if child_data_range is None:
+                null_fields.append(f"{child_path}.data_range")
+                errors.append(f"{child_path}.data_range is required when a sub-header is declared")
             if child_header_range is not None:
                 try:
                     child_header_box = range_box(child_header_range)
@@ -772,10 +828,9 @@ def check_header(worksheet, path, header, used_box, errors, actions, null_fields
                     )
         for child_path, child_data_range, child_data_box in child_data_boxes:
             if not contains(data_box, child_data_box):
-                child = header
-                for token in re.findall(r"sub_headers\\[(\\d+)\\]", child_path):
-                    child = child.get("sub_headers", [])[int(token)]
-                set_null(child, child_path, "data_range", null_fields)
+                child = header_at_path(header, child_path)
+                if child is not None:
+                    set_null(child, child_path, "data_range", null_fields)
                 errors.append(
                     f"{child_path}.data_range is not contained by parent {path}.data_range: "
                     f"{child_data_range} vs {data_range}"
@@ -785,34 +840,45 @@ def check_header(worksheet, path, header, used_box, errors, actions, null_fields
         for child_path, child_header_range, child_header_box in child_header_boxes:
             if orientation == "column":
                 if child_header_box[0] < header_box[0] or child_header_box[2] > header_box[2]:
-                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
-                    set_null(child, child_path, "header_range", null_fields)
+                    child = header_at_path(header, child_path)
+                    if child is not None:
+                        set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range columns are outside parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
                 if child_header_box[1] <= header_box[3]:
-                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
-                    set_null(child, child_path, "header_range", null_fields)
+                    child = header_at_path(header, child_path)
+                    if child is not None:
+                        set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range must be below parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
             else:
                 if child_header_box[1] < header_box[1] or child_header_box[3] > header_box[3]:
-                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
-                    set_null(child, child_path, "header_range", null_fields)
+                    child = header_at_path(header, child_path)
+                    if child is not None:
+                        set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range rows are outside parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
                 if child_header_box[0] <= header_box[2]:
-                    child = header.get("sub_headers", [])[int(re.search(r"\\[(\\d+)\\]$", child_path).group(1))]
-                    set_null(child, child_path, "header_range", null_fields)
+                    child = header_at_path(header, child_path)
+                    if child is not None:
+                        set_null(child, child_path, "header_range", null_fields)
                     errors.append(
                         f"{child_path}.header_range must be right of parent {path}.header_range: "
                         f"{child_header_range} vs {header_range}"
                     )
+        gaps = visible_subheader_gaps(worksheet, header_box, child_header_boxes, data_box, orientation)
+        if gaps:
+            formatted = ", ".join(f"{cell}={text!r}" for cell, text in gaps[:8])
+            errors.append(
+                f"{path}.sub_headers do not cover visible layered header cells under parent "
+                f"{header_range}: {formatted}"
+            )
 
 
 workbook_path, sheet_name, structure_path = sys.argv[1:4]

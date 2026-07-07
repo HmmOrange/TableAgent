@@ -44,8 +44,8 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
     "when visible cells show a distinct table start. Report a concise changelog and "
-    "cardinal directions only when the visible edge shows a potential header continuing "
-    "in that direction."
+    "cardinal directions only when the visible edge shows potential headers continuing "
+    "in that direction, never merely because more data cells continue."
 )
 
 LAYOUT_MAS_USER_PROMPT_TEMPLATE = """\
@@ -120,14 +120,16 @@ Rules for remaining_directions:
 - Include a direction only when cells at that visible edge show a potential header:
   a label-bearing, merged/spanned, or distinctly header-formatted row or column that
   appears to continue beyond the viewport in that direction.
+- Think about headers only. Do not include a direction just because there are more
+  data rows, schedule marks, blank grid cells, formulas, borders, or worksheet area.
 - Data values, blank cells, worksheet bounds, or table content without potential
   header evidence are not sufficient. If no direction has such evidence, return `[]`.
 - If Movement direction is `right`, do not include `right` or `left`.
 - If Movement direction is `left`, do not include `left` or `right`.
 - If Movement direction is `down`, do not include `down` or `up`.
 - If Movement direction is `up`, do not include `up` or `down`.
-- The orchestrator separately decides whether to continue in the same movement
-  direction for fact checking, so never repeat the current direction here.
+- The orchestrator separately applies deterministic workbook checks before rendering
+  any suggested range, so never suggest directions for data-only continuation.
 - Do not repeat directions. Output at most two directions.
 
 If the viewport does not show a table or only shows empty/non-table context, keep the
@@ -136,14 +138,14 @@ current structure unchanged and use changelog: "No change.".
 
 VERIFICATION_MAS_SYSTEM_PROMPT = (
     "You are a table structure verification agent named VerificationAgent. Use a "
-    "ReAct pattern over the candidate structure and deterministic verifier report: "
-    "Thought, Action, Observation, then final status. The deterministic verifier is "
-    "a tool observation, not the only judge; it can be too strict about minor OCR, "
-    "line-break, multilingual-label, or span issues. Return only YAML. If semantic "
-    "review can confidently fix the structure, include updated_structure with the "
-    "full corrected structure.yaml. status is good or not_good. null_fields lists "
-    "range fields that must become null if retries are exhausted. orientation must "
-    "be either row or column."
+    "compact semantic review over the candidate structure and deterministic verifier "
+    "report. The deterministic verifier is a tool observation, not the only judge; "
+    "it can be too strict about minor OCR, line-break, multilingual-label, or span "
+    "issues. Return only YAML with the requested keys. Do not include chain-of-thought, "
+    "long reasoning, repeated report text, or a ReAct pattern. If semantic review "
+    "can confidently fix the structure, include updated_structure with the full corrected structure.yaml. "
+    "status is good or not_good. null_fields lists range fields that must become null "
+    "if retries are exhausted. orientation must be either row or column."
 )
 
 VERIFICATION_MAS_USER_PROMPT_TEMPLATE = """\
@@ -161,12 +163,9 @@ LayoutAgent changelog.md:
 Deterministic verification result:
 {verification_report}
 
-Use this ReAct-style YAML envelope:
-thought: <brief diagnosis grounded in the deterministic report and visible coordinate semantics>
-action: <accept|repair_structure|request_layout_retry|null_on_retry_exhaustion>
-observation: <what the deterministic report proves and what semantic review resolves>
+Return only this compact YAML envelope:
 status: good|not_good
-feedback: <specific correction or confirmation>
+feedback: <one short correction or confirmation, max 40 words>
 null_fields: [<dot paths, if any>]
 updated_structure:
   table1:
@@ -186,6 +185,8 @@ updated_structure:
 Rules:
 - Include updated_structure only when you are correcting or accepting a complete
   structure.yaml. Omit it if LayoutAgent must inspect another viewport.
+- Keep feedback concise. Do not copy the deterministic report, do not explain your
+  reasoning step by step, and do not emit thought/action/observation keys.
 - Preserve existing correct tables and headers; change only fields needed by the
   deterministic observation or semantic review.
 - Preserve every existing table and header `id`; assign a unique stable snake_case

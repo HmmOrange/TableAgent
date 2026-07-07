@@ -17,6 +17,10 @@ from configs.embedding_config import resolve_embedding_config
 from TableAgent.perception.structure import _is_valid_structure, _parse_yaml_mapping
 from TableAgent.pipeline.common import SourceCandidate, is_siflex
 from TableAgent.utils.table_text import _lexical_overlap_score
+from utils.log.logger import Logger
+
+
+logger = Logger(__name__)
 
 
 class MockEmbeddingModel:
@@ -199,8 +203,7 @@ class SourceRetriever:
                     provider_name = None if provider in {"default", "live"} else provider
                     self.embedding_client = OpenAICompatibleEmbeddingClient.from_config(provider_name)
                 except Exception as exc:
-                    import sys
-                    print(f"Embedding client initialization failed: {exc}", file=sys.stderr)
+                    logger.warning("Embedding client initialization failed: %s", exc)
                     self.embedding_client = None
             else:
                 self.embedding_client = None
@@ -212,16 +215,30 @@ class SourceRetriever:
         if not candidates:
             return None
         if not self.settings.retrieval_rerank_with_llm or len(candidates) == 1:
+            self._progress("retrieval", sample=sample.sample_id, candidate=candidates[0])
             return candidates[0]
 
         top_candidates = candidates[: max(1, self.settings.retrieval_top_k)]
+        self._progress("rerank", sample=sample.sample_id, candidate=top_candidates[0])
         prompt = self.templates.reranker_user_prompt_template.format(
             question=sample.question,
             candidates_text=self.prompt_builder.candidate_prompt_text(top_candidates, fit_context),
         )
         response = self.llm.generate(prompt=prompt, system_prompt=self.templates.reranker_system_prompt)
         responses.append(response)
-        return self._choose_from_reranker(response.content, top_candidates)
+        candidate = self._choose_from_reranker(response.content, top_candidates)
+        self._progress("retrieval", sample=sample.sample_id, candidate=candidate)
+        return candidate
+
+    def _progress(self, stage: str, *, sample: str, candidate: SourceCandidate) -> None:
+        progress = getattr(self.templates, "_progress", None)
+        if callable(progress):
+            progress(
+                stage,
+                sample=sample,
+                workbook=candidate.workbook_path.name,
+                sheet=candidate.sheet_name,
+            )
 
     def load_candidates(self, sample: EvalSample) -> list[SourceCandidate]:
         artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir
@@ -297,8 +314,7 @@ class SourceRetriever:
                 candidates = updated_candidates
                 embedding_used = True
             except Exception as e:
-                import sys
-                print(f"Embedding generation failed: {e}", file=sys.stderr)
+                logger.warning("Embedding generation failed: %s", e)
 
         lexical_weight = getattr(self.settings, "retrieval_lexical_weight", 0.5)
         embedding_weight = getattr(self.settings, "retrieval_embedding_weight", 0.5)
@@ -341,6 +357,7 @@ class SourceRetriever:
         structure_path = source_dir / "structure.yaml"
         sheet_text_path = source_dir / "sheet_text.txt"
         image_path = source_dir / "table.png"
+        html_path = source_dir / "table.html"
         if not (metadata_path.is_file() and structure_path.is_file() and sheet_text_path.is_file() and image_path.is_file()):
             return None
 
@@ -362,7 +379,7 @@ class SourceRetriever:
             workbook_path=workbook_path,
             sheet_name=str(metadata.get("sheet_name", "")),
             image_path=image_path,
-            html_path=source_dir / "table.html",
+            html_path=html_path if html_path.is_file() else None,
             structure_text=structure_text,
             sheet_text=sheet_text,
             score=lexical_score,

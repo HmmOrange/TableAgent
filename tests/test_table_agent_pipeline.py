@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 import yaml
+from PIL import Image
+import pytest
 
 from datasets.base import EvalSample
 from pipelines.table_agent_pipeline import TableAgentPipeline
@@ -185,6 +187,15 @@ class FakeRenderer:
         )
 
 
+@pytest.fixture(autouse=True)
+def fake_libreoffice_workbook_render(monkeypatch):
+    def fake_render(workbook_path, sheet_name, cell_range, image_path, **kwargs):
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (100, 80), "white").save(image_path)
+
+    monkeypatch.setattr("TableAgent.rendering.workbook._render_xlsx_range_with_libreoffice", fake_render)
+
+
 def test_table_agent_writes_verified_structure(tmp_path: Path):
     sample = EvalSample(
         index=0,
@@ -214,11 +225,11 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert structure["table1"]["headers"][0]["label"] == "Revenue"
     assert Path(output.metadata["workbook_path"]).is_file()
     assert Path(output.metadata["image_path"]).is_file()
-    assert Path(output.metadata["html_path"]).is_file()
+    assert output.metadata["html_path"] is None
     assert Path(output.metadata["changelog_path"]).is_file()
     assert Path(output.metadata["events_path"]).is_file()
     assert output.metadata["workbook_sheets"] == ["table-1"]
-    assert len(renderer.calls) == 1
+    assert len(renderer.calls) == 0
     assert len(layout_vlm.calls) == 1
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert output.metadata["qa"]["token_usage"] == {"prompt": 12, "completion": 2}
@@ -434,6 +445,8 @@ def test_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
         renderer=FakeRenderer(),
     )
+    progress_messages = []
+    pipeline.set_progress_callback(progress_messages.append)
 
     assert pipeline.prepare_samples_before_run is False
     assert not (tmp_path / "sources").exists()
@@ -443,6 +456,9 @@ def test_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
     assert output.predicted_answer == "SheetA"
     assert (tmp_path / "sources" / "doc_a.xlsx_SheetA" / "structure.yaml").is_file()
     assert output.metadata["workbook_path"] == str(workbook_path.resolve())
+    assert any(message.startswith("prepare:extract") for message in progress_messages)
+    assert any(message.startswith("prepare:layout") for message in progress_messages)
+    assert any(message.startswith("render | range=") for message in progress_messages)
 
 
 def test_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: Path):
@@ -877,7 +893,7 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     assert pipeline.settings.source_artifact_dir == tmp_path / "hitab-table_agent-20260621_163851" / "shared"
 
 
-def test_table_agent_default_outputs_and_logs_are_scoped_under_table_agent():
+def test_table_agent_default_outputs_stay_under_requested_outputs():
     from TableAgent.config import resolve_table_agent_run_roots
 
     config = {
@@ -889,8 +905,8 @@ def test_table_agent_default_outputs_and_logs_are_scoped_under_table_agent():
 
     output_dir, log_dir = resolve_table_agent_run_roots("table_agent", "outputs", config)
 
-    assert output_dir == Path("TableAgent/outputs/evaluations")
-    assert log_dir == Path("TableAgent/outputs/logs")
+    assert output_dir == Path("outputs")
+    assert log_dir == Path("outputs")
     assert resolve_table_agent_run_roots("table_agent", "custom", config)[0] == Path("custom")
     assert resolve_table_agent_run_roots("graphotter", "outputs", config) == (Path("outputs"), Path("logs"))
 
@@ -1060,6 +1076,7 @@ def test_table_agent_image_dimension_config_and_render_kwargs(tmp_path: Path):
             "max_image_dimension": 200,
             "max_viewport_width": 1000,
             "max_viewport_height": 800,
+            "libreoffice_image_resolution": 240,
         },
         renderer=renderer,
     )
@@ -1069,15 +1086,14 @@ def test_table_agent_image_dimension_config_and_render_kwargs(tmp_path: Path):
     assert cfg["agent"]["max_image_dimension"] == 200
     assert cfg["agent"]["max_viewport_width"] == 1000
     assert cfg["agent"]["max_viewport_height"] == 800
+    assert cfg["agent"]["libreoffice_image_resolution"] == 240
     
     # Run the pipeline
     output = pipeline.run(sample)
     
-    # Verify renderer calls parameters
-    assert len(renderer.calls) == 1
-    doc, path, kwargs = renderer.calls[0]
-    assert kwargs["max_viewport_width"] == 1000
-    assert kwargs["max_viewport_height"] == 800
+    # Workbook image rendering now goes through LibreOffice directly, not the HTML renderer callback.
+    assert Path(output.metadata["image_path"]).is_file()
+    assert len(renderer.calls) == 0
 
 
 def test_table_agent_image_fitting_and_tiling(tmp_path: Path):
