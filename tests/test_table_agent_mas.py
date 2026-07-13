@@ -331,10 +331,15 @@ def test_exstruct_payload_becomes_metadata_yaml(tmp_path: Path):
     }
 
     metadata = ExStructMetadataExtractor("light").sheet_metadata(workbook_path, payload, "Sheet1")
+    metadata_path = tmp_path / "metadata.yaml"
+    metadata_path.write_text(metadata.to_yaml(), encoding="utf-8")
 
     assert metadata.used_range == "A1:B2"
     assert metadata.merged_ranges == ["A1:B1"]
-    assert list(yaml.safe_load(metadata.to_yaml())) == ["sheet_name", "used_range", "merged_ranges"]
+    assert yaml.safe_load(metadata_path.read_text(encoding="utf-8")) == {
+        "sheet_name": "Sheet1",
+        "used_range": "A1:B2",
+    }
 
 
 def test_exstruct_metadata_falls_back_to_workbook_merged_ranges(tmp_path: Path):

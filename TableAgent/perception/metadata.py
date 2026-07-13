@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,10 @@ class SheetMetadata:
     merged_ranges: list[str]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "sheet_name": self.sheet_name,
+            "used_range": self.used_range,
+        }
 
     def to_yaml(self) -> str:
         return yaml.safe_dump(self.to_dict(), sort_keys=False, allow_unicode=True)

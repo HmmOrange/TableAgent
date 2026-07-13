@@ -87,8 +87,8 @@ Range rules:
   and rows 16-35 continue the same data, the updated range must be A2:A35, not
   A16:A35. For horizontal continuation, union columns the same way.
 - Do not create separate headers for blank cells inside a merged or visually spanned
-  header. Use the full span listed in metadata `merged_ranges` or visible in the
-  viewport, such as C1:L1, instead of C1:C1 plus fake continued headers.
+  header. Use the full span visible in the viewport, such as C1:L1, instead of C1:C1
+  plus fake continued headers.
 - Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values. If a range is
   already concrete and you cannot improve it, keep it unchanged. If VerificationAgent
   asks for a field that is currently null, fill it only with an exact concrete A1
