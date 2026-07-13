@@ -89,7 +89,7 @@ class TableOperators(BaseOperator):
             table_range.end_col,
             sheet,
         )
-        rows = self._workbook.read_range(data_range)
+        rows = self._workbook.read_range(data_range, expand_merged=True)
         column_ids = []
         for column in range(data_range.start_col, data_range.end_col + 1):
             candidates = [

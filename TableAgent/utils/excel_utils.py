@@ -50,7 +50,12 @@ def range_to_a1(r: CellRange) -> str:
         return cell_to_a1(r.start_row, r.start_col)
     return f"{cell_to_a1(r.start_row, r.start_col)}:{cell_to_a1(r.end_row, r.end_col)}"
 
-def read_excel_range(sheet_obj: Any, cell_range: CellRange) -> List[List[Any]]:
+def read_excel_range(
+    sheet_obj: Any,
+    cell_range: CellRange,
+    *,
+    expand_merged: bool = False,
+) -> List[List[Any]]:
     """Read cell values from an openpyxl sheet object for a given CellRange."""
     values = []
     for row in sheet_obj.iter_rows(
@@ -60,4 +65,21 @@ def read_excel_range(sheet_obj: Any, cell_range: CellRange) -> List[List[Any]]:
         max_col=cell_range.end_col
     ):
         values.append([cell.value for cell in row])
+    if not expand_merged or not values or not hasattr(sheet_obj, "merged_cells"):
+        return values
+
+    # openpyxl stores a merged range's value only in its top-left cell. Expand
+    # that value in memory so QA sees the same grouping users see in Excel.
+    # Ordinary blank cells outside real merged ranges remain untouched.
+    for merged in sheet_obj.merged_cells.ranges:
+        start_row = max(cell_range.start_row, merged.min_row)
+        end_row = min(cell_range.end_row, merged.max_row)
+        start_col = max(cell_range.start_col, merged.min_col)
+        end_col = min(cell_range.end_col, merged.max_col)
+        if start_row > end_row or start_col > end_col:
+            continue
+        anchor_value = sheet_obj.cell(row=merged.min_row, column=merged.min_col).value
+        for row in range(start_row, end_row + 1):
+            for column in range(start_col, end_col + 1):
+                values[row - cell_range.start_row][column - cell_range.start_col] = anchor_value
     return values

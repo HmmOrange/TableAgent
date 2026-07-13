@@ -16,7 +16,13 @@ class WorkbookOperator(BaseOperator):
         "operators.read_range_as_dataframe(range_or_a1, sheet='', has_headers=True) -> pandas.DataFrame",
     )
 
-    def read_range(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[List[Any]]:
+    def read_range(
+        self,
+        range_or_a1: Union[CellRange, str],
+        sheet: str = "",
+        *,
+        expand_merged: bool = False,
+    ) -> List[List[Any]]:
         """Read raw cell values from the workbook range."""
         if isinstance(range_or_a1, str):
             cell_range = parse_a1_range(range_or_a1, sheet)
@@ -39,7 +45,7 @@ class WorkbookOperator(BaseOperator):
         if not sheet_obj:
             sheet_obj = self.env.get_active_sheet()
             
-        return read_excel_range(sheet_obj, cell_range)
+        return read_excel_range(sheet_obj, cell_range, expand_merged=expand_merged)
 
     def read_range_flat(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[Any]:
         """Read values from range and flatten them into a single-dimensional list."""

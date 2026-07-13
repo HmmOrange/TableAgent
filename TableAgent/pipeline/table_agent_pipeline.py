@@ -28,12 +28,14 @@ from TableAgent.perception.structure import _is_valid_structure
 from TableAgent.pipeline.common import (
     SourceCandidate,
     display_path,
+    is_siflex,
     read_image_tiles,
     safe_name,
     token_usage,
 )
 from TableAgent.pipeline.prompting import PromptBuilder
 from TableAgent.pipeline.retrieval import SourceRetriever
+from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.source_preparer import SourcePreparer
 from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
 from TableAgent.rendering.workbook import WorkbookRenderer
@@ -79,6 +81,7 @@ class TableAgentPipeline(BasePipeline):
             progress_callback=self._progress,
         )
         self.source_retriever = SourceRetriever(self.settings, self.llm, self, self.prompts)
+        self.siflex_formatter = SiflexAnswerFormatterAgent(self.llm)
         self._progress_callback: Callable[[str], None] | None = None
         self._apply_generation_cap()
 
@@ -192,12 +195,13 @@ class TableAgentPipeline(BasePipeline):
             fallback_prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
         )
         responses.append(answer_response)
+        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
         self._progress("done", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
 
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=structure_text,
-            predicted_answer=answer_response.content,
+            predicted_answer=predicted_answer,
             latency=self.stop_timer(start_time),
             token_usage=token_usage(responses),
             metadata={
@@ -279,6 +283,7 @@ class TableAgentPipeline(BasePipeline):
             fallback_text_prompt=fallback_prompt,
         )
         responses.append(answer_response)
+        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
         self._progress(
             "done",
             sample=sample.sample_id,
@@ -299,7 +304,7 @@ class TableAgentPipeline(BasePipeline):
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=candidate.structure_text,
-            predicted_answer=answer_response.content,
+            predicted_answer=predicted_answer,
             latency=self.stop_timer(start_time),
             token_usage=token_usage(responses),
             metadata={
@@ -388,6 +393,25 @@ class TableAgentPipeline(BasePipeline):
         response.prompt_tokens += int(qa_token_usage.get("prompt", 0) or 0)
         response.completion_tokens += int(qa_token_usage.get("completion", 0) or 0)
         return response, qa_info
+
+    def _format_siflex_answer(
+        self,
+        sample: EvalSample,
+        draft_answer: str,
+        responses: list[LLMResponse],
+    ) -> str:
+        if not is_siflex(sample) or not isinstance(sample.raw, dict):
+            return draft_answer
+        answer_type = str(sample.raw.get("answer_type", "")).strip().lower()
+        if not self.siflex_formatter.supports(answer_type):
+            return draft_answer
+        result = self.siflex_formatter.run(
+            question=sample.question,
+            answer_type=answer_type,
+            draft_answer=draft_answer,
+        )
+        responses.append(result.response)
+        return result.answer
 
     @staticmethod
     def _select_table_id(structure_path: Path, question: str) -> str | None:
