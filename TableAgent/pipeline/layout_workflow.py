@@ -17,8 +17,8 @@ from TableAgent.pipeline.traversal import (
     DirectionQueue,
     TraversalTask,
     Viewport,
+    corner_viewports,
     frontier_directions,
-    initial_viewport,
 )
 from TableAgent.rendering.workbook import WorkbookRenderer
 
@@ -77,13 +77,15 @@ class TableLayoutWorkflow:
 
         structure_text = structure_path.read_text(encoding="utf-8") if structure_path.is_file() else ""
         table_range = metadata.used_range
-        start = initial_viewport(
+        queue = DirectionQueue()
+        queued_ranges: set[str] = set()
+        successful_ranges: set[str] = set()
+        for direction, viewport in corner_viewports(
             table_range,
             rows=self.settings.viewport_rows,
             columns=self.settings.viewport_columns,
-        )
-        queue = DirectionQueue()
-        queue.push(TraversalTask(Direction.STAY, start))
+        ):
+            self._push_if_new(queue, TraversalTask(direction, viewport), queued_ranges, successful_ranges, table_range)
         successful_viewports: set[tuple[int, int]] = set()
         retries: dict[tuple[int, int], int] = {}
         zero_change_runs = {direction: 0 for direction in Direction}
@@ -99,9 +101,16 @@ class TableLayoutWorkflow:
 
         while queue:
             task = queue.pop()
-            if task.direction != Direction.STAY and task.viewport.key in successful_viewports:
-                continue
             viewport_range = task.viewport.clipped_a1_range(table_range)
+            queued_ranges.discard(viewport_range)
+            if (
+                task.direction != Direction.STAY
+                and (
+                    task.viewport.key in successful_viewports
+                    or _range_fully_covered(viewport_range, successful_ranges)
+                )
+            ):
+                continue
             iteration += 1
             progress_fields = {
                 "workbook": workbook_path.name,
@@ -204,6 +213,7 @@ class TableLayoutWorkflow:
                     # sheet. Continue into every in-bounds frontier so later viewports
                     # can extend and repair the accumulated structure.
                     successful_viewports.add(task.viewport.key)
+                    successful_ranges.add(viewport_range)
                     frontier = frontier_directions(table_range, task.viewport)
                     suggested = [Direction.parse(value) for value in layout.directions]
                     discovered = [direction for direction in suggested if direction in frontier]
@@ -214,6 +224,8 @@ class TableLayoutWorkflow:
                                 task.viewport,
                                 direction,
                                 successful_viewports,
+                                successful_ranges,
+                                queued_ranges,
                                 table_range,
                                 workbook_path,
                                 sheet_name,
@@ -222,6 +234,7 @@ class TableLayoutWorkflow:
 
             structure_path.write_text(structure_text, encoding="utf-8")
             successful_viewports.add(task.viewport.key)
+            successful_ranges.add(viewport_range)
             retries.pop(task.viewport.key, None)
             feedback_by_viewport.pop(task.viewport.key, None)
             if layout.changed:
@@ -239,6 +252,8 @@ class TableLayoutWorkflow:
                         task.viewport,
                         task.direction,
                         successful_viewports,
+                        successful_ranges,
+                        queued_ranges,
                         table_range,
                         workbook_path,
                         sheet_name,
@@ -256,6 +271,8 @@ class TableLayoutWorkflow:
                     task.viewport,
                     direction,
                     successful_viewports,
+                    successful_ranges,
+                    queued_ranges,
                     table_range,
                     workbook_path,
                     sheet_name,
@@ -283,6 +300,8 @@ class TableLayoutWorkflow:
         viewport: Viewport,
         direction: Direction,
         successful_viewports: set[tuple[int, int]],
+        successful_ranges: set[str],
+        queued_ranges: set[str],
         table_range: str | None,
         workbook_path: Path,
         sheet_name: str,
@@ -291,9 +310,27 @@ class TableLayoutWorkflow:
         if target.key in successful_viewports or not _intersects(target, table_range):
             return
         target_range = target.clipped_a1_range(table_range)
+        if _range_fully_covered(target_range, successful_ranges | queued_ranges):
+            return
         if not _has_enough_data(workbook_path, sheet_name, target_range):
             return
-        queue.push(TraversalTask(direction, target))
+        self._push_if_new(queue, TraversalTask(direction, target), queued_ranges, successful_ranges, table_range)
+
+    @staticmethod
+    def _push_if_new(
+        queue: DirectionQueue,
+        task: TraversalTask,
+        queued_ranges: set[str],
+        successful_ranges: set[str],
+        table_range: str | None,
+    ) -> bool:
+        task_range = task.viewport.clipped_a1_range(table_range)
+        if task_range in queued_ranges or task_range in successful_ranges:
+            return False
+        if queue.push(task):
+            queued_ranges.add(task_range)
+            return True
+        return False
 
     @staticmethod
     def _append_event(path: Path, event: dict[str, Any]) -> None:
@@ -313,6 +350,38 @@ def _intersects(viewport: Viewport, table_range: str | None) -> bool:
         or viewport_max_col < min_col
         or viewport.column > max_col
     )
+
+
+def _range_fully_covered(target_range: str, covering_ranges: set[str]) -> bool:
+    if not covering_ranges:
+        return False
+    target_min_col, target_min_row, target_max_col, target_max_row = range_boundaries(target_range)
+    intervals_by_row: dict[int, list[tuple[int, int]]] = {}
+    for covering_range in covering_ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(covering_range)
+        start_row = max(target_min_row, min_row)
+        end_row = min(target_max_row, max_row)
+        if start_row > end_row:
+            continue
+        start_col = max(target_min_col, min_col)
+        end_col = min(target_max_col, max_col)
+        if start_col > end_col:
+            continue
+        for row in range(start_row, end_row + 1):
+            intervals_by_row.setdefault(row, []).append((start_col, end_col))
+
+    for row in range(target_min_row, target_max_row + 1):
+        intervals = sorted(intervals_by_row.get(row, []))
+        covered_until = target_min_col - 1
+        for start_col, end_col in intervals:
+            if start_col > covered_until + 1:
+                break
+            covered_until = max(covered_until, end_col)
+            if covered_until >= target_max_col:
+                break
+        if covered_until < target_max_col:
+            return False
+    return True
 
 
 def _has_enough_data(

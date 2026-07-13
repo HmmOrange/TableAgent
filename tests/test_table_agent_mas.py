@@ -18,8 +18,8 @@ from TableAgent.agents import (
 )
 from TableAgent.config import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow, _has_enough_data
-from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport
+from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
+from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
 from table2img.core import RenderResult
@@ -283,6 +283,36 @@ def test_direction_queue_uses_required_priority():
         Direction.LEFT,
         Direction.UP,
     ]
+
+
+def test_corner_viewports_cover_used_range_corners_without_duplicates():
+    viewports = corner_viewports("A1:AX50", rows=20, columns=20)
+
+    assert [viewport.clipped_a1_range("A1:AX50") for _, viewport in viewports] == [
+        "A1:T20",
+        "AE1:AX20",
+        "A31:T50",
+        "AE31:AX50",
+    ]
+    assert [direction for direction, _ in viewports] == [
+        Direction.STAY,
+        Direction.RIGHT,
+        Direction.DOWN,
+        Direction.RIGHT,
+    ]
+
+
+def test_corner_viewports_collapse_when_used_range_fits_one_viewport():
+    viewports = corner_viewports("A1:B3", rows=20, columns=20)
+
+    assert [(direction, viewport.clipped_a1_range("A1:B3")) for direction, viewport in viewports] == [
+        (Direction.STAY, "A1:B3"),
+    ]
+
+
+def test_range_fully_covered_accepts_union_of_corner_ranges():
+    assert _range_fully_covered("A46:AX95", {"A1:AX50", "A51:AX100"})
+    assert not _range_fully_covered("A46:AX95", {"A1:AX50"})
 
 
 def test_exstruct_payload_becomes_metadata_yaml(tmp_path: Path):
@@ -762,8 +792,9 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
     events = [json.loads(line) for line in (tmp_path / "artifacts" / "events.jsonl").read_text().splitlines()]
     assert [(event["direction"], event["viewport"]) for event in events] == [
         ("stay", "A1:T10"),
+        ("right", "U1:AN10"),
     ]
-    assert result.iterations == 1
+    assert result.iterations == 2
     assert (tmp_path / "artifacts" / "metadata.yaml").is_file()
     assert (tmp_path / "artifacts" / "changelog.md").is_file()
     for iteration_dir in (tmp_path / "artifacts" / "iterations").iterdir():
@@ -828,7 +859,7 @@ def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path,
     )
 
     events = [json.loads(line) for line in (tmp_path / "bounded-artifacts" / "events.jsonl").read_text().splitlines()]
-    assert [event["viewport"] for event in events] == ["A1:Q20"]
+    assert [event["viewport"] for event in events] == ["A1:Q20", "A32:Q51"]
     assert all(event["direction"] != "right" for event in events)
 
 
@@ -879,5 +910,5 @@ def test_workflow_discards_vlm_suggested_empty_range(tmp_path: Path, monkeypatch
     )
 
     events = [json.loads(line) for line in (tmp_path / "empty-right-artifacts" / "events.jsonl").read_text().splitlines()]
-    assert [event["viewport"] for event in events] == ["A1:T10"]
-    assert result.iterations == 1
+    assert [event["viewport"] for event in events] == ["A1:T10", "U1:AN10"]
+    assert result.iterations == 2

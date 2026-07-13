@@ -133,6 +133,8 @@ def resolve_table_agent_run_roots(
     requested_output_dir = Path(output_dir)
     if pipeline_name != "table_agent":
         return requested_output_dir, Path("logs")
+    if requested_output_dir == Path("outputs"):
+        requested_output_dir = Path("TableAgent") / "outputs"
     return requested_output_dir, requested_output_dir
 
 

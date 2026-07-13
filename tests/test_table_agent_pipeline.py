@@ -893,7 +893,7 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     assert pipeline.settings.source_artifact_dir == tmp_path / "hitab-table_agent-20260621_163851" / "shared"
 
 
-def test_table_agent_default_outputs_stay_under_requested_outputs():
+def test_table_agent_default_outputs_stay_under_table_agent_outputs():
     from TableAgent.config import resolve_table_agent_run_roots
 
     config = {
@@ -905,8 +905,8 @@ def test_table_agent_default_outputs_stay_under_requested_outputs():
 
     output_dir, log_dir = resolve_table_agent_run_roots("table_agent", "outputs", config)
 
-    assert output_dir == Path("outputs")
-    assert log_dir == Path("outputs")
+    assert output_dir == Path("TableAgent") / "outputs"
+    assert log_dir == Path("TableAgent") / "outputs"
     assert resolve_table_agent_run_roots("table_agent", "custom", config)[0] == Path("custom")
     assert resolve_table_agent_run_roots("graphotter", "outputs", config) == (Path("outputs"), Path("logs"))
 

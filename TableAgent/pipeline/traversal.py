@@ -119,6 +119,38 @@ def initial_viewport(
     return Viewport(row=min_row, column=min_col, rows=rows, columns=columns)
 
 
+def corner_viewports(
+    table_range: str | None,
+    *,
+    rows: int,
+    columns: int,
+) -> list[tuple[Direction, Viewport]]:
+    if not table_range:
+        return [(Direction.STAY, initial_viewport(table_range, rows=rows, columns=columns))]
+
+    min_col, min_row, max_col, max_row = range_boundaries(table_range)
+    left_col = min_col
+    right_col = max(min_col, max_col - columns + 1)
+    top_row = min_row
+    bottom_row = max(min_row, max_row - rows + 1)
+
+    candidates = [
+        (Direction.STAY, Viewport(row=top_row, column=left_col, rows=rows, columns=columns)),
+        (Direction.RIGHT, Viewport(row=top_row, column=right_col, rows=rows, columns=columns)),
+        (Direction.DOWN, Viewport(row=bottom_row, column=left_col, rows=rows, columns=columns)),
+        (Direction.RIGHT, Viewport(row=bottom_row, column=right_col, rows=rows, columns=columns)),
+    ]
+    seen_ranges: set[str] = set()
+    unique: list[tuple[Direction, Viewport]] = []
+    for direction, viewport in candidates:
+        clipped_range = viewport.clipped_a1_range(table_range)
+        if clipped_range in seen_ranges:
+            continue
+        seen_ranges.add(clipped_range)
+        unique.append((direction, viewport))
+    return unique
+
+
 def frontier_directions(table_range: str | None, viewport: Viewport) -> list[Direction]:
     if not table_range:
         return []
