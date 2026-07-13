@@ -13,6 +13,10 @@ Available operators and helpers:
 
 You must set `final_answer` in your code (e.g. `final_answer = ...`).
 Keep output small. Use existing variables, summaries, filters, and aggregates; do not print whole tables or long lists.
+- Each header in `structure.yaml` has an internal `id` and a user-facing `label`.
+  DataFrame columns use the IDs for computation. If `final_answer` names a header,
+  return its `label`, obtained with `operators.get_header(table_id, header_id).label`;
+  never return the internal header ID itself.
 
 Output contract:
 - Your entire assistant message must be exactly one JSON object or exactly one ```json fenced JSON object.

@@ -128,6 +128,8 @@ def test_load_structures():
     headers = table["headers"]
     # Top-level headers: no, name, date_of, score
     assert len(headers) == 4
+    assert headers[0].id == "no"
+    assert headers[0].label == "No"
     
     name_hdr = next(h for h in headers if h.id == "name")
     assert name_hdr.orientation == "column_group"
@@ -454,6 +456,36 @@ def test_full_runner_pipeline():
     assert result_birth.success
     assert not result_birth.error
     assert result_birth.final_answer == "1995-02-14"
+
+
+def test_runner_humanizes_header_id_in_final_answer():
+    from TableAgent.QA.actions.base_action import CodeGenerationRequest, CodeGenerationResult
+
+    class HeaderIdAnswerPolicy:
+        def run(self, request: CodeGenerationRequest) -> CodeGenerationResult:
+            if request.layer == "inspect":
+                code = "selected_column = table_df.columns[-1]"
+            else:
+                code = "final_answer = selected_column"
+            return CodeGenerationResult(
+                code=code,
+                description="Simulates a dataframe operation that returns an internal header ID.",
+                reasoning="Exercise the user-facing header-label boundary.",
+            )
+
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=FakeLLM({"Table Structure": _two_step_plan_json()}),
+        policy=HeaderIdAnswerPolicy(),
+    )
+
+    result = runner.run("Which field is the last column?")
+
+    assert result.success
+    assert result.final_answer == "Score"
+    assert runner.env.execution_namespace["final_answer"] == "Score"
+    assert runner.env.operators.get_header("table1", "score").label == "Score"
 
 def test_base_abstractions_usable():
     from TableAgent.QA import BaseCodeGenerationAction, BaseReActAgent

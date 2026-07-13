@@ -297,7 +297,8 @@ class TableQARunner:
         if success:
             final_val = self.env.execution_namespace.get("final_answer")
             if final_val is not None:
-                final_answer = str(final_val)
+                final_answer = self._humanize_header_ids(str(final_val))
+                self.env.execution_namespace["final_answer"] = final_answer
             else:
                 success = False
                 error_msg = "Synthesis layer completed, but 'final_answer' variable was not set in namespace."
@@ -378,6 +379,45 @@ class TableQARunner:
             "[qa] preload tables done | "
             + ", ".join(f"{table_id}:shape={getattr(table_df, 'shape', None)}" for table_id, table_df in table_dfs.items())
         )
+
+    @staticmethod
+    def _unambiguous_header_labels(table_header_labels: dict[str, dict[str, str]]) -> dict[str, str]:
+        """Collapse per-table labels without guessing when the same ID has conflicting labels."""
+        labels_by_id: dict[str, set[str]] = {}
+        for labels in table_header_labels.values():
+            for header_id, label in labels.items():
+                clean_id = str(header_id).strip()
+                clean_label = str(label).strip()
+                if clean_id and clean_label:
+                    labels_by_id.setdefault(clean_id, set()).add(clean_label)
+        return {
+            header_id: next(iter(labels))
+            for header_id, labels in labels_by_id.items()
+            if len(labels) == 1
+        }
+
+    def _humanize_header_ids(self, answer: str) -> str:
+        """Replace internal header-ID tokens in a user-facing answer with verified labels."""
+        table_ids = self._selected_table_ids()
+        if not table_ids:
+            table_ids = self.env.operators.list_tables()
+        table_header_labels = {
+            table_id: {
+                header.id: header.label
+                for header in self.env.operators.list_headers(table_id)
+                if header.label
+            }
+            for table_id in table_ids
+        }
+        labels = self._unambiguous_header_labels(table_header_labels)
+        humanized = answer
+        for header_id in sorted(labels, key=len, reverse=True):
+            label = labels[header_id]
+            if header_id == label or header_id.isdecimal():
+                continue
+            pattern = rf"(?<![\w]){re.escape(header_id)}(?![\w])"
+            humanized = re.sub(pattern, lambda _match, value=label: value, humanized, flags=re.IGNORECASE)
+        return humanized
 
     def _topological_sort(self, plan: List[SubTask]) -> List[SubTask]:
         by_id = {}
