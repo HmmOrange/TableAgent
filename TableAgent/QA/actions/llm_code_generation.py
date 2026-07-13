@@ -61,6 +61,20 @@ def get_structure_summary(env: Any, table_id: str) -> str:
     for h in struct.get("headers", []):
         format_header(h)
 
+    relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []
+    if relations:
+        summary_lines.append("Formula Relations:")
+        for relation in relations[:12]:
+            formula = relation.get("formula_example") or relation.get("formula") or relation.get("expression", "")
+            summary_lines.append(
+                "  - "
+                f"ID: {relation.get('id')}, Category: {relation.get('category')}, "
+                f"Range: {relation.get('range', '')}, Description: {relation.get('description', '')}, "
+                f"Formula: {formula}"
+            )
+        if len(relations) > 12:
+            summary_lines.append(f"  - ... {len(relations) - 12} more relations")
+
     return "\n".join(summary_lines)
 
 
@@ -84,6 +98,8 @@ def get_table_catalog_summary(env: Any) -> str:
             header_bits.append(bit)
         if len(headers) > 20:
             header_bits.append(f"... {len(headers) - 20} more headers")
+        relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []
+        relation_ids = [str(relation.get("id")) for relation in relations[:12] if relation.get("id")]
         lines.append(
             "\n".join([
                 f"- table_id: {table_id}",
@@ -91,6 +107,7 @@ def get_table_catalog_summary(env: Any) -> str:
                 f"  description: {struct.get('description', '') if struct else ''}",
                 f"  sheet: {struct.get('sheet', '') if struct else ''}",
                 f"  headers: {'; '.join(header_bits) if header_bits else '(none)'}",
+                f"  formula_relations: {', '.join(relation_ids) if relation_ids else '(none)'}",
             ])
         )
     return "\n".join(lines)
@@ -174,6 +191,8 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
                         "Choose the relevant table_id or table_ids from this catalog.\n"
+                        "Use `operators.find_tables(question_or_subtask, top_k=...)` to route by verified table metadata; "
+                        "do not guess a table id from its position in the catalog.\n"
                         "Your code must set `selected_table_ids` to a non-empty list of valid table_id strings. "
                         "Also print a compact explanation of the selection.\n\n"
                         f"Table catalog:\n{table_catalog}\n\n"

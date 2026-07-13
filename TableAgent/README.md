@@ -92,6 +92,31 @@ SiFlex questions can reference one or more source workbooks with many worksheets
 they pre-encode reusable source artifacts. HiTab and MulHi normally create a transient
 workbook per sample, then run the same MAS workflow on that workbook.
 
+## Multi-table QA operators
+
+The QA notebook exposes a `multitab` operator family through the existing `operators`
+facade:
+
+- `operators.find_tables(...)` routes a question or subtask through an injected table
+  retriever when available, with the built-in lexical metadata scorer as a fallback.
+- `operators.join_tables(...)`, `operators.union_tables(...)`, and
+  `operators.groupby(...)` provide deterministic relational operations.
+- `operators.find_relation(...)` and `operators.evaluate_formula(...)` use formula
+  relations embedded in `structure.yaml`. Formula evaluation applies mutations only in
+  memory and recursively recalculates referenced formula cells without changing the
+  workbook.
+
+For example, to recalculate `E13 = C13 * D13` after increasing `C13`:
+
+```python
+result = operators.evaluate_formula(
+    "rel_salary_calc",
+    target_cell="E13",
+    mutations={"C13": 18_000_000 + 2_000_000},
+)
+final_answer = result["value"]
+```
+
 ## Standard per-sample flow
 
 `TableAgentPipeline.run()` performs the following steps when no prepared source is

@@ -5,6 +5,14 @@ from TableAgent.schema.header import Header
 from TableAgent.utils.excel_utils import parse_a1_range
 
 
+RELATION_CATEGORIES = (
+    "normal_formulas",
+    "aggregate_formulas",
+    "cell_formulas",
+    "invalid_formulas",
+)
+
+
 def _parse_optional_a1_range(value: Any, sheet_name: str = ""):
     if value is None:
         return None
@@ -37,6 +45,8 @@ def load_table_structures(yaml_path: str) -> Dict[str, Dict[str, Any]]:
     
     parsed = {}
     for table_key, table_data in data.items():
+        if table_key == "relations" or not isinstance(table_data, dict):
+            continue
         # Prefer the exact worksheet name emitted by the layout phase.
         sheet_name = table_data.get("sheet") or table_data.get("name", table_key)
         headers = []
@@ -52,6 +62,44 @@ def load_table_structures(yaml_path: str) -> Dict[str, Dict[str, Any]]:
             "headers": headers
         }
     return parsed
+
+
+def load_formula_relations(yaml_path: str) -> List[Dict[str, Any]]:
+    """Load formula relations embedded in a structure file or emitted per table."""
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    relation_root = data.get("relations") if isinstance(data, dict) else None
+    if relation_root is None:
+        relation_root = data
+    if not isinstance(relation_root, dict):
+        return []
+
+    if any(category in relation_root for category in RELATION_CATEGORIES):
+        sources = [(None, relation_root)]
+    else:
+        sources = [
+            (str(table_id), payload)
+            for table_id, payload in relation_root.items()
+            if isinstance(payload, dict)
+            and any(category in payload for category in RELATION_CATEGORIES)
+        ]
+
+    relations: List[Dict[str, Any]] = []
+    for table_id, payload in sources:
+        for category in RELATION_CATEGORIES:
+            records = payload.get(category, []) or []
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                normalized = dict(record)
+                normalized["category"] = category
+                if table_id is not None:
+                    normalized.setdefault("table_id", table_id)
+                relations.append(normalized)
+    return relations
 
 def flatten_headers(headers: List[Header]) -> List[Header]:
     """Recursively flatten headers to get all headers in the hierarchy."""

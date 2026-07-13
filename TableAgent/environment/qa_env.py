@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Optional
 from pathlib import Path
 import openpyxl
 import pandas as pd
@@ -7,9 +7,12 @@ import pandas as pd
 from TableAgent.schema.experience import ExperiencePool
 from TableAgent.schema.range import AxisSelection, Cell, CellRange
 from TableAgent.schema.header import Header
-from TableAgent.utils.structure_utils import load_table_structures
+from TableAgent.utils.structure_utils import load_formula_relations, load_table_structures
 from TableAgent.environment.notebook import Notebook
 from TableAgent.environment.logger import QALogger
+
+if TYPE_CHECKING:
+    from TableAgent.pipeline.retrieval import TableRetrieverContract
 
 class QAEnvironment:
     """Notebook-like runtime environment for QA execution."""
@@ -22,14 +25,17 @@ class QAEnvironment:
         max_observation_chars: int = 2000,
         max_error_chars: int = 2000,
         max_value_repr_chars: int = 800,
+        table_retriever: TableRetrieverContract | None = None,
     ):
         from TableAgent.QA.operators.table_operator import TableOperators
 
         self.structure_path = structure_path
         self.workbook_path = workbook_path
+        self.table_retriever = table_retriever
         
         # Load tables structures
         self.structures = load_table_structures(structure_path)
+        self.relations = load_formula_relations(structure_path)
         
         # Load workbook (data_only=True reads evaluated values of formulas)
         self.workbook = openpyxl.load_workbook(workbook_path, data_only=True)

@@ -9,6 +9,7 @@ from TableAgent.utils.excel_utils import (
     read_excel_range,
 )
 from TableAgent.utils.structure_utils import (
+    load_formula_relations,
     load_table_structures,
     flatten_headers,
     get_leaf_headers,
@@ -25,6 +26,7 @@ __all__ = [
     "range_to_a1",
     "read_excel_range",
     "load_table_structures",
+    "load_formula_relations",
     "flatten_headers",
     "get_leaf_headers",
 ]

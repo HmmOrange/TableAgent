@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, Any, List
+from typing import TYPE_CHECKING, Optional, Any, List
 
 from TableAgent.environment.qa_env import QAEnvironment
 from TableAgent.QA.agents.planner import TableQAPlanner
@@ -15,6 +15,9 @@ from TableAgent.QA.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.QA.actions.review import ReviewSubtaskAction
 from TableAgent.schema.qa import QAResult
 from TableAgent.schema.subtask import SubTask
+
+if TYPE_CHECKING:
+    from TableAgent.pipeline.retrieval import TableRetrieverContract
 
 
 class TokenCountingLLM:
@@ -57,7 +60,8 @@ class TableQARunner:
         code_action: Optional[BaseCodeGenerationAction] = None,
         policy: Optional[BaseCodeGenerationAction] = None,
         max_experience_records: int = 5,
-        max_retries: int = 3
+        max_retries: int = 3,
+        table_retriever: TableRetrieverContract | None = None,
     ):
         from TableAgent.config import TableAgentConfig
         self.settings = TableAgentConfig.from_config(config)
@@ -98,6 +102,7 @@ class TableQARunner:
             max_observation_chars=max_observation_chars,
             max_error_chars=max_error_chars,
             max_value_repr_chars=max_value_repr_chars,
+            table_retriever=table_retriever,
         )
         
         self.env.logger.log_event("config_loaded", {

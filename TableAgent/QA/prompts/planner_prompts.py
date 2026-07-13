@@ -14,6 +14,11 @@ Use a DAG: each subtask may depend on earlier subtasks by id. Keep layers to:
 - "inspect": identify fields, filter rows/columns, project selections, and read relevant values.
 - "synthesis": compute and format the final answer from inspected values.
 
+When the question changes an input used by a stored formula relation, include an
+inspect subtask that calls `evaluate_formula` with the mutation. Do not plan to let the
+LLM infer or reproduce the formula arithmetically. When information spans tables,
+explicitly plan the required join, schema-compatible union, or grouped aggregation.
+
 Format:
 ```json
 {

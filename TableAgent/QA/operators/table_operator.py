@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
 from TableAgent.schema.header import Header
@@ -8,6 +9,8 @@ from TableAgent.QA.operators.structure_operator import StructureOperator
 from TableAgent.QA.operators.range_operator import RangeOperator
 from TableAgent.QA.operators.workbook_operator import WorkbookOperator
 from TableAgent.QA.operators.filter_operator import FilterOperator
+from TableAgent.QA.operators.multitab_operator import MultiTableOperator
+from TableAgent.pipeline.retrieval import TableCandidate
 
 class TableOperators(BaseOperator):
     """
@@ -23,7 +26,8 @@ class TableOperators(BaseOperator):
         self._range = RangeOperator(env)
         self._workbook = WorkbookOperator(env)
         self._filter = FilterOperator(env)
-        self._catalog_sources = (self._structure, self._range, self._workbook, self._filter)
+        self._multitab = MultiTableOperator(env)
+        self._catalog_sources = (self._structure, self._range, self._workbook, self._filter, self._multitab)
 
     def operator_catalog(self) -> str:
         """Return prompt-ready descriptions and examples for the exposed operators."""
@@ -152,6 +156,63 @@ class TableOperators(BaseOperator):
 
     def read_selection(self, selection: AxisSelection, target_range: Union[CellRange, str], sheet: str = "") -> List[Any]:
         return self._filter.read_selection(selection, target_range, sheet=sheet)
+
+    # Multi-table routing, relational operations, and formula evaluation
+    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+        return self._multitab.find_tables(query, top_k=top_k, min_score=min_score)
+
+    def find_table(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+        return self._multitab.find_table(query, top_k=top_k, min_score=min_score)
+
+    def retrieve_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableCandidate]:
+        return self._multitab.retrieve_tables(query, top_k=top_k, min_score=min_score)
+
+    def join_tables(self, left: str | pd.DataFrame, right: str | pd.DataFrame, **kwargs: Any) -> pd.DataFrame:
+        return self._multitab.join_tables(left, right, **kwargs)
+
+    def union_tables(self, tables: Sequence[str | pd.DataFrame], **kwargs: Any) -> pd.DataFrame:
+        return self._multitab.union_tables(tables, **kwargs)
+
+    def groupby_table(
+        self,
+        table: str | pd.DataFrame,
+        *,
+        by: str | Sequence[str],
+        aggregations: Mapping[str, str | Sequence[str]],
+        dropna: bool = False,
+        sort: bool = True,
+    ) -> pd.DataFrame:
+        return self._multitab.groupby_table(
+            table,
+            by=by,
+            aggregations=aggregations,
+            dropna=dropna,
+            sort=sort,
+        )
+
+    def groupby(self, table: str | pd.DataFrame, **kwargs: Any) -> pd.DataFrame:
+        return self._multitab.groupby(table, **kwargs)
+
+    def list_relations(self, table_id: str | None = None, *, category: str | None = None) -> list[dict[str, Any]]:
+        return self._multitab.list_relations(table_id, category=category)
+
+    def find_relation(self, query: str, *, table_id: str | None = None, top_k: int = 3) -> list[dict[str, Any]]:
+        return self._multitab.find_relation(query, table_id=table_id, top_k=top_k)
+
+    def evaluate_formula(
+        self,
+        relation_id: str,
+        *,
+        target_cell: str | None = None,
+        mutations: Mapping[str, Any] | None = None,
+        table_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._multitab.evaluate_formula(
+            relation_id,
+            target_cell=target_cell,
+            mutations=mutations,
+            table_id=table_id,
+        )
 
 if __name__ == "__main__":
     import argparse

@@ -22,6 +22,12 @@ Observation policy:
 - A table ID such as `table_1` is not an A1 range. To inspect a whole table by ID,
   call `operators.read_table_as_dataframe(table_id, has_headers=False)`. Pass only
   A1 strings such as `A1:D20` or Header range objects to `read_range*` methods.
+- For a hypothetical mutation to a formula-derived value, do not guess, mentally
+  calculate, or recreate the spreadsheet formula. Find the stored relation with
+  `operators.find_relation(...)`, then call `operators.evaluate_formula(...)` with
+  the target cell and mutation. Store its returned value for synthesis.
+- For multi-table work, use `operators.join_tables(...)`, `operators.union_tables(...)`,
+  or `operators.groupby(...)` instead of manually aligning rows by position.
 - Do not print whole tables, whole DataFrames, or long lists.
 - Prefer selective inspection: `.shape`, `.columns`, `.head()`, `.tail()`, `.describe()`, filtered rows, counts, and aggregates.
 - The notebook returns compact observations. If an output says it was truncated, run a narrower follow-up cell instead of asking for the entire output.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import openpyxl
 import yaml
@@ -40,6 +40,9 @@ from TableAgent.pipeline.source_preparer import SourcePreparer
 from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
 from TableAgent.rendering.workbook import WorkbookRenderer
 
+if TYPE_CHECKING:
+    from TableAgent.pipeline.retrieval import TableRetrieverContract
+
 logger = Logger(__name__)
 
 
@@ -57,6 +60,7 @@ class TableAgentPipeline(BasePipeline):
         layout_vlm_client: BaseLLM,
         config: dict[str, Any] | None = None,
         renderer: Callable[..., RenderResult] = render_document,
+        table_retriever: TableRetrieverContract | None = None,
     ):
         self.llm = llm_client
         self.layout_vlm = layout_vlm_client
@@ -68,6 +72,7 @@ class TableAgentPipeline(BasePipeline):
         self.layout_agent = LayoutAgent(self.layout_vlm)
         self.verification_agent = VerificationAgent(self.llm)
         self.qa_agent = QAAgent(self.llm, self.answer_system_prompt)
+        self.table_retriever = table_retriever
         self.layout_workflow = TableLayoutWorkflow(
             self.settings,
             self.workbook_renderer,
@@ -354,6 +359,7 @@ class TableAgentPipeline(BasePipeline):
                 config={
                     "qa_artifact_dir": str(qa_artifact_dir),
                 },
+                table_retriever=self.table_retriever,
             )
             result = runner.run(question)
             qa_token_usage = result.token_usage
