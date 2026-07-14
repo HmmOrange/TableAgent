@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import openpyxl
@@ -170,10 +173,16 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
         def to_pil(self):
             return Image.new("RGB", (100, 80), "white")
 
+        def close(self):
+            calls["bitmap_closed"] = True
+
     class FakePage:
         def render(self, *, scale):
             calls["scale"] = scale
             return FakeBitmap()
+
+        def close(self):
+            calls["page_closed"] = True
 
     class FakePdf:
         def __init__(self, path):
@@ -209,7 +218,72 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
     assert calls["fit_to_height"] == 1
     assert calls["scale"] == 384 / 72
     assert calls["page_index"] == 0
+    assert calls["bitmap_closed"] is True
+    assert calls["page_closed"] is True
     assert calls["closed"] is True
+
+
+def test_libreoffice_range_renderer_serializes_pdfium(monkeypatch, tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    state = {"active": 0, "max_active": 0}
+    state_lock = threading.Lock()
+
+    monkeypatch.setattr(
+        "TableAgent.rendering.workbook._resolve_libreoffice_path",
+        lambda path: Path("C:/LibreOffice/program/soffice.exe"),
+    )
+
+    def fake_run(command, **kwargs):
+        outdir = Path(command[command.index("--outdir") + 1])
+        prepared = Path(command[-1])
+        (outdir / prepared.with_suffix(".pdf").name).write_bytes(b"%PDF-1.4")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeBitmap:
+        def to_pil(self):
+            return Image.new("RGB", (100, 80), "white")
+
+        def close(self):
+            pass
+
+    class FakePage:
+        def render(self, *, scale):
+            return FakeBitmap()
+
+        def close(self):
+            pass
+
+    class FakePdf:
+        def __init__(self, path):
+            with state_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            time.sleep(0.05)
+
+        def __getitem__(self, index):
+            return FakePage()
+
+        def close(self):
+            with state_lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setitem(sys.modules, "pypdfium2", types.SimpleNamespace(PdfDocument=FakePdf))
+
+    def render(index: int):
+        _render_xlsx_range_with_libreoffice(
+            workbook_path,
+            "Sheet1",
+            "A1:B10",
+            tmp_path / f"render_{index}.png",
+            libreoffice_path=Path("soffice.exe"),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(render, range(2)))
+
+    assert state["max_active"] == 1
 
 
 def _hierarchical_workbook(path: Path) -> None:

@@ -4,12 +4,13 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
 from datasets.base import EvalSample
 from table2img.core import RenderResult
-from utils.workbook_converter import sample_to_xlsx
+from utils.workbook_converter import WorkbookConversion, sample_to_xlsx
 
 from TableAgent.config import TableAgentConfig
 from TableAgent.rendering.image_utils import (
@@ -17,6 +18,9 @@ from TableAgent.rendering.image_utils import (
     _resize_image_file_to_fit,
     compute_viewport_and_scale,
 )
+
+
+_PDFIUM_LOCK = threading.Lock()
 
 
 class WorkbookRenderer:
@@ -27,7 +31,19 @@ class WorkbookRenderer:
 
     def sample_to_image(self, sample: EvalSample, sample_dir: Path):
         workbook_path = sample_dir / "table.xlsx"
-        workbook = sample_to_xlsx(sample, workbook_path)
+        source_path = Path(sample.table_path) if sample.table_path else None
+        if source_path and source_path.is_file() and source_path.suffix.lower() == ".xlsx":
+            shutil.copy2(source_path, workbook_path)
+            from openpyxl import load_workbook
+
+            source_workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+            try:
+                sheet_names = list(source_workbook.sheetnames)
+            finally:
+                source_workbook.close()
+            workbook = WorkbookConversion(workbook_path, "xlsx", sheet_names)
+        else:
+            workbook = sample_to_xlsx(sample, workbook_path)
         render_result = self.render_workbook_range(
             workbook_path,
             workbook.sheet_names[0] if workbook.sheet_names else None,
@@ -201,15 +217,24 @@ def _render_xlsx_range_with_libreoffice(
                 f"{completed.stderr.strip() or completed.stdout.strip()}"
             )
 
-        pdf = pypdfium2.PdfDocument(str(pdf_path))
-        try:
-            page = pdf[0]
-            render_resolution = max(384 if cell_range else 96, int(resolution))
-            bitmap = page.render(scale=render_resolution / 72)
-            bitmap.to_pil().save(image_path)
-            _trim_image_file_to_content(image_path)
-        finally:
-            pdf.close()
+        # PDFium is not thread-safe, so concurrent sample workers must not
+        # enter any part of its document/page/bitmap lifecycle together.
+        with _PDFIUM_LOCK:
+            pdf = pypdfium2.PdfDocument(str(pdf_path))
+            try:
+                page = pdf[0]
+                try:
+                    render_resolution = max(384 if cell_range else 96, int(resolution))
+                    bitmap = page.render(scale=render_resolution / 72)
+                    try:
+                        bitmap.to_pil().save(image_path)
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+            finally:
+                pdf.close()
+        _trim_image_file_to_content(image_path)
 
 
 def _resolve_libreoffice_path(libreoffice_path: Path | str | None) -> Path:
