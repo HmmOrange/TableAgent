@@ -997,6 +997,31 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     assert pipeline.settings.source_artifact_dir == Path("cache/table_agent/structure/v1/prepared")
 
 
+def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
+    cache_dir = tmp_path / "structure-cache"
+    common = {
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "structure_cache_dir": str(cache_dir),
+        "phase": "structure",
+    }
+    siflex = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={**common, "cache_namespace": "siflex"},
+        renderer=FakeRenderer(),
+    )
+    realhitbench = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={**common, "cache_namespace": "realhitbench"},
+        renderer=FakeRenderer(),
+    )
+
+    assert siflex.structure_cache.root == cache_dir / "v1" / "datasets" / "siflex"
+    assert realhitbench.structure_cache.root == cache_dir / "v1" / "datasets" / "realhitbench"
+    assert siflex.structure_cache.root != realhitbench.structure_cache.root
+
+
 def test_table_agent_default_outputs_stay_under_table_agent_outputs():
     from TableAgent.configs import resolve_table_agent_run_roots
 

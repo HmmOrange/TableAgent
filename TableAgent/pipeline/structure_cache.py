@@ -49,7 +49,8 @@ class StructureCache:
         self.settings = settings
         self.workflow = workflow
         self.metadata_for_workbook_sheet = metadata_for_workbook_sheet
-        self.root = settings.structure_cache_dir / f"v{CACHE_SCHEMA_VERSION}"
+        namespace = safe_name(settings.cache_namespace) or "default"
+        self.root = settings.structure_cache_dir / f"v{CACHE_SCHEMA_VERSION}" / "datasets" / namespace
 
     def prepare(self, sample: EvalSample, *, force: bool) -> StructureCacheRecord:
         if self.workflow is None:
@@ -114,7 +115,7 @@ class StructureCache:
         values = [Path(value.strip()) for value in str(sample.table_path or "").split(";") if value.strip()]
         if values and values[0].is_file() and values[0].suffix.lower() == ".xlsx":
             return values[0], "xlsx", self._sha256(values[0])
-        temporary = self.settings.structure_cache_dir / ".inputs" / f"{safe_name(sample.sample_id)}.xlsx"
+        temporary = self.root / ".inputs" / f"{safe_name(sample.sample_id)}.xlsx"
         temporary.parent.mkdir(parents=True, exist_ok=True)
         sample_to_xlsx(sample, temporary)
         source_payload = json.dumps(

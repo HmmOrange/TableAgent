@@ -9,6 +9,7 @@ from typing import Any
 class TableAgentConfig:
     phase: str
     structure_cache_dir: Path
+    cache_namespace: str
     layout_model_identity: str | None
     artifact_dir: Path
     run_artifact_dir: Path | None
@@ -54,6 +55,7 @@ class TableAgentConfig:
         return cls(
             phase=_phase(merged.get("phase", "all")),
             structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
+            cache_namespace=str(merged.get("cache_namespace", "default")),
             layout_model_identity=(str(merged["layout_model_identity"]) if merged.get("layout_model_identity") else None),
             artifact_dir=Path(str(_required(merged, "artifact_dir"))),
             run_artifact_dir=_optional_path(merged.get("run_artifact_dir")),
