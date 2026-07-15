@@ -1,4 +1,4 @@
-from TableAgent.perception.structure import (
+from TableAgent.structure.layout.parsing import (
     _extract_yaml_text,
     _is_valid_structure,
     _parse_yaml_mapping,

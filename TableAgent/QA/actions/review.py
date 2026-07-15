@@ -5,7 +5,7 @@ import re
 from typing import Any, Optional
 
 from TableAgent.QA.actions.base_action import BaseReviewAction, ReviewRequest, ReviewResult
-from TableAgent.QA.prompts.review_prompts import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT_TEMPLATE
+from TableAgent.prompts.review import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT_TEMPLATE
 
 _HIDDEN_WORKSPACE_NAMES = {
     "pd",

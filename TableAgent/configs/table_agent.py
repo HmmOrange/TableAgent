@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from configs import DEFAULT_CONFIG_PATH, load_config
-from configs.config import deep_merge
-
 
 @dataclass(frozen=True)
 class TableAgentConfig:
+    phase: str
+    structure_cache_dir: Path
+    layout_model_identity: str | None
     artifact_dir: Path
     run_artifact_dir: Path | None
     source_artifact_dir: Path | None
@@ -49,9 +49,12 @@ class TableAgentConfig:
 
 
     @classmethod
-    def from_config(cls, override: dict[str, Any] | None = None) -> "TableAgentConfig":
-        merged = table_agent_config_dict(override)
+    def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
+        merged = table_agent_config_dict(config)
         return cls(
+            phase=_phase(merged.get("phase", "all")),
+            structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
+            layout_model_identity=(str(merged["layout_model_identity"]) if merged.get("layout_model_identity") else None),
             artifact_dir=Path(str(_required(merged, "artifact_dir"))),
             run_artifact_dir=_optional_path(merged.get("run_artifact_dir")),
             source_artifact_dir=_optional_path(merged.get("source_artifact_dir")),
@@ -97,29 +100,28 @@ TableAgentSettings = TableAgentConfig
 
 
 def table_agent_config_dict(override: dict[str, Any] | None = None) -> dict[str, Any]:
-    root_config = load_config(DEFAULT_CONFIG_PATH)
-    base = root_config.get("table_agent", {})
-    if not isinstance(base, dict):
-        base = {}
-
     explicit = override or {}
     if "table_agent" in explicit and isinstance(explicit["table_agent"], dict):
         explicit = explicit["table_agent"]
-    return deep_merge(base, explicit)
+    return dict(explicit)
 
 
 def run_scoped_table_agent_config(config: dict[str, Any], run_name: str) -> dict[str, Any]:
     agent_config = dict(config.get("table_agent", {}))
+    vlm_config = config.get("vlm", {}) if isinstance(config.get("vlm"), dict) else {}
+    agent_config.setdefault(
+        "layout_model_identity",
+        agent_config.get("layout_vlm_provider") or agent_config.get("vlm_provider") or vlm_config.get("provider"),
+    )
     artifact_root = Path(str(agent_config.get("artifact_root", "TableAgent")))
     run_dir_template = str(agent_config.get("run_dir_template", "{run_name}"))
     repeat_dir_template = str(agent_config.get("repeat_dir_template", "repeat_{run_id}"))
-    shared_dir_name = str(agent_config.get("shared_dir_name", "shared"))
-
     run_artifact_dir = artifact_root / run_dir_template.format(run_name=run_name)
+    structure_cache_dir = Path(str(agent_config.get("structure_cache_dir", "cache/table_agent/structure")))
     agent_config.update({
         "artifact_dir": str(run_artifact_dir / repeat_dir_template.format(run_id=1)),
         "run_artifact_dir": str(run_artifact_dir),
-        "source_artifact_dir": str(run_artifact_dir / shared_dir_name),
+        "source_artifact_dir": str(structure_cache_dir / "v1" / "prepared"),
         "repeat_dir_template": repeat_dir_template,
     })
     return agent_config
@@ -156,3 +158,10 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
     return bool(value)
+
+
+def _phase(value: Any) -> str:
+    phase = str(value).strip().lower()
+    if phase not in {"structure", "qa", "all"}:
+        raise ValueError("table_agent.phase must be one of: structure, qa, all")
+    return phase

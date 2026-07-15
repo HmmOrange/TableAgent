@@ -6,9 +6,9 @@ from typing import Any, Callable
 
 from datasets.base import EvalSample
 
-from TableAgent.config import TableAgentConfig
+from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.perception.structure import _is_valid_structure
+from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import is_siflex, safe_name
 
 LAYOUT_WORKFLOW_VERSION = 4
@@ -42,6 +42,7 @@ class SourcePreparer:
             except Exception as exc:
                 if logger:
                     logger.error("ExStruct extraction failed for %s: %s", source_path, exc)
+                self._progress("prepare_error", workbook=source_path.name, sheet="<unreadable>")
                 continue
 
             sheets = workbook_payload.get("sheets") or {}
@@ -68,6 +69,7 @@ class SourcePreparer:
                 except Exception as exc:
                     if logger:
                         logger.error("TableAgent metadata preparation failed for %s:%s: %s", source_path, sheet_name, exc)
+                    self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
                     continue
 
                 if has_current_structure:
@@ -96,6 +98,7 @@ class SourcePreparer:
                         f"Failed to generate structure (empty/invalid/token-capped). Raw: {structure_text}",
                         encoding="utf-8",
                     )
+                self._progress("prepare_done", workbook=source_path.name, sheet=sheet_name)
 
     def source_dir(self, source_path: Path, sheet_name: str) -> Path:
         artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir

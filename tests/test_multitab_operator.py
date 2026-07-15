@@ -6,9 +6,9 @@ import pytest
 
 from TableAgent.environment.qa_env import QAEnvironment
 from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
-from TableAgent.QA.prompts.planner_prompts import PLANNER_SYSTEM_PROMPT
-from TableAgent.QA.prompts.react_prompts import REACT_SYSTEM_PROMPT
-from TableAgent.QA.prompts.synthesis_prompts import SYNTHESIS_SYSTEM_PROMPT
+from TableAgent.prompts.planner import PLANNER_SYSTEM_PROMPT
+from TableAgent.prompts.react import REACT_SYSTEM_PROMPT
+from TableAgent.prompts.synthesis import SYNTHESIS_SYSTEM_PROMPT
 
 
 SAMPLE_WORKBOOK = Path("sample/multitab.xlsx")

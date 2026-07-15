@@ -1,42 +1,3 @@
-ANSWER_SYSTEM_PROMPT = (
-    "You are a table question answering agent. Use the table content and "
-    "verified structure YAML to answer concisely. Output only the final answer. "
-    "Do not include explanation, steps, or introductory/concluding remarks."
-)
-
-ANSWER_USER_PROMPT_TEMPLATE = """\
-Question: {question}
-
-Verified structure.yaml:
-{structure_text}
-
-Table content:
-{table_context}
-
-Answer:"""
-
-
-RERANKER_SYSTEM_PROMPT = (
-    "You are a table selection agent. Decide which candidate spreadsheet sheet/source "
-    "is most suitable to answer the user's question. Output ONLY a valid YAML block "
-    "starting with ```yaml and ending with ``` containing the selected candidate index (0-based) "
-    "and a brief rationale. Do not include any other text."
-)
-
-RERANKER_USER_PROMPT_TEMPLATE = """\
-Question: {question}
-
-Here are the candidate sheets:
-{candidates_text}
-
-Analyze the candidates and select the one that is most suitable for answering the question.
-Your output must be a YAML block with keys 'selected_index' and 'rationale':
-```yaml
-selected_index: <integer index of the chosen candidate, e.g., 0>
-rationale: <brief reasoning explanation>
-```"""
-
-
 LAYOUT_MAS_SYSTEM_PROMPT = (
     "You are LayoutAgent, a spreadsheet layout VLM. Inspect the coordinate-labelled "
     "viewport and update the supplied structure. Return only YAML. Keep verified "
@@ -90,7 +51,7 @@ Range rules:
   header. Use the full span visible in the viewport, such as C1:L1, instead of C1:C1
   plus fake continued headers.
 - Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values. If a range is
-  already concrete and you cannot improve it, keep it unchanged. If VerificationAgent
+  already concrete and you cannot improve it, keep it unchanged. If the deterministic verifier
   asks for a field that is currently null, fill it only with an exact concrete A1
   range visible in this viewport.
 
@@ -134,68 +95,4 @@ Rules for remaining_directions:
 
 If the viewport does not show a table or only shows empty/non-table context, keep the
 current structure unchanged and use changelog: "No change.".
-"""
-
-VERIFICATION_MAS_SYSTEM_PROMPT = (
-    "You are a table structure verification agent named VerificationAgent. Use a "
-    "compact semantic review over the candidate structure and deterministic verifier "
-    "report. The deterministic verifier is a tool observation, not the only judge; "
-    "it can be too strict about minor OCR, line-break, multilingual-label, or span "
-    "issues. Return only YAML with the requested keys. Do not include chain-of-thought, "
-    "long reasoning, repeated report text, or a ReAct pattern. If semantic review "
-    "can confidently fix the structure, include updated_structure with the full corrected structure.yaml. "
-    "status is good or not_good. null_fields lists range fields that must become null "
-    "if retries are exhausted. orientation must be either row or column."
-)
-
-VERIFICATION_MAS_USER_PROMPT_TEMPLATE = """\
-ExStruct metadata.yaml:
-{metadata_text}
-
-Viewport: {viewport_range}
-
-Candidate structure.yaml:
-{structure_text}
-
-LayoutAgent changelog.md:
-{changelog}
-
-Deterministic verification result:
-{verification_report}
-
-Return only this compact YAML envelope:
-status: good|not_good
-feedback: <one short correction or confirmation, max 40 words>
-null_fields: [<dot paths, if any>]
-updated_structure:
-  table1:
-    id: <preserved unique stable snake_case table identifier>
-    name: <table name>
-    description: <table purpose>
-    sheet: <exact worksheet name from metadata>
-    headers:
-      - id: <preserved unique stable snake_case identifier>
-        label: <visible meaningful label>
-        description: <semantic role>
-        orientation: <row|column>
-        header_range: <exact A1 range or null>
-        data_range: <exact A1 range or null>
-        sub_headers: []
-
-Rules:
-- Include updated_structure only when you are correcting or accepting a complete
-  structure.yaml. Omit it if LayoutAgent must inspect another viewport.
-- Keep feedback concise. Do not copy the deterministic report, do not explain your
-  reasoning step by step, and do not emit thought/action/observation keys.
-- Preserve existing correct tables and headers; change only fields needed by the
-  deterministic observation or semantic review.
-- Preserve every existing table and header `id`; assign a unique stable snake_case
-  `id` only when an item is newly created or an older structure does not have one.
-- A deterministic mismatch caused only by harmless whitespace, line breaks,
-  multilingual text normalization, or visually obvious span semantics can be marked
-  good after updated_structure fixes the persisted YAML.
-- A deterministic verifier tool failure, traceback, timeout, or invalid JSON is not
-  proof that the structure is good. Treat it as an observation that the tool must be
-  fixed or rerun; do not mark status good unless updated_structure can be checked
-  against non-crashing deterministic observations.
 """

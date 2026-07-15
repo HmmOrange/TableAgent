@@ -11,6 +11,7 @@ from datasets.base import EvalSample
 from TableAgent.pipeline.common import SourceCandidate
 from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.table_agent_pipeline import TableAgentPipeline
+from TableAgent.configs import TableAgentConfig
 from utils.llm.base import LLMResponse
 
 
@@ -25,6 +26,23 @@ class FormatterLLM:
     def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
         self.calls.append((prompt, system_prompt))
         return LLMResponse(content=self.content, prompt_tokens=7, completion_tokens=3)
+
+
+@pytest.fixture(autouse=True)
+def resolved_table_agent_config(monkeypatch, tmp_path):
+    from configs import load_config
+    real_from_config = TableAgentConfig.from_config
+
+    def resolve(config=None):
+        merged = dict(load_config()["table_agent"])
+        explicit = config or {}
+        if "table_agent" in explicit:
+            explicit = explicit["table_agent"]
+        merged.update(explicit)
+        merged["structure_cache_dir"] = str(tmp_path / "structure-cache")
+        return real_from_config(merged)
+
+    monkeypatch.setattr(TableAgentConfig, "from_config", staticmethod(resolve))
 
 
 def _sample(*, sample_path: str, answer_type: str) -> EvalSample:
@@ -210,7 +228,7 @@ def test_live_structure_sheet_q1_qa_and_formatter():
     assert structure_path.is_file()
     assert workbook_path.is_file()
 
-    config = load_config(root / "configs/config.yaml")
+    config = load_config(root / "config.yaml")
     config["qa_console_progress"] = True
     llm = initialize_llm(config, "direct_llm")
     runner = TableQARunner(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TypeVar
 
-from TableAgent.perception.structure import _parse_yaml_mapping
+from TableAgent.structure.layout.parsing import _parse_yaml_mapping
 
 
 CandidateT = TypeVar("CandidateT")

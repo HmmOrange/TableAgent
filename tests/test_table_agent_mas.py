@@ -12,19 +12,18 @@ import openpyxl
 import yaml
 from PIL import Image
 
-from TableAgent.agents import (
+from TableAgent.structure.layout.agent import (
     LayoutAgent,
-    VerificationAgent,
-    _VERIFIER_CODE,
-    _execute_verifier,
     _union_existing_data_ranges,
 )
-from TableAgent.config import TableAgentConfig
+from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
+from TableAgent.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
 from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
+from TableAgent.structure.verification import DeterministicVerifier
+from TableAgent.structure.verification.checks import verify_structure
 from table2img.core import RenderResult
 from utils.llm.base import LLMResponse
 
@@ -58,34 +57,6 @@ class StaticLayoutVLM:
         }, sort_keys=False))
 
 
-class GoodVerificationLLM:
-    model_name = "verifier"
-    temperature = 0.0
-
-    def generate(self, prompt, system_prompt=None):
-        return LLMResponse(content="status: good\nfeedback: Verified.\nnull_fields: []\n")
-
-
-class SemanticRepairVerificationLLM:
-    model_name = "semantic-verifier"
-    temperature = 0.0
-
-    def __init__(self, structure: dict, status: str = "good"):
-        self.structure = structure
-        self.status = status
-
-    def generate(self, prompt, system_prompt=None):
-        return LLMResponse(content=yaml.safe_dump({
-            "thought": "The deterministic report identifies a range issue.",
-            "action": "repair_structure",
-            "observation": "Semantic review can correct the persisted structure.",
-            "status": self.status,
-            "feedback": "Applied semantic structure repair.",
-            "null_fields": [],
-            "updated_structure": self.structure,
-        }, sort_keys=False))
-
-
 class RecordingRenderer:
     def __init__(self):
         self.ranges = []
@@ -108,7 +79,11 @@ def _patch_libreoffice_workbook_render(monkeypatch):
 
 
 def _settings(tmp_path: Path, **override) -> TableAgentConfig:
-    return TableAgentConfig.from_config({
+    from configs import load_config
+    from TableAgent.configs import run_scoped_table_agent_config
+    config = load_config()
+    settings = run_scoped_table_agent_config(config, "test")
+    settings.update({
         "artifact_dir": str(tmp_path),
         "viewport_rows": 20,
         "viewport_columns": 20,
@@ -116,6 +91,7 @@ def _settings(tmp_path: Path, **override) -> TableAgentConfig:
         "max_retry": 5,
         **override,
     })
+    return TableAgentConfig.from_config(settings)
 
 
 def _workbook(path: Path) -> None:
@@ -336,11 +312,9 @@ def _adjacent_merged_header_workbook(path: Path) -> None:
 
 
 def _run_verifier(tmp_path: Path, workbook_path: Path, structure: dict) -> dict:
-    verifier_path = tmp_path / "verification.py"
     structure_path = tmp_path / "structure_after.yaml"
-    verifier_path.write_text(_VERIFIER_CODE, encoding="utf-8")
     structure_path.write_text(yaml.safe_dump(structure, sort_keys=False), encoding="utf-8")
-    return _execute_verifier(verifier_path, workbook_path, "Sheet1", structure_path)
+    return verify_structure(workbook_path, "Sheet1", structure_path)
 
 
 def test_direction_queue_uses_required_priority():
@@ -651,7 +625,7 @@ def test_verifier_moves_blank_merged_follower_to_next_matching_header(tmp_path: 
     assert header["data_range"] == "C2:D2"
 
 
-def test_verification_agent_applies_semantic_updated_structure(tmp_path: Path):
+def removed_semantic_verifier_applies_updated_structure(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     bad_structure = {
@@ -708,7 +682,7 @@ def test_verification_agent_applies_semantic_updated_structure(tmp_path: Path):
     assert (iteration_dir / "verification_output_after_semantic.json").is_file()
 
 
-def test_verification_agent_semantic_update_can_override_strict_deterministic_mismatch(tmp_path: Path):
+def removed_semantic_verifier_can_override_deterministic_mismatch(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     original_structure = {
@@ -764,7 +738,7 @@ def test_verification_agent_semantic_update_can_override_strict_deterministic_mi
     assert accepted["table1"]["headers"][0]["data_range"] == "A3:A10"
 
 
-def test_verification_agent_does_not_accept_semantic_good_on_tool_error(tmp_path: Path, monkeypatch):
+def removed_semantic_verifier_does_not_accept_tool_error(tmp_path: Path, monkeypatch):
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     structure = {
@@ -794,7 +768,7 @@ def test_verification_agent_does_not_accept_semantic_good_on_tool_error(tmp_path
             "feedback": "Deterministic verifier tool failed before validating the structure.",
         }
 
-    monkeypatch.setattr("TableAgent.agents._execute_verifier", broken_verifier)
+    monkeypatch.setattr("TableAgent.structure.layout.agent._execute_verifier", broken_verifier)
 
     result = VerificationAgent(SemanticRepairVerificationLLM(structure)).run(
         workbook_path=workbook_path,
@@ -857,7 +831,7 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
         settings,
         renderer,
         LayoutAgent(StaticLayoutVLM()),
-        VerificationAgent(GoodVerificationLLM()),
+        DeterministicVerifier(),
     )
     metadata = SheetMetadata("Sheet1", "A1:AN10", [])
 
@@ -879,7 +853,7 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
     for iteration_dir in (tmp_path / "artifacts" / "iterations").iterdir():
         assert (iteration_dir / "viewport.png").is_file()
         assert (iteration_dir / "layout_prompt.txt").is_file()
-        assert (iteration_dir / "verification.py").is_file()
+        assert not (iteration_dir / "verification.py").exists()
         assert (iteration_dir / "verification_output.json").is_file()
 
 
@@ -893,7 +867,7 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path, monkeypatch):
         settings,
         renderer,
         LayoutAgent(StaticLayoutVLM(header_range="NOT_A_RANGE")),
-        VerificationAgent(GoodVerificationLLM()),
+        DeterministicVerifier(),
     )
 
     result = workflow.run(
@@ -927,7 +901,7 @@ def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path,
         settings,
         renderer,
         LayoutAgent(RightSuggestingLayoutVLM()),
-        VerificationAgent(GoodVerificationLLM()),
+        DeterministicVerifier(),
     )
 
     workflow.run(
@@ -978,7 +952,7 @@ def test_workflow_discards_vlm_suggested_empty_range(tmp_path: Path, monkeypatch
         settings,
         renderer,
         LayoutAgent(RightSuggestingLayoutVLM()),
-        VerificationAgent(GoodVerificationLLM()),
+        DeterministicVerifier(),
     )
 
     result = workflow.run(

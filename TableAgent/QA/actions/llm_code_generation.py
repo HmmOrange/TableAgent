@@ -9,12 +9,12 @@ from TableAgent.QA.actions.base_action import (
     CodeGenerationRequest,
     CodeGenerationResult,
 )
-from TableAgent.QA.prompts.react_prompts import (
+from TableAgent.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
     REVISION_USER_PROMPT_TEMPLATE,
 )
-from TableAgent.QA.prompts.synthesis_prompts import (
+from TableAgent.prompts.synthesis import (
     SYNTHESIS_SYSTEM_PROMPT,
     SYNTHESIS_USER_PROMPT_TEMPLATE,
 )

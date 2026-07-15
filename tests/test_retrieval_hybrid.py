@@ -2,7 +2,7 @@ import tempfile
 import json
 from pathlib import Path
 import pytest
-from TableAgent.config import TableAgentConfig
+from TableAgent.configs import TableAgentConfig
 from TableAgent.pipeline.retrieval import SourceRetriever
 from datasets.base import EvalSample
 from utils.llm.base import BaseLLM, LLMResponse
@@ -13,6 +13,22 @@ class FakeLLM(BaseLLM):
 
     def generate(self, prompt: str, system_prompt: str | None = None, **kwargs) -> LLMResponse:
         return LLMResponse(content=self.response_content, prompt_tokens=10, completion_tokens=10)
+
+
+@pytest.fixture(autouse=True)
+def resolved_table_agent_config(monkeypatch):
+    from configs import load_config
+    real_from_config = TableAgentConfig.from_config
+
+    def resolve(config=None):
+        merged = dict(load_config()["table_agent"])
+        explicit = config or {}
+        if "table_agent" in explicit:
+            explicit = explicit["table_agent"]
+        merged.update(explicit)
+        return real_from_config(merged)
+
+    monkeypatch.setattr(TableAgentConfig, "from_config", staticmethod(resolve))
 
 @pytest.fixture
 def temp_sources_dir():
@@ -151,7 +167,7 @@ def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
             import numpy as np
             return np.zeros((len(texts), 128), dtype=np.float32)
 
-    def fake_from_config(provider=None, config_path="configs/config.yaml"):
+    def fake_from_config(config, provider=None):
         nonlocal mock_embedding_called
         mock_embedding_called = True
         return DummyEmbedding()
@@ -172,8 +188,11 @@ def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
             "retrieval_embedding_provider": "default",
         })
         retriever_live = SourceRetriever(config_live, llm, None, None)
-        assert retriever_live.embedding_client is not None
-        assert mock_embedding_called
+        assert retriever_live.embedding_client is None
+        assert not mock_embedding_called
+
+        injected = SourceRetriever(config_live, llm, None, None, embedding_client=DummyEmbedding())
+        assert injected.embedding_client is not None
     finally:
         retrieval.OpenAICompatibleEmbeddingClient.from_config = original_from_config
 

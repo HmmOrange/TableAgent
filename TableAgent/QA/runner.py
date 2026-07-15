@@ -63,8 +63,8 @@ class TableQARunner:
         max_retries: int = 3,
         table_retriever: TableRetrieverContract | None = None,
     ):
-        from TableAgent.config import TableAgentConfig
-        self.settings = TableAgentConfig.from_config(config)
+        raw_config = config or {}
+        self.settings = raw_config.get("table_agent", raw_config) if isinstance(raw_config, dict) else {}
         
         # Load parameters from configuration/settings if present
         actual_max_retries = max_retries
@@ -76,15 +76,15 @@ class TableQARunner:
         max_value_repr_chars = 800
         
         if self.settings:
-            actual_max_retries = getattr(self.settings, "qa_max_retries", max_retries)
-            actual_max_records = getattr(self.settings, "qa_max_experience_records", max_experience_records)
-            log_path_val = getattr(self.settings, "qa_log_path", None)
+            actual_max_retries = int(self.settings.get("qa_max_retries", max_retries))
+            actual_max_records = int(self.settings.get("qa_max_experience_records", max_experience_records))
+            log_path_val = self.settings.get("qa_log_path")
             if log_path_val:
                 log_path = str(log_path_val)
                 artifact_root = Path(log_path).parent / "qa_runs"
-            max_observation_chars = getattr(self.settings, "qa_max_observation_chars", max_observation_chars)
-            max_error_chars = getattr(self.settings, "qa_max_error_chars", max_error_chars)
-            max_value_repr_chars = getattr(self.settings, "qa_max_value_repr_chars", max_value_repr_chars)
+            max_observation_chars = int(self.settings.get("qa_max_observation_chars", max_observation_chars))
+            max_error_chars = int(self.settings.get("qa_max_error_chars", max_error_chars))
+            max_value_repr_chars = int(self.settings.get("qa_max_value_repr_chars", max_value_repr_chars))
 
         if config and isinstance(config, dict):
             agent_cfg = config.get("table_agent", {}) if isinstance(config.get("table_agent", {}), dict) else {}
@@ -335,6 +335,15 @@ class TableQARunner:
         self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
         
         return result
+
+    def close(self) -> None:
+        self.env.workbook.close()
+
+    def __enter__(self) -> "TableQARunner":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def _progress(self, message: str) -> None:
         if self.console_progress:

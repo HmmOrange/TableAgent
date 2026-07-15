@@ -12,7 +12,7 @@ from datasets.base import EvalSample
 from table2img.core import RenderResult
 from utils.workbook_converter import WorkbookConversion, sample_to_xlsx
 
-from TableAgent.config import TableAgentConfig
+from TableAgent.configs import TableAgentConfig
 from TableAgent.rendering.image_utils import (
     _generate_image_tiles,
     _resize_image_file_to_fit,

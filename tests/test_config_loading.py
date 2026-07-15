@@ -4,40 +4,30 @@ import pytest
 import yaml
 
 from configs import load_config, resolve_llm_config, resolve_vlm_config
+from TableAgent.configs import TableAgentConfig
 
 
-def test_config_example_loads_modular_files(monkeypatch):
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:8024/v1")
-    config = load_config("configs/config.example.yaml")
+def test_root_config_loads_all_sections():
+    config = load_config("config.yaml")
 
     assert "datasets" in config
     assert "gpt_oss" in config["models"]
     assert "gemma4_vlm" in config["vlm_models"]
-    # Check that resolving layout VLM for table_agent yields gemma4_vlm via top-level fallback
     provider_name, _ = resolve_vlm_config(config, "table_agent")
-    assert provider_name == "gemma4_vlm"
-
-    # Check that resolving embedding for straptor yields openai_embedding via top-level fallback
-    from configs.embedding_config import resolve_embedding_config
-    embedding_provider, embedding_cfg = resolve_embedding_config(config, "straptor")
-    assert embedding_provider == "openai_embedding"
-    assert embedding_cfg["base_url"] == "http://localhost:8024/v1"
+    assert provider_name == "qwen_local_vlm"
 
 
-def test_root_config_keeps_pipeline_and_dataset_settings_modular():
+def test_root_config_contains_pipeline_and_dataset_settings():
     root_payload = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
     config = load_config("config.yaml")
 
-    assert "datasets" not in root_payload
-    assert "table_agent" not in root_payload
-    assert "spreadsheet_agent" not in root_payload
-    assert "straptor" not in root_payload
-    assert "siflex_judge" not in root_payload
+    assert "datasets" in root_payload
+    assert "table_agent" in root_payload
     assert config["datasets"]["hitab"]["xlsx_dir"] == "data/HiTab_xlsx"
-    assert config["table_agent"]["generation_max_tokens"] == 2048
+    assert config["table_agent"]["generation_max_tokens"] == 8192
 
     provider_name, _ = resolve_vlm_config(config, "table_agent")
-    assert provider_name == "gemma_local_vlm"
+    assert provider_name == "qwen_local_vlm"
 
 
 def test_table_agent_root_config_applies_pipeline_generation_cap():
@@ -46,35 +36,44 @@ def test_table_agent_root_config_applies_pipeline_generation_cap():
     llm_provider_name, llm_config = resolve_llm_config(config, "table_agent")
     vlm_provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
 
-    assert llm_provider_name == "gemma_local"
+    assert llm_provider_name == "qwen_local"
     assert llm_config["max_tokens"] is None
-    assert vlm_provider_name == "gemma_local_vlm"
+    assert vlm_provider_name == "qwen_local_vlm"
     assert vlm_config["max_tokens"] is None
-    assert config["table_agent"]["generation_max_tokens"] == 2048
+    assert config["table_agent"]["generation_max_tokens"] == 8192
 
 
-def test_resolve_vlm_provider_from_vlm_models(monkeypatch):
-    monkeypatch.setenv("GEMMA4_VLM_BASE_URL", "https://vlm.local/v1")
-    config = load_config("configs/config.example.yaml")
+def test_table_agent_phase_is_named_structure():
+    table_agent_config = dict(load_config("config.yaml")["table_agent"])
+    table_agent_config["phase"] = "structure"
+
+    assert TableAgentConfig.from_config(table_agent_config).phase == "structure"
+
+    table_agent_config["phase"] = "verification"
+    with pytest.raises(ValueError, match="structure, qa, all"):
+        TableAgentConfig.from_config(table_agent_config)
+
+
+def test_resolve_vlm_provider_from_vlm_models():
+    config = load_config("config.yaml")
 
     provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
 
-    assert provider_name == "gemma4_vlm"
-    assert vlm_config["base_url"] == "https://vlm.local/v1"
+    assert provider_name == "qwen_local_vlm"
+    assert vlm_config["base_url"] == "http://localhost:8010/v1"
 
 
-def test_resolve_llm_provider_from_pipeline_env(monkeypatch):
-    monkeypatch.setenv("GPT_OSS_BASE_URL", "https://llm.local/v1")
-    config = load_config("configs/config.example.yaml")
+def test_resolve_llm_provider_from_root_config():
+    config = load_config("config.yaml")
 
     provider_name, llm_config = resolve_llm_config(config, "table_agent")
 
-    assert provider_name == "gpt_oss"
-    assert llm_config["base_url"] == "https://llm.local/v1"
+    assert provider_name == "qwen_local"
+    assert llm_config["base_url"] == "http://localhost:8010/v1"
 
 
 def test_resolve_vlm_config_direct_lookup():
-    config = load_config("configs/config.example.yaml")
+    config = load_config("config.yaml")
     provider_name, vlm_config = resolve_vlm_config(config, "gemma4_vlm")
     assert provider_name == "gemma4_vlm"
 
@@ -219,6 +218,13 @@ def test_non_dict_model_definition():
     }
     with pytest.raises(ValueError, match="Model definition 'gpt_oss'.*must be a mapping"):
         available_models(bad_config)
+
+
+def test_config_include_is_rejected(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("include: other.yaml\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="includes are no longer supported"):
+        load_config(path)
 
 
 def test_resolve_env_field_empty_string_falls_back(monkeypatch):

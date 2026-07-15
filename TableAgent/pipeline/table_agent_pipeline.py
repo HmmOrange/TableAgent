@@ -9,22 +9,19 @@ import openpyxl
 import yaml
 from datasets.base import EvalSample
 from pipelines.base import BasePipeline, PipelineOutput
-from TableAgent.prompts import (
-    ANSWER_SYSTEM_PROMPT,
-    ANSWER_USER_PROMPT_TEMPLATE,
-    RERANKER_SYSTEM_PROMPT,
-    RERANKER_USER_PROMPT_TEMPLATE,
-)
+from TableAgent.prompts.answer import ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT_TEMPLATE
+from TableAgent.prompts.reranker import RERANKER_SYSTEM_PROMPT, RERANKER_USER_PROMPT_TEMPLATE
 from table2img.core import RenderResult, render_document
 from utils.workbook_converter import sample_to_xlsx
 from utils.llm.base import BaseLLM, LLMResponse
 from utils.log.logger import Logger
 
-from TableAgent.config import TableAgentConfig
-from TableAgent.agents import LayoutAgent, QAAgent, VerificationAgent
+from TableAgent.configs import TableAgentConfig
+from TableAgent.QA.agents.answer_agent import QAAgent
 from TableAgent.QA.runner import TableQARunner
 from TableAgent.perception.metadata import SheetMetadata
-from TableAgent.perception.structure import _is_valid_structure
+from TableAgent.structure.layout.agent import LayoutAgent
+from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import (
     SourceCandidate,
     display_path,
@@ -37,8 +34,10 @@ from TableAgent.pipeline.prompting import PromptBuilder
 from TableAgent.pipeline.retrieval import SourceRetriever
 from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.source_preparer import SourcePreparer
-from TableAgent.pipeline.layout_workflow import TableLayoutWorkflow
+from TableAgent.structure.layout.workflow import TableLayoutWorkflow
+from TableAgent.pipeline.structure_cache import StructureCache, StructureCacheRecord
 from TableAgent.rendering.workbook import WorkbookRenderer
+from TableAgent.structure.verification import DeterministicVerifier
 
 if TYPE_CHECKING:
     from TableAgent.pipeline.retrieval import TableRetrieverContract
@@ -48,7 +47,7 @@ logger = Logger(__name__)
 
 class TableAgentPipeline(BasePipeline):
     name = "table_agent"
-    prepare_samples_before_run = False
+    prepare_samples_before_run = True
     answer_system_prompt = ANSWER_SYSTEM_PROMPT
     answer_user_prompt_template = ANSWER_USER_PROMPT_TEMPLATE
     reranker_system_prompt = RERANKER_SYSTEM_PROMPT
@@ -56,8 +55,8 @@ class TableAgentPipeline(BasePipeline):
 
     def __init__(
         self,
-        llm_client: BaseLLM,
-        layout_vlm_client: BaseLLM,
+        llm_client: BaseLLM | None,
+        layout_vlm_client: BaseLLM | None,
         config: dict[str, Any] | None = None,
         renderer: Callable[..., RenderResult] = render_document,
         table_retriever: TableRetrieverContract | None = None,
@@ -67,18 +66,26 @@ class TableAgentPipeline(BasePipeline):
         self.settings = TableAgentConfig.from_config(config)
         self._artifact_dir = self.settings.artifact_dir
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        if self.settings.phase in {"qa", "all"} and self.llm is None:
+            raise ValueError(f"TableAgent phase '{self.settings.phase}' requires an answer LLM client")
+        if self.settings.phase in {"structure", "all"} and self.layout_vlm is None:
+            raise ValueError(f"TableAgent phase '{self.settings.phase}' requires a layout VLM client")
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, renderer, logger)
-        self.layout_agent = LayoutAgent(self.layout_vlm)
-        self.verification_agent = VerificationAgent(self.llm)
-        self.qa_agent = QAAgent(self.llm, self.answer_system_prompt)
+        self.layout_agent = LayoutAgent(self.layout_vlm) if self.layout_vlm is not None else None
+        self.verifier = DeterministicVerifier()
+        self.qa_agent = QAAgent(self.llm, self.answer_system_prompt) if self.llm is not None else None
         self.table_retriever = table_retriever
-        self.layout_workflow = TableLayoutWorkflow(
-            self.settings,
-            self.workbook_renderer,
-            self.layout_agent,
-            self.verification_agent,
-            progress_callback=self._progress,
+        self.layout_workflow = (
+            TableLayoutWorkflow(
+                self.settings,
+                self.workbook_renderer,
+                self.layout_agent,
+                self.verifier,
+                progress_callback=self._progress,
+            )
+            if self.layout_agent is not None
+            else None
         )
         self.source_preparer = SourcePreparer(
             self.settings,
@@ -86,12 +93,114 @@ class TableAgentPipeline(BasePipeline):
             progress_callback=self._progress,
         )
         self.source_retriever = SourceRetriever(self.settings, self.llm, self, self.prompts)
-        self.siflex_formatter = SiflexAnswerFormatterAgent(self.llm)
+        self.siflex_formatter = SiflexAnswerFormatterAgent(self.llm) if self.llm is not None else None
+        self.structure_cache = StructureCache(
+            self.settings,
+            self.layout_workflow,
+            self._metadata_for_workbook_sheet,
+        )
+        self._verified_samples: dict[str, StructureCacheRecord] = {}
         self._progress_callback: Callable[[str], None] | None = None
         self._apply_generation_cap()
 
     def prepare_samples(self, samples: list[EvalSample], logger: Any | None = None) -> None:
-        self.source_preparer.prepare(samples, logger=logger)
+        if self.settings.phase == "qa":
+            missing = []
+            for sample in samples:
+                if is_siflex(sample) and self.source_retriever.load_candidates(sample):
+                    continue
+                record = self.structure_cache.load(sample)
+                if record is None or not record.valid:
+                    missing.append(sample.sample_id)
+            if missing:
+                raise RuntimeError(
+                    "Missing or stale TableAgent structure caches for: "
+                    + ", ".join(missing[:20])
+                    + ". Run with --table-agent-phase structure or all first."
+                )
+            return
+        records = self.verify_samples(samples, force=self.settings.phase == "all")
+        failed = [record for record in records if not record.valid]
+        if failed:
+            raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
+
+    def verify_samples(self, samples: list[EvalSample], *, force: bool = True) -> list[StructureCacheRecord]:
+        siflex_samples = [sample for sample in samples if is_siflex(sample)]
+        standard_samples = [sample for sample in samples if not is_siflex(sample)]
+        records = []
+        for sample in standard_samples:
+            record = self.structure_cache.prepare(sample, force=force)
+            records.append(record)
+            self._progress(
+                "structure_done",
+                sample=sample.sample_id,
+                workbook=record.workbook_path.name,
+                sheet=record.sheet_name,
+            )
+        self._verified_samples.update({sample.sample_id: record for sample, record in zip(standard_samples, records)})
+        if siflex_samples:
+            self.source_preparer.prepare(siflex_samples, regenerate_invalid=force)
+            seen: set[Path] = set()
+            for sample in siflex_samples:
+                candidates = self.source_retriever.load_candidates(sample)
+                if not candidates:
+                    failure_dir = self.settings.source_artifact_dir or self.settings.structure_cache_dir
+                    key = hashlib.sha256(sample.sample_id.encode("utf-8")).hexdigest()[:24]
+                    records.append(StructureCacheRecord(
+                        key=key,
+                        directory=failure_dir,
+                        workbook_path=Path(str(sample.table_path).split(";")[0]),
+                        sheet_name="",
+                        structure_path=failure_dir / "structure.yaml",
+                        manifest_path=failure_dir / "metadata.json",
+                        status="not_good",
+                        cache_hit=False,
+                    ))
+                    continue
+                for candidate in candidates:
+                    if candidate.directory in seen:
+                        continue
+                    seen.add(candidate.directory)
+                    key = hashlib.sha256(str(candidate.directory.resolve()).encode("utf-8")).hexdigest()[:24]
+                    records.append(StructureCacheRecord(
+                        key=key,
+                        directory=candidate.directory,
+                        workbook_path=candidate.workbook_path,
+                        sheet_name=candidate.sheet_name,
+                        structure_path=candidate.directory / "structure.yaml",
+                        manifest_path=candidate.directory / "metadata.json",
+                        status="good",
+                        cache_hit=not force,
+                    ))
+        return records
+
+    @staticmethod
+    def structure_progress_totals(samples: list[EvalSample]) -> dict[str, Any]:
+        """Count the structure work units shown by the CLI progress bar."""
+        standard_samples = [sample for sample in samples if not is_siflex(sample)]
+        siflex_samples = [sample for sample in samples if is_siflex(sample)]
+        sheets_per_file = {f"sample:{sample.sample_id}": 1 for sample in standard_samples}
+        files_per_key = {key: 1 for key in sheets_per_file}
+
+        for source_path in SourcePreparer._source_paths(siflex_samples):
+            try:
+                workbook = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
+                try:
+                    sheet_count = max(len(workbook.sheetnames), 1)
+                finally:
+                    workbook.close()
+            except Exception:
+                sheet_count = 1
+            key = f"book:{source_path.name}"
+            sheets_per_file[key] = sheets_per_file.get(key, 0) + sheet_count
+            files_per_key[key] = files_per_key.get(key, 0) + 1
+
+        return {
+            "files": sum(files_per_key.values()),
+            "sheets": sum(sheets_per_file.values()),
+            "sheets_per_file": sheets_per_file,
+            "files_per_key": files_per_key,
+        }
 
     def set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
         self._progress_callback = callback
@@ -106,17 +215,19 @@ class TableAgentPipeline(BasePipeline):
             "prepare_cached": "prepare:cached",
             "prepare_error": "prepare:error",
             "prepare_layout": "prepare:layout",
+            "prepare_done": "prepare:done",
             "retrieval": "retrieve",
             "rerank": "rerank",
             "render": "render",
             "layout": "layout",
             "verify": "verify",
+            "structure_done": "structure:done",
             "qa": "qa",
             "answer": "answer",
             "done": "done",
         }
         parts = [labels.get(stage, stage)]
-        if stage in {"prepare_layout", "render", "layout", "verify"}:
+        if stage in {"prepare_layout", "prepare_done", "render", "layout", "verify"}:
             ordered_fields = [
                 ("range", "range"),
                 ("iteration", "iter"),
@@ -139,10 +250,6 @@ class TableAgentPipeline(BasePipeline):
             if value is None or value == "":
                 continue
             text = str(value)
-            if key == "sample" and len(text) > 28:
-                text = text[:25] + "..."
-            elif key in {"workbook", "sheet"} and len(text) > 24:
-                text = text[:21] + "..."
             parts.append(f"{label}={text}")
         self._progress_callback(" | ".join(parts))
 
@@ -158,6 +265,34 @@ class TableAgentPipeline(BasePipeline):
         return self._artifact_dir
 
     def run(self, sample: EvalSample) -> PipelineOutput:
+        if self.settings.phase == "structure":
+            raise RuntimeError("structure phase does not run question answering")
+        if is_siflex(sample):
+            if self.settings.phase == "all" and not self.source_retriever.load_candidates(sample):
+                self.source_preparer.prepare([sample], regenerate_invalid=True)
+            responses: list[LLMResponse] = []
+            candidate = self.source_retriever.select(sample, responses, self._fit_context)
+            if candidate is None:
+                raise RuntimeError(
+                    f"Missing or stale structure cache for sample {sample.sample_id!r}; "
+                    "run structure or all first"
+                )
+            return self._run_prepared_source(sample, candidate, responses, self.start_timer())
+        if self.settings.phase == "all":
+            record = self._verified_samples.get(sample.sample_id)
+            if record is None:
+                record = self.structure_cache.prepare(sample, force=True)
+                self._verified_samples[sample.sample_id] = record
+        else:
+            record = self.structure_cache.load(sample)
+        if record is None or not record.valid:
+            raise RuntimeError(
+                f"Missing or stale structure cache for sample {sample.sample_id!r}; "
+                "run structure or all first"
+            )
+        return self._run_cached_qa(sample, record)
+
+    def _run_legacy(self, sample: EvalSample) -> PipelineOutput:
         start_time = self.start_timer()
         responses: list[LLMResponse] = []
 
@@ -232,6 +367,44 @@ class TableAgentPipeline(BasePipeline):
             },
         )
 
+    def _run_cached_qa(self, sample: EvalSample, record: StructureCacheRecord) -> PipelineOutput:
+        start_time = self.start_timer()
+        structure_text = record.structure_path.read_text(encoding="utf-8")
+        answer_response, qa_info = self._run_verified_qa(
+            question=sample.question,
+            structure_path=record.structure_path,
+            workbook_path=record.workbook_path,
+            qa_artifact_dir=self._sample_dir(sample) / "qa",
+            fallback_prompt=self.prompts.answer_prompt(sample, self._fit_context(sample.table_content), structure_text),
+        )
+        responses = [answer_response]
+        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
+        return PipelineOutput(
+            sample_id=sample.sample_id,
+            structured_table=structure_text,
+            predicted_answer=predicted_answer,
+            latency=self.stop_timer(start_time),
+            token_usage=token_usage(responses),
+            metadata={
+                "structure_path": display_path(record.structure_path),
+                "workbook_path": str(record.workbook_path),
+                "workbook_source_format": "verification-cache",
+                "workbook_sheets": [record.sheet_name],
+                "artifact_dir": display_path(record.directory),
+                "image_path": display_path(record.directory / "table.png"),
+                "html_path": display_path(record.directory / "table.html") if (record.directory / "table.html").is_file() else None,
+                "metadata_yaml_path": display_path(record.directory / "metadata.yaml"),
+                "changelog_path": display_path(record.directory / "changelog.md"),
+                "events_path": display_path(record.directory / "events.jsonl"),
+                "iteration_artifact_dir": display_path(record.directory / "iterations"),
+                "cache_key": record.key,
+                "cache_dir": display_path(record.directory),
+                "cache_hit": record.cache_hit,
+                "verification": {"status": record.status},
+                "qa": qa_info,
+            },
+        )
+
     def get_config(self) -> dict[str, Any]:
         return {
             "pipeline_type": self.name,
@@ -254,6 +427,8 @@ class TableAgentPipeline(BasePipeline):
         metadata: SheetMetadata,
         sheet_dir: Path,
     ) -> str:
+        if self.layout_workflow is None:
+            raise RuntimeError("Source verification requires a layout VLM client")
         self._progress("prepare", workbook=source_path.name, sheet=sheet_name, range=metadata.used_range)
         result = self.layout_workflow.run(
             workbook_path=source_path,
@@ -282,7 +457,7 @@ class TableAgentPipeline(BasePipeline):
             question=sample.question,
             structure_path=candidate.directory / "structure.yaml",
             workbook_path=candidate.workbook_path,
-            qa_artifact_dir=candidate.directory / "qa",
+            qa_artifact_dir=self._sample_dir(sample) / "qa",
             fallback_prompt=image_prompt,
             fallback_image_path=candidate.image_path,
             fallback_text_prompt=fallback_prompt,
@@ -349,18 +524,20 @@ class TableAgentPipeline(BasePipeline):
         fallback_text_prompt: str | None = None,
     ) -> tuple[LLMResponse, dict[str, Any]]:
         """Run the notebook QA phase against the persisted verified structure."""
-        runner = None
         qa_token_usage = {"prompt": 0, "completion": 0}
-        try:
-            runner = TableQARunner(
+        with TableQARunner(
                 structure_path=str(structure_path),
                 workbook_path=str(workbook_path),
                 llm_client=self.llm,
                 config={
+                    "table_agent": {
+                        **vars(self.settings),
+                        "artifact_dir": str(qa_artifact_dir),
+                    },
                     "qa_artifact_dir": str(qa_artifact_dir),
                 },
                 table_retriever=self.table_retriever,
-            )
+            ) as runner:
             result = runner.run(question)
             qa_token_usage = result.token_usage
             qa_info = {
@@ -377,20 +554,9 @@ class TableAgentPipeline(BasePipeline):
                     prompt_tokens=int(result.token_usage.get("prompt", 0) or 0),
                     completion_tokens=int(result.token_usage.get("completion", 0) or 0),
                 ), qa_info
-        except Exception as exc:
-            if runner is not None:
-                qa_token_usage = runner.token_usage()
-            qa_info = {
-                "success": False,
-                "error": str(exc),
-                "token_usage": qa_token_usage,
-                "artifacts": {},
-                "fallback_used": True,
-            }
-        finally:
-            if runner is not None:
-                runner.env.workbook.close()
 
+        if result.success:
+            raise RuntimeError("TableQARunner returned success without a final answer")
         response = self.qa_agent.run(
             prompt=fallback_prompt,
             image_path=fallback_image_path,

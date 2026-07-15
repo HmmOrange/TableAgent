@@ -8,10 +8,8 @@ from typing import Any, Callable
 import openpyxl
 from openpyxl.utils.cell import range_boundaries
 
-from TableAgent.agents import LayoutAgent, VerificationAgent
-from TableAgent.config import TableAgentConfig
+from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import SheetMetadata
-from TableAgent.perception.structure import nullify_structure_ranges
 from TableAgent.pipeline.traversal import (
     Direction,
     DirectionQueue,
@@ -21,6 +19,9 @@ from TableAgent.pipeline.traversal import (
     frontier_directions,
 )
 from TableAgent.rendering.workbook import WorkbookRenderer
+from TableAgent.structure.layout.agent import LayoutAgent
+from TableAgent.structure.layout.parsing import nullify_structure_ranges
+from TableAgent.structure.verification import DeterministicVerifier
 
 
 @dataclass(frozen=True)
@@ -35,20 +36,20 @@ class LayoutWorkflowResult:
 
 
 class TableLayoutWorkflow:
-    """Priority-queue orchestrator for LayoutAgent and VerificationAgent."""
+    """Priority-queue orchestrator for layout extraction and deterministic verification."""
 
     def __init__(
         self,
         settings: TableAgentConfig,
         renderer: WorkbookRenderer,
         layout_agent: LayoutAgent,
-        verification_agent: VerificationAgent,
+        verifier: DeterministicVerifier,
         progress_callback: Callable[..., None] | None = None,
     ):
         self.settings = settings
         self.renderer = renderer
         self.layout_agent = layout_agent
-        self.verification_agent = verification_agent
+        self.verifier = verifier
         self.progress_callback = progress_callback
 
     def set_progress_callback(self, callback: Callable[..., None] | None) -> None:
@@ -167,18 +168,13 @@ class TableLayoutWorkflow:
                 (iteration_dir / "layout_discarded.txt").write_text(layout.discarded, encoding="utf-8")
 
             self._progress("verify", **progress_fields)
-            verification = self.verification_agent.run(
+            verification = self.verifier.run(
                 workbook_path=workbook_path,
                 sheet_name=sheet_name,
-                metadata_text=metadata_text,
                 structure_text=structure_text,
-                changelog=layout.changelog,
-                viewport_range=viewport_range,
-                iteration=iteration,
                 iteration_dir=iteration_dir,
             )
             structure_text = verification.structure_text
-            responses.append(verification.response)
             last_verification = {
                 "status": verification.status,
                 "feedback": verification.feedback,
@@ -191,7 +187,6 @@ class TableLayoutWorkflow:
                 "changed": layout.changed,
                 "layout_token_capped": layout.response.token_capped,
                 "layout_directions": layout.directions,
-                "verification_token_capped": verification.response.token_capped,
                 "verification": last_verification,
                 "queue_size": len(queue),
             })

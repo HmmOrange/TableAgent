@@ -11,13 +11,13 @@ from datasets.base import EvalSample
 from utils.llm.base import BaseLLM, LLMResponse
 from utils.log.logger import Logger
 
-from TableAgent.config import TableAgentConfig
-from TableAgent.perception.structure import _is_valid_structure
+from TableAgent.configs import TableAgentConfig
+from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import SourceCandidate, is_siflex
 from TableAgent.utils.table_text import _lexical_overlap_score
 
 from .cards import build_source_retrieval_card
-from .embeddings import MockEmbeddingModel, OpenAICompatibleEmbeddingClient
+from .embeddings import MockEmbeddingModel
 from .reranking import choose_from_reranker
 from .scoring import cosine_similarity, hybrid_score, normalize_scores
 
@@ -47,12 +47,7 @@ class SourceRetriever:
             if provider == "mock":
                 self.embedding_client = MockEmbeddingModel()
             elif provider in {"default", "live", "openai_embedding"}:
-                try:
-                    provider_name = None if provider in {"default", "live"} else provider
-                    self.embedding_client = OpenAICompatibleEmbeddingClient.from_config(provider_name)
-                except Exception as exc:
-                    logger.warning("Embedding client initialization failed: %s", exc)
-                    self.embedding_client = None
+                logger.warning("Live retrieval embeddings require an injected embedding_client")
 
     def select(
         self,

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
+from typing import Any
 
 import numpy as np
 import requests
 
-from configs.config import load_config
 from configs.embedding_config import resolve_embedding_config
 
 
@@ -54,8 +53,7 @@ class OpenAICompatibleEmbeddingClient:
         self.timeout = timeout
 
     @classmethod
-    def from_config(cls, provider: str | None = None, config_path: str | Path = "configs/config.yaml"):
-        config = load_config(config_path)
+    def from_config(cls, config: dict[str, Any], provider: str | None = None):
         provider_name, embedding_config = resolve_embedding_config(config, provider or "embedding")
         backend = str(embedding_config.get("provider", "")).lower()
         if backend not in {"openai", "openai_compatible"}:

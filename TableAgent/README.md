@@ -2,9 +2,8 @@
 
 TableAgent is the image-assisted table-structure and question-answering pipeline used by
 the `table_agent` benchmark option. It converts table inputs into workbooks and images,
-asks layout and verification agents for a grounded `structure.yaml`, and then asks the
-QA agent to answer the sample question. Prepared XLSX sources and transient per-sample
-workbooks both use the same multi-viewport MAS layout and verification workflow.
+asks the layout VLM for a candidate `structure.yaml`, verifies it with deterministic
+workbook-backed code, and then runs QA against the persisted structure cache.
 
 This document describes the current implementation under `TableAgent/`. The legacy
 import path `pipelines.table_agent_pipeline` is only a compatibility shim.
@@ -20,6 +19,17 @@ uv run ise-table --dataset mulhi --pipeline table_agent --limit 5 --repeats 1
 uv run ise-table --dataset siflex --pipeline table_agent --limit 5 --repeats 1
 ```
 
+TableAgent exposes three phases:
+
+```bash
+uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase structure --limit 5
+uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase qa --limit 5
+uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase all --limit 5
+```
+
+`structure` builds caches without an answer LLM, `qa` reuses valid caches without a
+layout VLM, and `all` forces structure generation before QA.
+
 Run the focused tests with:
 
 ```bash
@@ -30,20 +40,23 @@ uv run pytest table2img/tests/test_core.py tests/test_table_agent_mas.py tests/t
 
 ```text
 TableAgent/
-├── config.py                       Configuration loading and run-scoped paths
-├── perception/
-│   └── structure.py                YAML extraction, normalization, and sanity checks
-├── pipeline/
-│   ├── table_agent_pipeline.py     Main orchestration and lifecycle hooks
-│   ├── prompting.py                Prompt assembly and SiFlex answer formatting
-│   ├── source_preparer.py          Reusable SiFlex sheet encoding
-│   ├── retrieval.py                Candidate loading, lexical rank, and LLM rerank
-│   └── common.py                   Shared records, paths, and token accounting
-├── rendering/
-│   ├── workbook.py                 Sample/source workbook-to-image flow
-│   └── image_utils.py              Scaling, resizing, and optional image tiling
-└── utils/
-    └── table_text.py               Lexical overlap and simple Markdown conversion
+|-- agents/base.py                   Shared lightweight agent message and memory types
+|-- configs/table_agent.py           Configuration loading and run-scoped paths
+|-- prompts/                          Prompt modules split by model/task type
+|-- structure/
+|   |-- layout/
+|   |   |-- agent.py                 Sends coordinate-labelled images to the layout VLM
+|   |   |-- parsing.py               YAML extraction, normalization, and sanity checks
+|   |   `-- workflow.py              Structure traversal and refinement orchestration
+|   `-- verification/                Deterministic workbook-backed verification
+|-- pipeline/
+|   |-- table_agent_pipeline.py      Main orchestration and lifecycle hooks
+|   |-- prompting.py                 Prompt binding and SiFlex answer formatting
+|   |-- source_preparer.py           Reusable SiFlex sheet encoding
+|   |-- retrieval/                   Candidate loading, ranking, and reranking
+|   `-- common.py                    Shared records, paths, and token accounting
+|-- rendering/                       Workbook-to-image rendering and image utilities
+`-- utils/table_text.py              Lexical overlap and Markdown conversion
 ```
 
 Code outside this package still participates in the pipeline:
@@ -52,8 +65,8 @@ Code outside this package still participates in the pipeline:
   benchmark-run artifact scoping.
 - [`../cli/__init__.py`](../cli/__init__.py) calls `set_run_id()`, `prepare_samples()`,
   and `run()` during evaluation.
-- [`prompts.py`](prompts.py) contains the layout,
-  verification, answer, and reranker templates.
+- [`prompts/`](prompts/) contains separate modules for structure, answer, reranker,
+  planner, ReAct, review, and synthesis prompts.
 - [`../utils/workbook_converter.py`](../utils/workbook_converter.py) normalizes benchmark
   samples into `.xlsx` workbooks.
 - [`../table2img/core.py`](../table2img/core.py) converts workbooks into renderable
@@ -82,7 +95,7 @@ flowchart TD
     Retrieve -->|no candidate| Convert[Sample to table.xlsx]
     Convert --> Render[Render table.png and table.html]
     Render --> Layout[LayoutAgent updates structure and changelog]
-    Layout --> Verify[Deterministic verifier observation plus ReAct VerificationAgent]
+    Layout --> Verify[Deterministic workbook verifier]
     Verify -->|not_good and retries remain| Layout
     Verify --> Persist[Persist valid MAS structure artifacts]
     Persist --> TextAnswer[Text answer model]
@@ -129,8 +142,7 @@ retrieved:
    `table.html`. Edge viewports are clipped to `used_range`, so a small sheet does not
    produce rows or columns of blank cells merely to fill the configured viewport.
 5. Ask LayoutAgent to update the structure, emit a changelog, and suggest directions.
-6. Have VerificationAgent run deterministic range checks, review the observation with
-   a ReAct-style semantic pass, and optionally apply an `updated_structure`.
+6. Run deterministic range checks and feed concrete failures back to LayoutAgent.
 7. Traverse and retry viewports using the same MAS queue used by prepared sources.
 8. Persist `structure.yaml` only when it passes the local structural sanity check.
 9. Ask the answer LLM using the table text and final structure.
@@ -153,8 +165,7 @@ Before repeats begin, the CLI calls `prepare_samples()`:
 4. Render a coordinate-labelled cell viewport, defaulting to 50 rows by 50 columns and
    clipping the captured range at the sheet's `used_range`.
 5. Ask LayoutAgent to update `structure.yaml`, emit a changelog, and suggest directions.
-6. Have VerificationAgent write and execute `verification.py`, then perform semantic
-   ReAct review over the deterministic report.
+6. Invoke `python -m TableAgent.structure.verification.worker` and persist its JSON report.
 7. Traverse `stay`, `right`, `down`, `left`, and `up` through a priority queue. Cardinal
    shifts default to 45 cells. A direction receives one extra attempt after its first
    verified zero-change viewport and stops after the second.
@@ -162,43 +173,17 @@ Before repeats begin, the CLI calls `prepare_samples()`:
    unverifiable ranges to `null`.
 9. Stop when the queue is empty and leave the reusable source for QAAgent retrieval.
 
-Each loop directory contains its image/HTML, prompts, raw responses, before/after
-structures, changelog, generated verifier, verifier output, and discarded layout prose.
-When semantic review edits the candidate structure, the loop also writes
-`structure_semantic.yaml` and `verification_output_after_semantic.json`. `events.jsonl`
-is the compact traversal index.
+Each loop directory contains its image/HTML, layout prompt/response, before/after
+structures, changelog, deterministic verifier output, and discarded layout prose.
+`events.jsonl` is the compact traversal index.
 
-### Verification and ReAct repair
+### Deterministic verification
 
-Verification has two layers:
-
-1. `verification.py` is deterministic workbook-backed code. It checks A1 syntax,
-   worksheet bounds, visible header text, merged-cell expansion, data/header overlap,
-   parent/child containment, and simple range repairs that can be proved from the
-   workbook.
-2. `VerificationAgent` receives that report as a tool observation and responds with a
-   ReAct-style YAML envelope: `thought`, `action`, `observation`, `status`, `feedback`,
-   `null_fields`, and optionally `updated_structure`.
-
-The deterministic report is intentionally not the final authority. It can be too strict
-for VLM/OCR artifacts such as line breaks, multilingual labels, whitespace differences,
-or obvious visual spans. If semantic review can confidently repair or accept the full
-structure, it returns `updated_structure`; the pipeline writes that YAML back to
-`structure_after.yaml` and carries it forward as the current structure. The repaired
-structure is rerun through the deterministic verifier for diagnostics and written to
-`verification_output_after_semantic.json`. If the deterministic report still says
-`not_good` but semantic review marks the updated structure `good`, the workflow accepts
-the semantic decision and continues.
-
-Verifier tool failures are different from strict structural mismatches. The generated
-verifier runs with UTF-8 stdout/stderr, and a traceback, timeout, or invalid JSON is
-tagged as a tool error. Semantic review must not treat a verifier crash as evidence that
-the structure is good.
-
-If semantic review cannot produce a valid complete structure, the workflow keeps the
-candidate structure, feeds `feedback` back to LayoutAgent, and retries the same viewport
-with `stay` until `max_retry`. After retry exhaustion, only fields listed in
-`null_fields` are set to `null`.
+The verifier checks A1 syntax, worksheet bounds, visible header text, merged-cell
+expansion, data/header overlap, parent/child containment, and repairs that can be proved
+from workbook contents. It runs in a UTF-8 subprocess with timeout and invalid-output
+handling. Failed reports feed precise feedback back to LayoutAgent; after `max_retry`,
+only reported `null_fields` are set to `null`. There is no semantic verification LLM.
 
 At question time, `SourceRetriever`:
 
@@ -282,21 +267,18 @@ key and an invalid or unsupported A1 reference should be rejected.
 
 ### Important validation boundary
 
-`_is_valid_structure()` remains a local sanity check. The generated `verification.py`
-adds deterministic A1 syntax and Excel-bound checks, while VerificationAgent judges
-visible header semantics and data-range correctness. VerificationAgent may replace the
-candidate with a complete `updated_structure`, but the update must remain schema-valid
-and should change only fields needed by the deterministic observation or semantic review.
+`_is_valid_structure()` remains a local sanity check. The deterministic verifier adds
+A1 syntax, Excel-bound, visible-text, merged-cell, and data-range checks and may apply
+only repairs proved from workbook contents.
 
 ## Prompt templates
 
-Prompt constants live in [`prompts.py`](prompts.py), while
+Prompt constants live in task-specific modules under [`prompts/`](prompts/), while
 `pipeline/prompting.py` binds sample data to those templates.
 
 | Template | Model | Purpose |
 | --- | --- | --- |
 | `LAYOUT_MAS_*` | Layout VLM | Update MAS structure, changelog, and traversal directions |
-| `VERIFICATION_MAS_*` | Answer LLM | ReAct semantic review over deterministic verifier output; may return `updated_structure` |
 | `ANSWER_*` | Answer LLM | Produce only the final benchmark answer |
 | `RERANKER_*` | Answer LLM | Select a prepared SiFlex worksheet |
 
@@ -305,18 +287,15 @@ When changing a prompt:
 1. Keep the parser contract and prompt schema synchronized.
 2. Add a focused assertion in `tests/test_table_agent_mas.py` or `tests/test_table_agent_pipeline.py`.
 3. Test fenced YAML, prose around YAML, malformed output, and `null` ranges as relevant.
-4. Inspect `iterations/*/layout_discarded.txt` and
-   `iterations/*/verification_discarded.txt` after a real run for runaway reasoning.
+4. Inspect `iterations/*/layout_discarded.txt` after a real run for runaway reasoning.
 5. Compare both accuracy and token usage; prompt changes can alter refinement count.
 
 ## Configuration
 
-All TableAgent defaults are defined in
-[`../configs/pipelines.yaml`](../configs/pipelines.yaml). The root
-[`../config.yaml`](../config.yaml) selects and defines model providers without
-duplicating pipeline settings. `TableAgentConfig.from_config()` deep-merges explicit
-construction overrides over those defaults. The CLI then injects run-scoped artifact
-directories with `run_scoped_table_agent_config()`.
+All dataset, pipeline, and model settings live in the root
+[`../config.yaml`](../config.yaml). YAML includes are not supported. The CLI loads the
+file once, passes the resolved `table_agent` section into `TableAgentConfig`, and then
+injects run-scoped QA artifact directories.
 
 Key settings:
 
@@ -329,6 +308,8 @@ Key settings:
 | `repeat_dir_template` | Per-repeat template containing `{run_id}` |
 | `shared_dir_name` | Reusable prepared-source directory name |
 | `artifact_dir` | Fallback for direct/manual pipeline construction |
+| `phase` | `structure`, `qa`, or `all` |
+| `structure_cache_dir` | Persistent content-addressed structure cache root |
 | `max_refinement_rounds` | Corrective rounds after the initial layout attempt |
 | `max_context_chars` | Maximum text context before truncation |
 | `render_backend` | Renderer backend passed to `table2img` |
@@ -376,8 +357,8 @@ Prepared source directories contain `metadata.yaml`, `structure.yaml`, `changelo
 `events.jsonl`, and `iterations/`. Each iteration directory is named with its sequence,
 direction, and A1 viewport and contains `viewport.png`, `viewport.html`, layout and
 verification prompts/responses, before/after structures, `verification.py`, and
-`verification_output.json`. Semantic verifier edits add `structure_semantic.yaml`,
-`verification_output_after_semantic.json`, and optionally `verification_discarded.txt`.
+`verification_output.json`. The verifier implementation lives in the package and is not
+copied into each iteration directory.
 
 Benchmark CLI runs use this structure:
 
@@ -443,14 +424,13 @@ source answering.
 Keep changes surgical and place them at the narrowest ownership boundary:
 
 - Add or change orchestration in `pipeline/table_agent_pipeline.py`.
-- Change prompt wording or answer formats in `prompts.py` and
+- Change prompt wording or answer formats in the matching `prompts/` module and
   `pipeline/prompting.py`.
-- Add YAML schema or grounding rules in `perception/structure.py`.
+- Add YAML schema or grounding rules in `structure/layout/parsing.py`.
 - Change source indexing or candidate scoring in `pipeline/retrieval.py`.
 - Change SiFlex preprocessing and cache behavior in `pipeline/source_preparer.py`.
 - Change workbook/image behavior in `rendering/`.
-- Add pipeline settings to `TableAgentConfig` and `configs/pipelines.yaml`; keep model
-  provider definitions and selections in the local config.
+- Add pipeline settings to `TableAgentConfig` and the root `config.yaml`.
 
 For behavior changes, test the observable contract rather than private implementation
 details. Useful existing coverage includes:
@@ -474,9 +454,7 @@ When a run produces a wrong answer or structure:
 3. Check `iterations/*/layout_discarded.txt` for prose that was discarded before YAML
    was persisted.
 4. Inspect report metadata for verifier status and feedback.
-5. If `structure_semantic.yaml` exists, compare it with `structure_before.yaml` and
-   `verification_output_after_semantic.json`; semantic review may have accepted a
-   structure despite a strict deterministic mismatch.
+5. Inspect `verification_output.json` for deterministic errors, repairs, and null fields.
 6. Inspect worker logs for connection errors, retries, and whether each call was text or
    vision.
 7. For SiFlex, inspect `retrieval_info`, candidate sheet names, lexical score, reranker
@@ -491,7 +469,7 @@ model-server disconnections, and exact-match formatting disagreements.
 ## Current Flow Boundaries
 
 The implemented MAS loop matches the high-level diagram of metadata extraction,
-viewport rendering, LayoutAgent updates, VerificationAgent review, retry, directional
+viewport rendering, LayoutAgent updates, deterministic verification, retry, directional
 traversal, and final structure output. A few boundaries are explicit in code:
 
 - Direction traversal expands only after a viewport verifies as `good`. A failing

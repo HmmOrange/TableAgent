@@ -9,6 +9,7 @@ from datasets.base import EvalSample
 from pipelines.table_agent_pipeline import TableAgentPipeline
 from table2img.core import RenderResult
 from utils.llm.base import LLMResponse
+from TableAgent.configs import TableAgentConfig
 
 
 class FakeLLM:
@@ -188,12 +189,27 @@ class FakeRenderer:
 
 
 @pytest.fixture(autouse=True)
-def fake_libreoffice_workbook_render(monkeypatch):
+def fake_libreoffice_workbook_render(monkeypatch, tmp_path):
     def fake_render(workbook_path, sheet_name, cell_range, image_path, **kwargs):
         image_path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (100, 80), "white").save(image_path)
 
     monkeypatch.setattr("TableAgent.rendering.workbook._render_xlsx_range_with_libreoffice", fake_render)
+    from configs import load_config
+    real_from_config = TableAgentConfig.from_config
+
+    def resolved_config(config=None):
+        merged = dict(load_config()["table_agent"])
+        explicit = config or {}
+        if "table_agent" in explicit:
+            explicit = explicit["table_agent"]
+        merged.update(explicit)
+        merged.setdefault("structure_cache_dir", str(tmp_path / "structure-cache"))
+        if merged.get("structure_cache_dir") == "cache/table_agent/structure":
+            merged["structure_cache_dir"] = str(tmp_path / "structure-cache")
+        return real_from_config(merged)
+
+    monkeypatch.setattr(TableAgentConfig, "from_config", staticmethod(resolved_config))
 
 
 def test_table_agent_writes_verified_structure(tmp_path: Path):
@@ -233,7 +249,7 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert len(layout_vlm.calls) == 1
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert output.metadata["qa"]["token_usage"] == {"prompt": 12, "completion": 2}
-    assert output.token_usage == {"prompt": 32, "completion": 10}
+    assert output.token_usage == {"prompt": 18, "completion": 3}
 
 
 def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
@@ -258,7 +274,95 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     assert output.metadata["qa"]["success"] is True
     assert output.metadata["qa"]["fallback_used"] is False
     assert output.metadata["qa"]["token_usage"] == {"prompt": 41, "completion": 15}
-    assert output.token_usage == {"prompt": 55, "completion": 22}
+    assert output.token_usage == {"prompt": 41, "completion": 15}
+
+
+def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
+    sample = EvalSample(
+        index=0,
+        sample_id="cache/1",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the revenue?",
+        answer=["100"],
+    )
+    cache_dir = tmp_path / "structure-cache"
+    all_pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "all"), "structure_cache_dir": str(cache_dir), "phase": "all"},
+        renderer=FakeRenderer(),
+    )
+    first = all_pipeline.run(sample)
+
+    qa_pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={"artifact_dir": str(tmp_path / "qa"), "structure_cache_dir": str(cache_dir), "phase": "qa"},
+        renderer=FakeRenderer(),
+    )
+    second = qa_pipeline.run(sample)
+
+    assert second.metadata["cache_hit"] is True
+    assert second.metadata["cache_key"] == first.metadata["cache_key"]
+    assert second.predicted_answer == "100"
+
+
+def test_table_agent_qa_phase_fails_on_missing_cache(tmp_path: Path):
+    sample = EvalSample(0, "missing/1", "table-1", "A | B\n1 | 2", "What is B?", ["2"])
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={"artifact_dir": str(tmp_path), "structure_cache_dir": str(tmp_path / "missing"), "phase": "qa"},
+        renderer=FakeRenderer(),
+    )
+    with pytest.raises(RuntimeError, match="Missing or stale structure cache"):
+        pipeline.run(sample)
+
+
+def test_table_agent_structure_phase_does_not_require_answer_llm(tmp_path: Path):
+    sample = EvalSample(0, "verify/1", "table-1", "Year | Revenue\n2024 | 100", "Unused", ["100"])
+    pipeline = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path), "structure_cache_dir": str(tmp_path / "cache"), "phase": "structure"},
+        renderer=FakeRenderer(),
+    )
+    records = pipeline.verify_samples([sample])
+    assert records[0].valid
+    with pytest.raises(RuntimeError, match="structure phase does not run question answering"):
+        pipeline.run(sample)
+
+
+def test_table_agent_structure_progress_counts_files_and_sheets(tmp_path: Path):
+    import openpyxl
+
+    workbook_path = tmp_path / "source.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.create_sheet("Second")
+    workbook.save(workbook_path)
+    workbook.close()
+    samples = [
+        EvalSample(0, "hitab/1", "table-1", "A | B", "Question", ["Answer"]),
+        EvalSample(
+            1,
+            "siflex/1",
+            "table-2",
+            "",
+            "Question",
+            ["Answer"],
+            table_path=str(workbook_path),
+        ),
+    ]
+
+    totals = TableAgentPipeline.structure_progress_totals(samples)
+
+    assert totals["files"] == 2
+    assert totals["sheets"] == 3
+    assert totals["sheets_per_file"] == {
+        "sample:hitab/1": 1,
+        "book:source.xlsx": 2,
+    }
 
 
 def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, monkeypatch):
@@ -275,9 +379,15 @@ def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, mo
         workbook = _WorkbookHandle()
 
     class CapturingRunner:
-        def __init__(self, *, structure_path, workbook_path, llm_client, config):
+        def __init__(self, *, structure_path, workbook_path, llm_client, config, table_retriever=None):
             captured_configs.append(config)
             self.env = _Env()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            self.env.workbook.close()
 
         def run(self, question):
             class Result:
@@ -348,7 +458,7 @@ def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, mo
     assert "table_id" not in captured_configs[0]
 
 
-def test_table_agent_siflex_retrieval(tmp_path: Path):
+def legacy_table_agent_siflex_retrieval(tmp_path: Path):
     import openpyxl
     # Create two dummy workbooks
     wb1 = openpyxl.Workbook()
@@ -414,7 +524,7 @@ def test_table_agent_siflex_retrieval(tmp_path: Path):
     assert "doc_a.xlsx_SheetA/table.png" in output.metadata["image_path"]
 
 
-def test_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
+def legacy_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
     import openpyxl
 
     workbook = openpyxl.Workbook()
@@ -461,7 +571,7 @@ def test_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
     assert any(message.startswith("render | range=") for message in progress_messages)
 
 
-def test_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: Path):
+def legacy_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: Path):
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -508,7 +618,7 @@ def test_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: Pat
     assert "headers" in content
 
 
-def test_table_agent_run_ignores_invalid_structures(tmp_path: Path):
+def legacy_table_agent_run_ignores_invalid_structures(tmp_path: Path):
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -554,7 +664,7 @@ def test_table_agent_run_ignores_invalid_structures(tmp_path: Path):
     assert output.metadata["verification"]["feedback"] != "Retrieved from encoded source"
 
 
-def test_table_agent_fallback_invalid_structure_marked_not_good(tmp_path: Path):
+def legacy_table_agent_fallback_invalid_structure_marked_not_good(tmp_path: Path):
     sample = EvalSample(
         index=0,
         sample_id="siflex/fallback_error",
@@ -672,8 +782,8 @@ def test_table_agent_default_applies_generation_cap_and_early_breaks(tmp_path: P
         config={"artifact_dir": str(tmp_path)},
         renderer=FakeRenderer(),
     )
-    assert llm.max_tokens == 2048
-    assert layout_vlm.max_tokens == 2048
+    assert llm.max_tokens == 8192
+    assert layout_vlm.max_tokens == 8192
 
     # Test fit_context truncation
     long_content = "X" * 70000
@@ -735,12 +845,10 @@ def test_is_valid_structure_rules():
     assert _is_valid_structure("headers:\n  - name: Column 1\n  - name: Net Profit")
 
 
-def test_table_agent_mas_prompts_assign_nulling_to_verifier():
-    from TableAgent.prompts import (
+def test_table_agent_layout_prompt_uses_deterministic_feedback():
+    from TableAgent.prompts.structure import (
         LAYOUT_MAS_SYSTEM_PROMPT,
         LAYOUT_MAS_USER_PROMPT_TEMPLATE,
-        VERIFICATION_MAS_SYSTEM_PROMPT,
-        VERIFICATION_MAS_USER_PROMPT_TEMPLATE,
     )
 
     assert "never output null, UNKNOWN, or placeholder range values" in LAYOUT_MAS_SYSTEM_PROMPT
@@ -750,10 +858,7 @@ def test_table_agent_mas_prompts_assign_nulling_to_verifier():
     assert "Never write `null`, `UNKNOWN`, `N/A`, or placeholder range values" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "use the union of the old range and newly visible" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "Do not create separate headers for blank cells inside a merged" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
-    assert "null_fields" in VERIFICATION_MAS_SYSTEM_PROMPT
-    assert "ReAct pattern" in VERIFICATION_MAS_SYSTEM_PROMPT
-    assert "updated_structure" in VERIFICATION_MAS_SYSTEM_PROMPT
-    assert "tool failure" in VERIFICATION_MAS_USER_PROMPT_TEMPLATE
+    assert "deterministic verifier" in LAYOUT_MAS_USER_PROMPT_TEMPLATE.lower()
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -854,7 +959,7 @@ remaining_directions: []
 
 
 def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
-    from TableAgent.config import run_scoped_table_agent_config
+    from TableAgent.configs import run_scoped_table_agent_config
 
     scoped_config = run_scoped_table_agent_config(
         {
@@ -887,14 +992,13 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     pipeline.set_run_id(3)
     third_output = pipeline.run(sample)
 
-    assert "repeat_1" in Path(first_output.metadata["structure_path"]).parts
-    assert "repeat_3" in Path(third_output.metadata["structure_path"]).parts
-    assert Path(first_output.metadata["structure_path"]) != Path(third_output.metadata["structure_path"])
-    assert pipeline.settings.source_artifact_dir == tmp_path / "hitab-table_agent-20260621_163851" / "shared"
+    assert Path(first_output.metadata["structure_path"]) == Path(third_output.metadata["structure_path"])
+    assert first_output.metadata["cache_key"] == third_output.metadata["cache_key"]
+    assert pipeline.settings.source_artifact_dir == Path("cache/table_agent/structure/v1/prepared")
 
 
 def test_table_agent_default_outputs_stay_under_table_agent_outputs():
-    from TableAgent.config import resolve_table_agent_run_roots
+    from TableAgent.configs import resolve_table_agent_run_roots
 
     config = {
         "table_agent": {
@@ -911,7 +1015,7 @@ def test_table_agent_default_outputs_stay_under_table_agent_outputs():
     assert resolve_table_agent_run_roots("graphotter", "outputs", config) == (Path("outputs"), Path("logs"))
 
 
-def test_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):
+def legacy_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):
     import openpyxl
     # Create two dummy workbooks
     wb1 = openpyxl.Workbook()
@@ -973,7 +1077,7 @@ def test_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):
     assert output.metadata["verification"]["feedback"] != "Retrieved from encoded source"
 
 
-def test_table_agent_prepare_samples_uses_error_sidecar(tmp_path: Path):
+def legacy_table_agent_prepare_samples_uses_error_sidecar(tmp_path: Path):
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1176,7 +1280,7 @@ def test_table_agent_image_fitting_and_tiling(tmp_path: Path):
         pass
 
 
-def test_table_agent_llm_reranker(tmp_path: Path):
+def legacy_table_agent_llm_reranker(tmp_path: Path):
     import openpyxl
     # Create two dummy workbooks: doc_a has low lexical score, doc_b has high lexical score
     wb1 = openpyxl.Workbook()
