@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -186,6 +188,7 @@ def _render_xlsx_range_with_libreoffice(
             worksheet.page_setup.fitToWidth = 1
             worksheet.page_setup.fitToHeight = 1
             _ensure_visible_dimensions(worksheet, RowDimension, ColumnDimension)
+            _expand_dimensions_to_fit(worksheet)
             workbook.save(prepared_path)
         finally:
             workbook.close()
@@ -268,6 +271,74 @@ def _ensure_visible_dimensions(worksheet: Any, row_dimension_cls: Any, column_di
         column_letter = get_column_letter(column_index)
         if column_letter not in worksheet.column_dimensions:
             worksheet.column_dimensions[column_letter] = column_dimension_cls(worksheet, index=column_letter)
+
+
+def _expand_dimensions_to_fit(worksheet: Any) -> None:
+    """Expand worksheet dimensions so cell text is present in the exported image."""
+    from openpyxl.utils import get_column_letter
+
+    required_widths: dict[int, float] = {}
+    merged_by_cell: dict[tuple[int, int], Any] = {}
+    for merged_range in worksheet.merged_cells.ranges:
+        for row in range(merged_range.min_row, merged_range.max_row + 1):
+            for column in range(merged_range.min_col, merged_range.max_col + 1):
+                merged_by_cell[(row, column)] = merged_range
+
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if cell.value is None or not str(cell.value).strip():
+                continue
+            lines = str(cell.value).splitlines() or [""]
+            required = max(_display_width(line) for line in lines) + 2
+            merged_range = merged_by_cell.get((cell.row, cell.column))
+            if merged_range is None:
+                required_widths[cell.column] = max(required_widths.get(cell.column, 0), required)
+                continue
+            current = sum(
+                float(worksheet.column_dimensions[get_column_letter(column)].width or 13)
+                for column in range(merged_range.min_col, merged_range.max_col + 1)
+            )
+            required_widths[merged_range.min_col] = max(
+                required_widths.get(merged_range.min_col, 0),
+                float(worksheet.column_dimensions[get_column_letter(merged_range.min_col)].width or 13)
+                + max(0, required - current),
+            )
+
+    for column, required in required_widths.items():
+        letter = get_column_letter(column)
+        dimension = worksheet.column_dimensions[letter]
+        dimension.width = max(float(dimension.width or 13), required)
+
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if cell.value is None or not str(cell.value).strip():
+                continue
+            lines = str(cell.value).splitlines() or [""]
+            merged_range = merged_by_cell.get((cell.row, cell.column))
+            columns = (
+                range(merged_range.min_col, merged_range.max_col + 1)
+                if merged_range is not None
+                else range(cell.column, cell.column + 1)
+            )
+            available_width = sum(
+                float(worksheet.column_dimensions[get_column_letter(column)].width or 13)
+                for column in columns
+            )
+            wrap = bool(cell.alignment.wrap_text)
+            wrapped_lines = sum(
+                max(1, math.ceil(_display_width(line) / max(1, available_width)))
+                for line in lines
+            ) if wrap else len(lines)
+            if wrapped_lines <= 1:
+                continue
+            font_size = float(cell.font.sz or 11)
+            required_height = wrapped_lines * font_size * 1.25 + 2
+            dimension = worksheet.row_dimensions[cell.row]
+            dimension.height = max(float(dimension.height or 15), required_height)
+
+
+def _display_width(value: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in value)
 
 
 def _image_render_result(image_path: Path, *, browser_path: Path) -> RenderResult:
