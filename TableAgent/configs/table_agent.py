@@ -30,6 +30,7 @@ class TableAgentConfig:
     max_image_pixels: int | None
     image_tile_size: int | None
     image_tile_overlap: int
+    run_retrieval: bool
     retrieval_rerank_with_llm: bool
     retrieval_top_k: int
     retrieval_candidate_max_chars: int
@@ -78,6 +79,7 @@ class TableAgentConfig:
             max_image_pixels=_optional_int(merged.get("max_image_pixels")),
             image_tile_size=_optional_int(merged.get("image_tile_size")),
             image_tile_overlap=int(_required(merged, "image_tile_overlap")),
+            run_retrieval=_bool(merged.get("run_retrieval", True)),
             retrieval_rerank_with_llm=_bool(_required(merged, "retrieval_rerank_with_llm")),
             retrieval_top_k=int(_required(merged, "retrieval_top_k")),
             retrieval_candidate_max_chars=int(_required(merged, "retrieval_candidate_max_chars")),

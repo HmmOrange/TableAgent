@@ -24,6 +24,9 @@ class SourceCandidate:
     embedding_score: float = 0.0
     embedding_used: bool = False
     retrieval_card: str = ""
+    table_id: str = ""
+    table_name: str = ""
+    table_description: str = ""
 
 
 def safe_name(value: str) -> str:

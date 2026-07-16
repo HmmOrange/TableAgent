@@ -4,6 +4,7 @@ from .cards import (
     _build_retrieval_card,
     _extract_headers_text,
     build_source_retrieval_card,
+    build_table_retrieval_cards,
     extract_headers_text,
 )
 from .contracts import (
@@ -27,6 +28,7 @@ __all__ = [
     "TableRetrieverContract",
     "TableSearchRequest",
     "build_source_retrieval_card",
+    "build_table_retrieval_cards",
     "choose_from_reranker",
     "cosine_similarity",
     "extract_headers_text",

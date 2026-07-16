@@ -29,6 +29,8 @@ class PromptBuilder:
                 f"Candidate {index}:\n"
                 f"workbook: {candidate.workbook_path.name}\n"
                 f"sheet: {candidate.sheet_name}\n"
+                f"table_id: {candidate.table_id}\n"
+                f"table_name: {candidate.table_name}\n"
                 f"score: {candidate.score}\n"
                 f"lexical_score: {candidate.lexical_score}\n"
                 f"embedding_score: {candidate.embedding_score}\n"

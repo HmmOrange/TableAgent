@@ -242,6 +242,77 @@ headers:
     assert "Price Column" in sheet3_cand.structure_text
     assert sheet3_cand.lexical_score > 0
 
+
+def test_source_retriever_ranks_tables_within_one_sheet(temp_sources_dir):
+    source_dir = temp_sources_dir / "dummy_Sheet3"
+    source_dir.mkdir()
+    (source_dir / "metadata.json").write_text(json.dumps({
+        "workbook_path": "/path/to/dummy.xlsx",
+        "sheet_name": "Sheet3",
+        "layout_workflow_version": 4,
+    }), encoding="utf-8")
+    (source_dir / "structure.yaml").write_text("""
+table1:
+  id: table1
+  name: Equipment status
+  description: WET and DRY equipment repair counts and share by failure class.
+  sheet: Sheet3
+  headers:
+    - id: failure_class
+      label: Failure class
+      description: Equipment failure class
+      orientation: column
+table2:
+  id: table2
+  name: Maintenance item cost
+  description: Maintenance items, amount, and cost ratio.
+  sheet: Sheet3
+  headers:
+    - id: maintenance_item
+      label: Maintenance item
+      description: Maintenance item name
+      orientation: column
+    - id: amount
+      label: Amount
+      description: Maintenance amount
+      orientation: column
+""", encoding="utf-8")
+    (source_dir / "sheet_text.txt").write_text(
+        "sheet has equipment and maintenance summaries",
+        encoding="utf-8",
+    )
+    (source_dir / "table.png").touch()
+    (source_dir / "table.html").touch()
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(temp_sources_dir.parent),
+        "source_artifact_dir": str(temp_sources_dir.parent),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_top_k": 3,
+        "retrieval_candidate_max_chars": 1000,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex-test",
+        table_id="test",
+        table_content="",
+        question="maintenance item amount cost ratio",
+        answer=[],
+        sample_path="siflex",
+        table_path="/path/to/dummy.xlsx",
+        raw={},
+    )
+
+    candidates = retriever.load_candidates(sample)
+    sheet_candidates = [candidate for candidate in candidates if candidate.sheet_name == "Sheet3"]
+
+    assert [candidate.table_id for candidate in sheet_candidates] == ["table2", "table1"]
+    assert sheet_candidates[0].table_name == "Maintenance item cost"
+    assert "table2:" in sheet_candidates[0].structure_text
+    assert "table1:" not in sheet_candidates[0].structure_text
+    assert "Maintenance item" in sheet_candidates[0].retrieval_card
+
 def test_candidate_prompt_text_labels(temp_sources_dir):
     from TableAgent.pipeline.prompting import PromptBuilder
     from TableAgent.pipeline.common import SourceCandidate
@@ -274,6 +345,8 @@ def test_candidate_prompt_text_labels(temp_sources_dir):
     assert "lexical_score: 0.7" in prompt_text
     assert "embedding_score: 0.9" in prompt_text
     assert "embedding_used: True" in prompt_text
+    assert "table_id:" in prompt_text
+    assert "table_name:" in prompt_text
     assert "retrieval_card:" in prompt_text
     assert "Table: compact card" in prompt_text
     assert "some structure" not in prompt_text

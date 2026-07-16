@@ -16,7 +16,7 @@ from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import SourceCandidate, is_siflex
 from TableAgent.utils.table_text import _lexical_overlap_score
 
-from .cards import build_source_retrieval_card
+from .cards import build_source_retrieval_card, build_table_retrieval_cards
 from .embeddings import MockEmbeddingModel
 from .reranking import choose_from_reranker
 from .scoring import cosine_similarity, hybrid_score, normalize_scores
@@ -96,11 +96,9 @@ class SourceRetriever:
             for value in str(sample.table_path).split(";")
             if value.strip()
         }
-        candidates = [
-            candidate
-            for source_dir in source_dirs.iterdir()
-            if (candidate := self._candidate_from_dir(source_dir, allowed_paths, sample.question)) is not None
-        ]
+        candidates = []
+        for source_dir in source_dirs.iterdir():
+            candidates.extend(self._candidates_from_dir(source_dir, allowed_paths, sample.question))
         if not candidates:
             return []
 
@@ -152,14 +150,14 @@ class SourceRetriever:
                 return executor.submit(asyncio.run, get_embeddings()).result()
         return asyncio.run(get_embeddings())
 
-    def _candidate_from_dir(
+    def _candidates_from_dir(
         self,
         source_dir: Path,
         allowed_paths: set[str],
         query: str,
-    ) -> SourceCandidate | None:
+    ) -> list[SourceCandidate]:
         if not source_dir.is_dir():
-            return None
+            return []
         metadata_path = source_dir / "metadata.json"
         structure_path = source_dir / "structure.yaml"
         sheet_text_path = source_dir / "sheet_text.txt"
@@ -171,30 +169,84 @@ class SourceRetriever:
             and sheet_text_path.is_file()
             and image_path.is_file()
         ):
-            return None
+            return []
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         workbook_path = Path(metadata.get("workbook_path", ""))
         if allowed_paths and str(workbook_path.resolve()) not in allowed_paths:
-            return None
+            return []
         structure_text = structure_path.read_text(encoding="utf-8")
         if not _is_valid_structure(structure_text):
-            return None
+            return []
         sheet_text = sheet_text_path.read_text(encoding="utf-8")
         sheet_name = str(metadata.get("sheet_name", ""))
+        table_cards = build_table_retrieval_cards(
+            workbook_path,
+            sheet_name,
+            structure_text,
+            sheet_text,
+        )
+        if table_cards:
+            return [
+                self._source_candidate(
+                    source_dir=source_dir,
+                    workbook_path=workbook_path,
+                    sheet_name=sheet_name,
+                    image_path=image_path,
+                    html_path=html_path if html_path.is_file() else None,
+                    structure_text=table_card["structure_text"],
+                    sheet_text=sheet_text,
+                    retrieval_card=table_card["retrieval_card"],
+                    query=query,
+                    table_id=table_card["table_id"],
+                    table_name=table_card["table_name"],
+                    table_description=table_card["description"],
+                )
+                for table_card in table_cards
+            ]
         retrieval_card = build_source_retrieval_card(
             workbook_path,
             sheet_name,
             structure_text,
             sheet_text,
         )
+        return [
+            self._source_candidate(
+                source_dir=source_dir,
+                workbook_path=workbook_path,
+                sheet_name=sheet_name,
+                image_path=image_path,
+                html_path=html_path if html_path.is_file() else None,
+                structure_text=structure_text,
+                sheet_text=sheet_text,
+                retrieval_card=retrieval_card,
+                query=query,
+            )
+        ]
+
+    def _source_candidate(
+        self,
+        *,
+        source_dir: Path,
+        workbook_path: Path,
+        sheet_name: str,
+        image_path: Path,
+        html_path: Path | None,
+        structure_text: str,
+        sheet_text: str,
+        retrieval_card: str,
+        query: str,
+        table_id: str = "",
+        table_name: str = "",
+        table_description: str = "",
+    ) -> SourceCandidate:
         lexical_score = _lexical_overlap_score(query, retrieval_card)
         return SourceCandidate(
             directory=source_dir,
             workbook_path=workbook_path,
             sheet_name=sheet_name,
             image_path=image_path,
-            html_path=html_path if html_path.is_file() else None,
+            html_path=html_path,
             structure_text=structure_text,
             sheet_text=sheet_text,
             score=lexical_score,
@@ -202,6 +254,18 @@ class SourceRetriever:
             embedding_score=0.0,
             embedding_used=False,
             retrieval_card=retrieval_card,
+            table_id=table_id,
+            table_name=table_name,
+            table_description=table_description,
         )
+
+    def _candidate_from_dir(
+        self,
+        source_dir: Path,
+        allowed_paths: set[str],
+        query: str,
+    ) -> SourceCandidate | None:
+        candidates = self._candidates_from_dir(source_dir, allowed_paths, query)
+        return max(candidates, key=lambda candidate: candidate.lexical_score) if candidates else None
 
     _choose_from_reranker = staticmethod(choose_from_reranker)

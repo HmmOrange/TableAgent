@@ -107,7 +107,7 @@ class TableAgentPipeline(BasePipeline):
         if self.settings.phase == "qa":
             missing = []
             for sample in samples:
-                if is_siflex(sample) and self.source_retriever.load_candidates(sample):
+                if self.settings.run_retrieval and is_siflex(sample) and self.source_retriever.load_candidates(sample):
                     continue
                 record = self.structure_cache.load(sample)
                 if record is None or not record.valid:
@@ -125,8 +125,10 @@ class TableAgentPipeline(BasePipeline):
             raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
 
     def verify_samples(self, samples: list[EvalSample], *, force: bool = True) -> list[StructureCacheRecord]:
-        siflex_samples = [sample for sample in samples if is_siflex(sample)]
-        standard_samples = [sample for sample in samples if not is_siflex(sample)]
+        siflex_samples = [sample for sample in samples if is_siflex(sample) and self.settings.run_retrieval]
+        standard_samples = [
+            sample for sample in samples if not is_siflex(sample) or not self.settings.run_retrieval
+        ]
         records = []
         for sample in standard_samples:
             record = self.structure_cache.prepare(sample, force=force)
@@ -241,6 +243,7 @@ class TableAgentPipeline(BasePipeline):
                 ("sample", "sample"),
                 ("workbook", "book"),
                 ("sheet", "sheet"),
+                ("table", "table"),
                 ("range", "range"),
                 ("iteration", "iter"),
                 ("direction", "dir"),
@@ -267,7 +270,7 @@ class TableAgentPipeline(BasePipeline):
     def run(self, sample: EvalSample) -> PipelineOutput:
         if self.settings.phase == "structure":
             raise RuntimeError("structure phase does not run question answering")
-        if is_siflex(sample):
+        if is_siflex(sample) and self.settings.run_retrieval:
             if self.settings.phase == "all" and not self.source_retriever.load_candidates(sample):
                 self.source_preparer.prepare([sample], regenerate_invalid=True)
             responses: list[LLMResponse] = []
@@ -447,15 +450,21 @@ class TableAgentPipeline(BasePipeline):
     ) -> PipelineOutput:
         image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
         fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
+        structure_path = candidate.directory / "structure.yaml"
+        if candidate.table_id:
+            structure_path = self._sample_dir(sample) / "retrieved_structure.yaml"
+            structure_path.parent.mkdir(parents=True, exist_ok=True)
+            structure_path.write_text(candidate.structure_text, encoding="utf-8")
         self._progress(
             "qa",
             sample=sample.sample_id,
             workbook=candidate.workbook_path.name,
             sheet=candidate.sheet_name,
+            table=candidate.table_id,
         )
         answer_response, qa_info = self._run_verified_qa(
             question=sample.question,
-            structure_path=candidate.directory / "structure.yaml",
+            structure_path=structure_path,
             workbook_path=candidate.workbook_path,
             qa_artifact_dir=self._sample_dir(sample) / "qa",
             fallback_prompt=image_prompt,
@@ -476,6 +485,9 @@ class TableAgentPipeline(BasePipeline):
             "embedding_score": getattr(candidate, "embedding_score", 0.0),
             "embedding_used": getattr(candidate, "embedding_used", False),
             "fallback_used": getattr(candidate, "fallback_used", False),
+            "table_id": getattr(candidate, "table_id", ""),
+            "table_name": getattr(candidate, "table_name", ""),
+            "table_description": getattr(candidate, "table_description", ""),
         }
         if hasattr(candidate, "reranker_selected_index"):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
@@ -488,7 +500,7 @@ class TableAgentPipeline(BasePipeline):
             latency=self.stop_timer(start_time),
             token_usage=token_usage(responses),
             metadata={
-                "structure_path": display_path(candidate.directory / "structure.yaml"),
+                "structure_path": display_path(structure_path),
                 "thinking_trace_path": display_path(candidate.directory / "thinking_trace.txt")
                 if (candidate.directory / "thinking_trace.txt").is_file()
                 else None,

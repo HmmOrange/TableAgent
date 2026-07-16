@@ -277,6 +277,100 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     assert output.token_usage == {"prompt": 41, "completion": 15}
 
 
+def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/disabled",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+        sample_path="data/SiFlex/golden_tests/compiled/golden_cases.json:cases[0]",
+        table_path="/unused/source.xlsx",
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=SuccessfulQALLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={
+            "artifact_dir": str(tmp_path),
+            "structure_cache_dir": str(tmp_path / "cache"),
+            "max_refinement_rounds": 1,
+            "run_retrieval": False,
+        },
+        renderer=FakeRenderer(),
+    )
+
+    def fail_prepare(*args, **kwargs):
+        raise AssertionError("source preparation should be disabled")
+
+    def fail_select(*args, **kwargs):
+        raise AssertionError("source retrieval should be disabled")
+
+    monkeypatch.setattr(pipeline.source_preparer, "prepare", fail_prepare)
+    monkeypatch.setattr(pipeline.source_retriever, "select", fail_select)
+
+    pipeline.prepare_samples([sample])
+    output = pipeline.run(sample)
+
+    assert output.predicted_answer == "100"
+    assert output.metadata["workbook_source_format"] == "verification-cache"
+    assert "retrieval_info" not in output.metadata
+
+
+def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monkeypatch):
+    from TableAgent.pipeline.common import SourceCandidate
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    full_structure = "table1:\n  id: table1\n  name: Sales\ntable2:\n  id: table2\n  name: Costs\n"
+    selected_structure = "table2:\n  id: table2\n  name: Costs\n"
+    (source_dir / "structure.yaml").write_text(full_structure, encoding="utf-8")
+    candidate = SourceCandidate(
+        directory=source_dir,
+        workbook_path=tmp_path / "book.xlsx",
+        sheet_name="Sheet1",
+        image_path=source_dir / "table.png",
+        html_path=None,
+        structure_text=selected_structure,
+        sheet_text="cost data",
+        score=1.0,
+        table_id="table2",
+        table_name="Costs",
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/table-level",
+        table_id="source",
+        table_content="",
+        question="What are the costs?",
+        answer=["100"],
+        sample_path="siflex",
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts")},
+        renderer=FakeRenderer(),
+    )
+    captured = {}
+
+    def fake_run_verified_qa(**kwargs):
+        captured["structure_path"] = kwargs["structure_path"]
+        return LLMResponse(content="100"), {"success": True}
+
+    monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
+    monkeypatch.setattr(pipeline, "_format_siflex_answer", lambda sample, answer, responses: answer)
+
+    output = pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
+    selected_path = captured["structure_path"]
+
+    assert selected_path.name == "retrieved_structure.yaml"
+    assert selected_path.read_text(encoding="utf-8") == selected_structure
+    assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
+    assert output.metadata["retrieval_info"]["table_id"] == "table2"
+    assert "table1:" not in output.structured_table
+
+
 def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     sample = EvalSample(
         index=0,
@@ -1398,7 +1492,5 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["workbook_sheets"] == ["HighLexical"]
     assert output2.metadata["workbook_path"] == str(path_b.resolve())
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
-
-
 
 
