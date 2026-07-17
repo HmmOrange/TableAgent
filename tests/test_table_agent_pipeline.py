@@ -317,6 +317,81 @@ def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
     assert "retrieval_info" not in output.metadata
 
 
+def test_table_agent_all_phase_does_not_abort_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
+    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/invalid-cache",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=SuccessfulQALLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={
+            "artifact_dir": str(tmp_path),
+            "structure_cache_dir": str(tmp_path / "cache"),
+            "max_refinement_rounds": 1,
+            "phase": "all",
+        },
+        renderer=FakeRenderer(),
+    )
+    invalid = StructureCacheRecord(
+        key="bad",
+        directory=tmp_path,
+        workbook_path=tmp_path / "workbook.xlsx",
+        sheet_name="Sheet1",
+        structure_path=tmp_path / "structure.yaml",
+        manifest_path=tmp_path / "manifest.json",
+        status="not_good",
+        cache_hit=False,
+    )
+    monkeypatch.setattr(pipeline, "verify_samples", lambda samples, force=True: [invalid])
+
+    pipeline.prepare_samples([sample])
+
+
+def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
+    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/invalid-cache",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={
+            "artifact_dir": str(tmp_path),
+            "structure_cache_dir": str(tmp_path / "cache"),
+            "max_refinement_rounds": 1,
+            "phase": "structure",
+        },
+        renderer=FakeRenderer(),
+    )
+    invalid = StructureCacheRecord(
+        key="bad",
+        directory=tmp_path,
+        workbook_path=tmp_path / "workbook.xlsx",
+        sheet_name="Sheet1",
+        structure_path=tmp_path / "structure.yaml",
+        manifest_path=tmp_path / "manifest.json",
+        status="not_good",
+        cache_hit=False,
+    )
+    monkeypatch.setattr(pipeline, "verify_samples", lambda samples, force=True: [invalid])
+
+    with pytest.raises(RuntimeError, match="verification failed for 1 cache entries"):
+        pipeline.prepare_samples([sample])
+
+
 def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monkeypatch):
     from TableAgent.pipeline.common import SourceCandidate
 
@@ -1492,5 +1567,4 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["workbook_sheets"] == ["HighLexical"]
     assert output2.metadata["workbook_path"] == str(path_b.resolve())
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
-
 

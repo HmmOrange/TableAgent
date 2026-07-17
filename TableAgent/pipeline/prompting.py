@@ -35,6 +35,9 @@ class PromptBuilder:
                 f"lexical_score: {candidate.lexical_score}\n"
                 f"embedding_score: {candidate.embedding_score}\n"
                 f"embedding_used: {candidate.embedding_used}\n"
+                f"entity_score: {candidate.entity_score}\n"
+                f"matched_terms: {list(candidate.matched_terms)}\n"
+                f"missing_terms: {list(candidate.missing_terms)}\n"
                 f"retrieval_card:\n{card}"
             )
         return "\n\n".join(lines)

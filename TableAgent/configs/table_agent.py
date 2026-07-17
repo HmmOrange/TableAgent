@@ -48,6 +48,8 @@ class TableAgentConfig:
     retrieval_embedding_provider: str | None
     retrieval_lexical_weight: float
     retrieval_embedding_weight: float
+    retrieval_entity_weight: float
+    retrieval_audit_top_k: int
 
 
     @classmethod
@@ -97,6 +99,8 @@ class TableAgentConfig:
             retrieval_embedding_provider=merged.get("retrieval_embedding_provider"),
             retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.5)),
             retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.5)),
+            retrieval_entity_weight=float(merged.get("retrieval_entity_weight", 2.0)),
+            retrieval_audit_top_k=int(merged.get("retrieval_audit_top_k", 10)),
         )
 
 

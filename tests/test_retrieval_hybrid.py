@@ -345,8 +345,90 @@ def test_candidate_prompt_text_labels(temp_sources_dir):
     assert "lexical_score: 0.7" in prompt_text
     assert "embedding_score: 0.9" in prompt_text
     assert "embedding_used: True" in prompt_text
+    assert "entity_score:" in prompt_text
+    assert "matched_terms:" in prompt_text
+    assert "missing_terms:" in prompt_text
     assert "table_id:" in prompt_text
     assert "table_name:" in prompt_text
     assert "retrieval_card:" in prompt_text
     assert "Table: compact card" in prompt_text
     assert "some structure" not in prompt_text
+
+
+def test_retrieval_entity_match_promotes_specific_value_candidate(temp_sources_dir):
+    summary_dir = temp_sources_dir / "dummy_Summary"
+    summary_dir.mkdir()
+    (summary_dir / "metadata.json").write_text(json.dumps({
+        "workbook_path": "/path/to/dummy.xlsx",
+        "sheet_name": "Summary",
+        "layout_workflow_version": 4,
+    }), encoding="utf-8")
+    (summary_dir / "structure.yaml").write_text("""
+table1:
+  id: summary
+  name: Maintenance amount summary
+  description: Summary of maintenance amount by broad class.
+  headers:
+    - id: amount
+      label: Amount
+      orientation: column
+""", encoding="utf-8")
+    (summary_dir / "sheet_text.txt").write_text(
+        "maintenance amount summary broad class",
+        encoding="utf-8",
+    )
+    (summary_dir / "table.png").touch()
+
+    detail_dir = temp_sources_dir / "dummy_Detail"
+    detail_dir.mkdir()
+    (detail_dir / "metadata.json").write_text(json.dumps({
+        "workbook_path": "/path/to/dummy.xlsx",
+        "sheet_name": "Detail",
+        "layout_workflow_version": 4,
+    }), encoding="utf-8")
+    (detail_dir / "structure.yaml").write_text("""
+table1:
+  id: detail
+  name: Maintenance detail
+  description: Detailed maintenance rows.
+  headers:
+    - id: amount
+      label: Amount
+      orientation: column
+""", encoding="utf-8")
+    (detail_dir / "sheet_text.txt").write_text(
+        "maintenance amount 화학동#1 No.1~10 CF54-08 detailed rows",
+        encoding="utf-8",
+    )
+    (detail_dir / "table.png").touch()
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(temp_sources_dir.parent),
+        "source_artifact_dir": str(temp_sources_dir.parent),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_top_k": 3,
+        "retrieval_candidate_max_chars": 1000,
+        "retrieval_entity_weight": 2.0,
+        "retrieval_audit_top_k": 5,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex-test",
+        table_id="test",
+        table_content="",
+        question="maintenance amount 화학동#1 No.1~10 CF54-08",
+        answer=[],
+        sample_path="siflex",
+        table_path="/path/to/dummy.xlsx",
+        raw={},
+    )
+
+    candidates = retriever.load_candidates(sample)
+
+    assert candidates[0].sheet_name == "Detail"
+    assert candidates[0].entity_score > candidates[1].entity_score
+    assert "화학동#1" in candidates[0].matched_terms
+    assert candidates[0].retrieval_rank == 1
+    assert candidates[0].retrieval_audit[0]["sheet"] == "Detail"
+    assert candidates[0].retrieval_audit[0]["matched_terms"]

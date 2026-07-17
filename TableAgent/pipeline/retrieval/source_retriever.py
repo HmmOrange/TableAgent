@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,48 @@ from .scoring import cosine_similarity, hybrid_score, normalize_scores
 
 
 logger = Logger(__name__)
+
+
+_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "list",
+    "of",
+    "on",
+    "sheet",
+    "table",
+    "the",
+    "to",
+    "what",
+    "which",
+    "with",
+    "bảng",
+    "bao",
+    "các",
+    "câu",
+    "cho",
+    "của",
+    "gì",
+    "hãy",
+    "hỏi",
+    "không",
+    "là",
+    "nào",
+    "nêu",
+    "những",
+    "nhiêu",
+    "trong",
+    "và",
+    "với",
+}
 
 
 class SourceRetriever:
@@ -123,8 +166,9 @@ class SourceRetriever:
         lexical_weight = getattr(self.settings, "retrieval_lexical_weight", 0.5)
         embedding_weight = getattr(self.settings, "retrieval_embedding_weight", 0.5)
         scored = []
+        entity_weight = getattr(self.settings, "retrieval_entity_weight", 2.0)
         for candidate, lexical_score in zip(candidates, normalized_lexical):
-            score = (
+            base_score = (
                 hybrid_score(
                     lexical_score,
                     candidate.embedding_score,
@@ -134,8 +178,15 @@ class SourceRetriever:
                 if embedding_used
                 else candidate.lexical_score
             )
+            score = base_score + entity_weight * candidate.entity_score
             scored.append(replace(candidate, score=score, embedding_used=embedding_used))
-        return sorted(scored, key=lambda candidate: candidate.score, reverse=True)
+        ranked = sorted(scored, key=lambda candidate: candidate.score, reverse=True)
+        audit_top_k = max(1, int(getattr(self.settings, "retrieval_audit_top_k", 10)))
+        audit = tuple(self._audit_row(candidate, rank) for rank, candidate in enumerate(ranked[:audit_top_k], start=1))
+        return [
+            replace(candidate, retrieval_rank=rank, retrieval_audit=audit)
+            for rank, candidate in enumerate(ranked, start=1)
+        ]
 
     def _encode(self, texts: list[str]):
         async def get_embeddings():
@@ -241,6 +292,7 @@ class SourceRetriever:
         table_description: str = "",
     ) -> SourceCandidate:
         lexical_score = _lexical_overlap_score(query, retrieval_card)
+        entity_score, matched_terms, missing_terms = self._entity_match(query, retrieval_card)
         return SourceCandidate(
             directory=source_dir,
             workbook_path=workbook_path,
@@ -257,7 +309,50 @@ class SourceRetriever:
             table_id=table_id,
             table_name=table_name,
             table_description=table_description,
+            entity_score=entity_score,
+            matched_terms=matched_terms,
+            missing_terms=missing_terms,
         )
+
+    def _entity_match(self, query: str, retrieval_card: str) -> tuple[float, tuple[str, ...], tuple[str, ...]]:
+        terms = self._query_terms(query)
+        if not terms:
+            return 0.0, (), ()
+        haystack = retrieval_card.lower()
+        matched = tuple(term for term in terms if term in haystack)
+        missing = tuple(term for term in terms if term not in haystack)
+        return len(matched) / len(terms), matched, missing
+
+    def _query_terms(self, query: str) -> tuple[str, ...]:
+        terms: list[str] = []
+        seen: set[str] = set()
+        for raw_term in re.findall(r"[0-9A-Za-zÀ-ỹ가-힣#./+-]+", str(query).lower()):
+            term = raw_term.strip("?.!,;:()[]{}\"'")
+            if not term or term in seen or term in _QUERY_STOPWORDS:
+                continue
+            if len(term) < 2 and not term.isdigit():
+                continue
+            seen.add(term)
+            terms.append(term)
+        return tuple(terms)
+
+    def _audit_row(self, candidate: SourceCandidate, rank: int) -> dict[str, Any]:
+        return {
+            "rank": rank,
+            "score": candidate.score,
+            "lexical_score": candidate.lexical_score,
+            "embedding_score": candidate.embedding_score,
+            "embedding_used": candidate.embedding_used,
+            "entity_score": candidate.entity_score,
+            "matched_terms": list(candidate.matched_terms),
+            "missing_terms": list(candidate.missing_terms),
+            "workbook": candidate.workbook_path.name,
+            "sheet": candidate.sheet_name,
+            "table_id": candidate.table_id,
+            "table_name": candidate.table_name,
+            "table_description": candidate.table_description,
+            "retrieval_card_preview": candidate.retrieval_card[:600],
+        }
 
     def _candidate_from_dir(
         self,

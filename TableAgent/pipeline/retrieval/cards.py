@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,23 @@ def extract_headers_text(headers_list: list, *, limit: int = 40) -> list[str]:
         if isinstance(header.get("sub_headers"), list):
             parts.extend(extract_headers_text(header["sub_headers"], limit=limit - len(parts)))
     return parts
+
+
+def extract_distinctive_values(sheet_text: str, *, limit: int = 80) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in re.split(r"[\n\r\t|;,]+", sheet_text or ""):
+        value = " ".join(str(raw_value).split()).strip()
+        if len(value) < 2 or len(value) > 80:
+            continue
+        normalized = value.lower()
+        if normalized in seen or normalized in {"none", "null", "nan"}:
+            continue
+        seen.add(normalized)
+        values.append(value)
+        if len(values) >= limit:
+            break
+    return values
 
 
 def build_source_retrieval_card(
@@ -60,6 +78,9 @@ def build_source_retrieval_card(
 
     parts = [f"Workbook: {workbook_path.name}", f"Sheet: {sheet_name}", *table_parts]
     if sheet_text:
+        values = extract_distinctive_values(sheet_text, limit=60)
+        if values:
+            parts.append(f"Distinctive values: {'; '.join(values)}")
         parts.append(f"Sheet preview: {sheet_text[:500]}")
     return "\n".join(parts)
 
@@ -105,6 +126,9 @@ def build_table_retrieval_cards(
         if relations_text:
             parts.append(f"Relations: {relations_text}")
         if sheet_text:
+            values = extract_distinctive_values(sheet_text, limit=60)
+            if values:
+                parts.append(f"Distinctive values: {'; '.join(values)}")
             parts.append(f"Sheet preview: {sheet_text[:500]}")
         cards.append(
             {
