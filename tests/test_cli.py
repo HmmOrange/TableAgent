@@ -35,6 +35,7 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.query == ["Total revenue?", "Largest cost?"]
     assert args.schema is False
     assert args.metadata is False
+    assert args.force is False
     assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
@@ -69,6 +70,23 @@ def test_cli_requires_query_for_answering_stages(stage):
     assert exc_info.value.code == 2
 
 
+def test_cli_rejects_force_for_qa_stage():
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(
+            [
+                "--stage",
+                "qa",
+                "--workbook",
+                "book.xlsx",
+                "--query",
+                "Question?",
+                "--force",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
 def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
     captured = {}
 
@@ -99,6 +117,7 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
             "alternate_answer",
             "--vlm",
             "alternate_layout",
+            "--force",
         ]
     )
 
@@ -113,6 +132,7 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "schema": False,
         "metadata": False,
         "sheets": [],
+        "force": True,
     }
     assert json.loads(capsys.readouterr().out) == {"job_id": "job-one", "stage": "structure"}
 

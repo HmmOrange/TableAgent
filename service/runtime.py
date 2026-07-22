@@ -93,6 +93,7 @@ class TableAgentService:
         schema: bool = False,
         metadata: bool = False,
         sheets: Iterable[str] = (),
+        force: bool = False,
     ) -> dict[str, Any]:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
@@ -133,7 +134,7 @@ class TableAgentService:
                 layout_vlm_client=self._layout_client(),
                 config=self._pipeline_config("structure", job_dir),
             )
-            records = pipeline.verify_samples([base_sample], force=False)
+            records = pipeline.verify_samples([base_sample], force=force)
             structures = self._structure_results(records, normalized, job_dir)
             structures = self._complete_structure_results(structures, normalized, selected_sheets)
             failed = [record for record in structures if record["status"] != "good"]

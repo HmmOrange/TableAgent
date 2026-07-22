@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate a workbook metadata artifact. If neither output flag is set, both are generated.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate cached worksheet structures instead of reusing valid structures.",
+    )
+    parser.add_argument(
         "--sheet",
         action="append",
         default=[],
@@ -63,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.stage in {"qa", "all"} and not any(query.strip() for query in args.query):
         parser.error("--query is required when --stage is qa or all")
+    if args.force and args.stage == "qa":
+        parser.error("--force requires --stage structure or all")
+    if args.force and args.stage == "structure" and args.metadata and not args.schema:
+        parser.error("--force requires structure generation; do not use --metadata alone")
 
     try:
         service = TableAgentService.from_config(
@@ -77,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             schema=args.schema,
             metadata=args.metadata,
             sheets=args.sheet,
+            force=args.force,
         )
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
         print(f"table-agent: error: {exc}", file=sys.stderr)

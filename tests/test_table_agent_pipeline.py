@@ -503,6 +503,44 @@ def test_table_agent_structure_progress_counts_files_and_sheets(tmp_path: Path):
     }
 
 
+def test_source_preparer_force_regenerates_valid_structure(tmp_path: Path):
+    import openpyxl
+
+    workbook_path = tmp_path / "source.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Summary"
+    worksheet["B1"] = "Revenue"
+    worksheet["B2"] = 100
+    workbook.save(workbook_path)
+    workbook.close()
+    sample = EvalSample(
+        0,
+        "siflex/force",
+        "table-1",
+        "",
+        "Question",
+        ["100"],
+        table_path=str(workbook_path),
+    )
+    layout_vlm = FakeLayoutVLM()
+    pipeline = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "structure"},
+    )
+
+    pipeline.source_preparer.prepare([sample])
+    initial_call_count = len(layout_vlm.calls)
+    assert initial_call_count > 0
+
+    pipeline.source_preparer.prepare([sample])
+    assert len(layout_vlm.calls) == initial_call_count
+
+    pipeline.source_preparer.prepare([sample], force=True)
+    assert len(layout_vlm.calls) > initial_call_count
+
+
 def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, monkeypatch):
     import openpyxl
     import TableAgent.pipeline.table_agent_pipeline as pipeline_module

@@ -21,9 +21,11 @@ class FakePipeline:
         self.config = config
         self.prepared = []
         self.runs = []
+        self.forces = []
         type(self).instances.append(self)
 
     def verify_samples(self, samples, force=False):
+        self.forces.append(force)
         workbook_path = Path(samples[0].table_path.split(";")[0])
         workbook = openpyxl.load_workbook(workbook_path, read_only=True)
         try:
@@ -158,6 +160,21 @@ def test_metadata_only_structure_stage_skips_pipeline_and_vlm(tmp_path: Path):
     assert result["structures"] == []
     assert result["schema_artifacts"] == []
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
+
+
+def test_service_forwards_force_to_structure_pipeline(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    service.run(stage="structure", workbooks=[source], schema=True, force=True)
+
+    assert FakePipeline.instances[0].forces == [True]
 
 
 def test_service_generates_readable_timestamp_job_id(tmp_path: Path):

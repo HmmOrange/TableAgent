@@ -37,7 +37,14 @@ class SourcePreparer:
         if self.progress_callback:
             self.progress_callback(stage, **fields)
 
-    def prepare(self, samples: list[EvalSample], logger: Any | None = None, *, regenerate_invalid: bool = True) -> None:
+    def prepare(
+        self,
+        samples: list[EvalSample],
+        logger: Any | None = None,
+        *,
+        regenerate_invalid: bool = True,
+        force: bool = False,
+    ) -> None:
         if not samples or not is_siflex(samples[0]):
             return
 
@@ -78,7 +85,7 @@ class SourcePreparer:
                 structure_exists = paths["structure"].is_file()
                 has_current_structure = (
                     self._has_current_valid_structure(paths["structure"], paths["metadata_json"])
-                    if regenerate_invalid or not structure_exists
+                    if not force and (regenerate_invalid or not structure_exists)
                     else False
                 )
                 try:
@@ -102,6 +109,12 @@ class SourcePreparer:
                         logger.error("TableAgent metadata preparation failed for %s:%s: %s", source_path, sheet_name, exc)
                     self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
                     continue
+
+                if force:
+                    # Remove prior output so the layout workflow starts from an empty structure.
+                    paths["structure"].unlink(missing_ok=True)
+                    paths["error"].unlink(missing_ok=True)
+                    structure_exists = False
 
                 if has_current_structure:
                     self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)

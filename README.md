@@ -87,6 +87,9 @@ Use the `structure` stage to ingest one or more workbooks. TableAgent renders ea
 selected worksheet, detects and verifies its table ranges, and caches a
 `structure.yaml` file for later QA requests.
 
+By default, valid cached structures are reused. Add `--force` to regenerate the
+selected worksheet structures with the layout VLM.
+
 - At least one `--workbook` is required. Supported extensions are `.xls`, `.xlsx`,
   `.xlsm`, `.xltx`, and `.xltm`.
 - Structure generation requires LibreOffice and the configured layout VLM.
@@ -178,6 +181,7 @@ Summary:
 | `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
 | `--schema` | Generates only the workbook schema unless `--metadata` is also supplied. |
 | `--metadata` | Generates only workbook metadata unless `--schema` is also supplied. |
+| `--force` | Regenerates cached worksheet structures. Valid only with `--stage structure` or `--stage all`. |
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
 | `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
 | `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
@@ -195,6 +199,13 @@ uv run table-agent --config config.yaml --stage structure \
   --workbook sample/QA_sample.xlsx \
   --schema \
   --sheet "Summary,Detail" --sheet Archive
+```
+
+To rebuild the cached structures for the selected worksheets, add `--force`:
+
+```bash
+uv run table-agent --config config.yaml --stage structure \
+  --workbook sample/QA_sample.xlsx --force
 ```
 
 ### QA

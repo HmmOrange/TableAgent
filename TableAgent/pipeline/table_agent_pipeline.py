@@ -139,7 +139,7 @@ class TableAgentPipeline(BasePipeline):
             )
         self._verified_samples.update({sample.sample_id: record for sample, record in zip(standard_samples, records)})
         if siflex_samples:
-            self.source_preparer.prepare(siflex_samples, regenerate_invalid=force)
+            self.source_preparer.prepare(siflex_samples, regenerate_invalid=force, force=force)
             seen: set[Path] = set()
             for sample in siflex_samples:
                 candidates = self.source_retriever.load_candidates(sample)
