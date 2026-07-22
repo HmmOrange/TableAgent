@@ -8,6 +8,26 @@ import yaml
 
 _YAML_FENCE = re.compile(r"```(?:yaml|yml)?\s*(.*?)```", flags=re.DOTALL | re.IGNORECASE)
 _UNCERTAIN_RANGE_VALUES = {"unknown", "uncertain", "n/a", "none", "null", "?"}
+_YAML_BOOLEAN_TAG = "tag:yaml.org,2002:bool"
+
+
+class _Yaml12SafeLoader(yaml.SafeLoader):
+    pass
+
+
+_Yaml12SafeLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in resolvers if tag != _YAML_BOOLEAN_TAG]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_Yaml12SafeLoader.add_implicit_resolver(
+    _YAML_BOOLEAN_TAG,
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
+def _load_yaml(content: str) -> Any:
+    return yaml.load(content, Loader=_Yaml12SafeLoader)
 
 
 def _extract_yaml_text(content: str) -> str:
@@ -29,7 +49,7 @@ def extract_strict_structure(content: str) -> tuple[str, str]:
 
     for candidate, span in candidates:
         try:
-            parsed = yaml.safe_load(candidate)
+            parsed = _load_yaml(candidate)
         except yaml.YAMLError:
             continue
         normalized = _normalize_structure(parsed)
@@ -47,7 +67,7 @@ def extract_strict_structure(content: str) -> tuple[str, str]:
 
 def _parse_yaml_mapping(content: str) -> dict[str, Any]:
     try:
-        parsed = yaml.safe_load(_extract_yaml_text(content))
+        parsed = _load_yaml(_extract_yaml_text(content))
     except yaml.YAMLError:
         return {"status": "not_good", "feedback": content}
     return parsed if isinstance(parsed, dict) else {"status": "not_good", "feedback": content}
@@ -74,7 +94,7 @@ def _is_valid_structure(structure_text: str | None) -> bool:
         return False
 
     try:
-        parsed = yaml.safe_load(_extract_yaml_text(text))
+        parsed = _load_yaml(_extract_yaml_text(text))
     except Exception:
         return False
     if not isinstance(parsed, dict) or "error" in parsed:
@@ -211,7 +231,7 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
 
     for candidate, span in candidates:
         try:
-            parsed = yaml.safe_load(candidate)
+            parsed = _load_yaml(candidate)
         except yaml.YAMLError:
             continue
         if not isinstance(parsed, dict):
@@ -240,7 +260,7 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
 
 def nullify_structure_ranges(structure_text: str, field_paths: list[str] | None = None) -> str:
     try:
-        parsed = yaml.safe_load(structure_text)
+        parsed = _load_yaml(structure_text)
     except yaml.YAMLError:
         return structure_text
     if not isinstance(parsed, dict):

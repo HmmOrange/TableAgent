@@ -8,8 +8,8 @@ notebook-backed QA.
 The repository is split into two clear layers:
 
 - `TableAgent/` contains the reusable extraction and QA library.
-- `service/` contains the model clients, application service, FastAPI routes, and server
-  entry point.
+- `service/` contains the model clients, application service, FastAPI routes, and CLI/server
+  entry points.
 
 ## Requirements
 
@@ -89,6 +89,21 @@ For an installation without the generated console script:
 python -m service.server --config config.yaml
 ```
 
+### Command-Line Flags
+
+The `table-agent-api` console script and `python -m service.server` accept the same
+flags:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-h`, `--help` | — | Show the command help and exit |
+| `--config CONFIG` | `config.yaml` | Path to the private service configuration file |
+| `--llm LLM` | Configured default | Select a configured answer-model profile |
+| `--vlm VLM` | Configured default | Select a configured layout-model profile |
+| `--host HOST` | `127.0.0.1` | Network interface on which the API listens |
+| `--port PORT` | `8000` | TCP port on which the API listens |
+| `--log-level LOG_LEVEL` | `info` | Uvicorn log level, such as `critical`, `error`, `warning`, `info`, `debug`, or `trace` |
+
 ### Endpoints
 
 | Method | Path | Purpose |
@@ -121,6 +136,43 @@ the status becomes `succeeded` or `failed`.
 
 Server-side workbook paths are disabled by default. To enable `/v1/jobs`, set
 `service.allow_local_paths: true` and restrict access with `service.allowed_input_roots`.
+
+## Run The CLI
+
+Use the one-shot `table-agent` command when you want to process selected workbooks
+without starting an HTTP server:
+
+```bash
+uv run table-agent \
+  --config config.yaml \
+  --stage all \
+  --workbook sample/QA_sample.xlsx \
+  --query "What is the total revenue?"
+```
+
+Repeat `--workbook` to process multiple files and `--query` to ask multiple questions.
+Use `--stage structure` to build or refresh structure without answering questions. The
+`qa` stage requires an existing valid structure cache, while `all` builds structure first.
+The command prints the run result as JSON; artifacts and the full result are also saved
+under the configured service root.
+
+### CLI Flags
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-h`, `--help` | - | Show the command help and exit |
+| `--config CONFIG` | `config.yaml` | Path to the private service configuration file |
+| `--stage {structure,qa,all}` | `all` | Processing stage to run |
+| `--workbook PATH` | Required | Workbook to process; repeat for multiple workbooks |
+| `--query TEXT` | None | Question to answer; repeat for multiple questions; required for `qa` and `all` |
+| `--llm LLM` | Configured default | Select a configured answer-model profile |
+| `--vlm VLM` | Configured default | Select a configured layout-model profile |
+
+For an installation without the generated console script:
+
+```bash
+python -m service.cli --stage structure --workbook sample/QA_sample.xlsx
+```
 
 ## Use The Python Service
 
@@ -173,6 +225,7 @@ service/
   api.py                 FastAPI routes and asynchronous job manager
   runtime.py             Workbook/query application service
   clients.py             OpenAI-compatible LLM and VLM client
+  cli.py                 `table-agent` one-shot command entry point
   server.py              `table-agent-api` command entry point
 sample/                  Example workbooks, structures, and a direct QA script
 tests/                   Unit and integration tests

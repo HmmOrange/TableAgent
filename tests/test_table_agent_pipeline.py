@@ -1081,6 +1081,34 @@ remaining_directions: []
     assert "Analysis that belongs in logs" not in persisted
 
 
+def test_layout_parser_preserves_unquoted_no_header():
+    from TableAgent.structure.layout.parsing import extract_layout_structure
+
+    content = """structure:
+  table1:
+    id: people
+    name: People
+    headers:
+      - id: no
+        label: No
+        orientation: column
+        header_range: A1:A2
+        data_range: A3:A22
+        sub_headers: []
+changelog: Added the row number header.
+remaining_directions: []
+"""
+
+    structure_text, discarded, directions, changelog = extract_layout_structure(content)
+    structure = yaml.safe_load(structure_text)
+
+    assert structure["table1"]["headers"][0]["id"] == "no"
+    assert structure["table1"]["headers"][0]["label"] == "No"
+    assert discarded == ""
+    assert directions == []
+    assert changelog == "Added the row number header."
+
+
 def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     from TableAgent.configs import run_scoped_table_agent_config
 
