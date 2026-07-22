@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import openpyxl
+import pytest
 import yaml
 
 from TableAgent.environment.qa_env import QAEnvironment
@@ -80,6 +81,8 @@ def test_structure_sheet_merged_equipment_name_expands_to_rows_1_through_10():
         / "LV01_설비_REPORT 2026년  설비유지보수 계획 VER 1.0_KR_202603.26.xlsx"
     )
     structure_path = root / "TableAgent/structure_sheet/structure.yaml"
+    if not workbook_path.is_file() or not structure_path.is_file():
+        pytest.skip("Large SiFlex merged-cell fixture is not part of the standalone repository")
     env = QAEnvironment(str(structure_path), str(workbook_path))
     try:
         dataframe = env.operators.read_table_as_dataframe("equipment_maintenance_plan", has_headers=True)

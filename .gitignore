@@ -1,0 +1,14 @@
+/.venv/
+/.uv-cache/
+/.pytest_cache/
+/build/
+/dist/
+/*.egg-info/
+/cache/
+/logs/
+/outputs/
+/TableAgent/outputs/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env

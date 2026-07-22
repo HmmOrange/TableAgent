@@ -1,0 +1,50 @@
+[project]
+name = "table-agent"
+version = "0.1.0"
+description = "Image-assisted table structure extraction and question-answering pipeline"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "exstruct>=0.8.1",
+    "nbformat>=5.10.0",
+    "numpy>=2.0.0",
+    "openpyxl>=3.1.0",
+    "pandas>=3.0.0",
+    "pillow>=10.0.0",
+    "pypdfium2>=4.30.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.0",
+    "xlrd>=2.0.1",
+]
+
+[project.scripts]
+table2img = "table2img.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+]
+
+[tool.setuptools.packages.find]
+namespaces = false
+include = [
+    "TableAgent*",
+    "table2img*",
+    "datasets*",
+    "pipelines*",
+    "utils*",
+    "configs*",
+]
+exclude = [
+    "table2img.tests*",
+    "tests*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "table2img/tests"]
+
