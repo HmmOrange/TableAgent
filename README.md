@@ -226,8 +226,10 @@ Each prepared sheet must live in its own directory and its schema file must be n
 `structure.yaml`; use the directory and request metadata to identify the sheet.
 
 Public application boundaries live under `TableAgent/integrations/`: `qa.py` owns the QA contract,
-while a separate `ingestion.py` module can be added for the ingestion/structure package without
-mixing the two APIs.
+`models.py` owns the reusable OpenAI-compatible model client, and a separate `ingestion.py` module
+can be added for the ingestion/structure package without mixing the APIs. External applications
+should import `create_model_client` from `TableAgent.integrations` instead of the internal
+`service` package.
 
 ## Processing Stages
 

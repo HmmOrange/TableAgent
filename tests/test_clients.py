@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from service.clients import OpenAICompatibleLLM, create_model_client
+from TableAgent.integrations.models import OpenAICompatibleLLM, create_model_client
 
 
 class FakeResponse:
@@ -45,7 +45,9 @@ def test_openai_compatible_client_supports_text_and_images(tmp_path: Path):
     text_result = client.generate("question", system_prompt="system")
     image_path = tmp_path / "sheet.png"
     image_path.write_bytes(b"png-data")
-    image_result = client.generate_with_image("inspect", image_path, system_prompt="layout")
+    image_result = client.generate_with_image(
+        "inspect", image_path, system_prompt="layout"
+    )
 
     assert text_result.content == "done"
     assert text_result.prompt_tokens == 7
@@ -53,7 +55,9 @@ def test_openai_compatible_client_supports_text_and_images(tmp_path: Path):
     assert session.calls[0][0] == "http://model.test/v1/chat/completions"
     assert session.calls[0][1]["headers"]["Authorization"] == "Bearer secret"
     assert session.calls[0][1]["json"]["max_tokens"] == 123
-    assert session.calls[0][1]["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert session.calls[0][1]["json"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
     image_content = session.calls[1][1]["json"]["messages"][1]["content"]
     assert image_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
