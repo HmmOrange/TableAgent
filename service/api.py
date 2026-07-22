@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
-from service.runtime import Stage, TableAgentService
+from service.runtime import Stage, TableAgentService, new_job_id
 
 
 class PathJobRequest(BaseModel):
@@ -73,7 +73,7 @@ class JobManager:
         sheets: list[str] | None = None,
         cleanup_dir: Path | None = None,
     ) -> str:
-        job_id = uuid.uuid4().hex
+        job_id = new_job_id()
         now = _utc_now()
         record = {
             "job_id": job_id,

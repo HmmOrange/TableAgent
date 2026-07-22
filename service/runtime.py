@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Literal
@@ -103,7 +104,7 @@ class TableAgentService:
         selected_sheets = _normalize_sheet_filters(sheets)
         self._validate_sheet_filters(normalized, selected_sheets)
 
-        run_id = safe_name(job_id or uuid.uuid4().hex)
+        run_id = safe_name(job_id or new_job_id())
         if run_id in {".", ".."}:
             raise ValueError("Invalid job id")
         job_dir = (self.jobs_dir / run_id).resolve()
@@ -643,4 +644,9 @@ def _workbook_name(path: Path, normalized: list[dict[str, Any]]) -> str:
     return path.name
 
 
-__all__ = ["SUPPORTED_WORKBOOK_EXTENSIONS", "Stage", "TableAgentService"]
+def new_job_id() -> str:
+    """Return a readable, filesystem-safe UTC timestamp for a generated job ID."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+
+
+__all__ = ["SUPPORTED_WORKBOOK_EXTENSIONS", "Stage", "TableAgentService", "new_job_id"]

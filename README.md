@@ -76,6 +76,8 @@ retrieval, rendering, and service settings.
 Run commands from the repository root. The CLI prints a JSON result containing the
 job ID, processing results, answers, and generated artifact paths. Each run is saved
 under `service.root_dir/jobs/<job-id>/`, including the complete result in `run.json`.
+When no job ID is supplied programmatically, the generated ID is a UTC timestamp such
+as `2026-07-22T16-05-54.123456Z`.
 
 ### Ingestion
 

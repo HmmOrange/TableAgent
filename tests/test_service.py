@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -157,6 +158,18 @@ def test_metadata_only_structure_stage_skips_pipeline_and_vlm(tmp_path: Path):
     assert result["structures"] == []
     assert result["schema_artifacts"] == []
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
+
+
+def test_service_generates_readable_timestamp_job_id(tmp_path: Path):
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(stage="structure", workbooks=[source], metadata=True)
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z", result["job_id"])
 
 
 def test_service_normalizes_repeated_comma_separated_sheet_filters(tmp_path: Path):

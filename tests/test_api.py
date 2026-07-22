@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -71,6 +72,7 @@ def test_health_status_and_upload_job(tmp_path: Path):
         assert body["status"] == "succeeded"
         assert body["result"]["answers"][0]["answer"] == "ok"
         job_id = body["job_id"]
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z", job_id)
         assert client.get(f"/v1/jobs/{job_id}").json()["status"] == "succeeded"
         assert client.get("/v1/status").json()["jobs"]["succeeded"] == 1
         assert service.calls == [
