@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
+table-agent = "service.cli:main"
 table-agent-api = "service.server:main"
 
 [build-system]
