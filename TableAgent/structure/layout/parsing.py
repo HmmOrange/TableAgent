@@ -9,6 +9,8 @@ import yaml
 _YAML_FENCE = re.compile(r"```(?:yaml|yml)?\s*(.*?)```", flags=re.DOTALL | re.IGNORECASE)
 _UNCERTAIN_RANGE_VALUES = {"unknown", "uncertain", "n/a", "none", "null", "?"}
 _YAML_BOOLEAN_TAG = "tag:yaml.org,2002:bool"
+_LAYOUT_STRUCTURE_KEYS = {"structure", "updated_structure"}
+_LAYOUT_DIRECTION_KEYS = {"remaining_directions", "directions"}
 
 
 class _Yaml12SafeLoader(yaml.SafeLoader):
@@ -233,7 +235,20 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
         try:
             parsed = _load_yaml(candidate)
         except yaml.YAMLError:
-            continue
+            recovered = _recover_layout_envelope(candidate)
+            if recovered is None:
+                continue
+            normalized, candidate_discarded, directions, changelog = recovered
+            discarded = "\n".join(part for part in (
+                (text[:span[0]] + "\n" + text[span[1]:]).strip(),
+                candidate_discarded,
+            ) if part)
+            return (
+                yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
+                discarded,
+                directions,
+                changelog,
+            )
         if not isinstance(parsed, dict):
             continue
 
@@ -256,6 +271,83 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
 
     legacy, discarded = extract_strict_structure(content)
     return legacy, discarded, [], ""
+
+
+def _recover_layout_envelope(
+    candidate: str,
+) -> tuple[dict[str, Any], str, list[str], str] | None:
+    structure_block = _extract_top_level_block(candidate, _LAYOUT_STRUCTURE_KEYS)
+    if structure_block is None:
+        return None
+    block, discarded = structure_block
+    try:
+        parsed = _load_yaml(block)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    source = parsed.get("structure") or parsed.get("updated_structure")
+    normalized = _normalize_layout_structure(source)
+    if normalized is None:
+        return None
+
+    directions: list[str] = []
+    direction_block = _extract_top_level_block(candidate, _LAYOUT_DIRECTION_KEYS)
+    if direction_block is not None:
+        try:
+            direction_payload = _load_yaml(direction_block[0])
+        except yaml.YAMLError:
+            direction_payload = None
+        if isinstance(direction_payload, dict):
+            values = (
+                direction_payload.get("remaining_directions")
+                or direction_payload.get("directions")
+                or []
+            )
+            if isinstance(values, list):
+                directions = [str(value).strip().lower() for value in values]
+
+    changelog = ""
+    changelog_block = _extract_top_level_block(candidate, {"changelog"})
+    if changelog_block is not None:
+        try:
+            changelog_payload = _load_yaml(changelog_block[0])
+        except yaml.YAMLError:
+            changelog_payload = None
+        if isinstance(changelog_payload, dict):
+            changelog = str(changelog_payload.get("changelog") or "").strip()
+        else:
+            changelog = changelog_block[0].splitlines()[0].partition(":")[2].strip()
+
+    return normalized, discarded, directions, changelog
+
+
+def _extract_top_level_block(
+    content: str,
+    keys: set[str],
+) -> tuple[str, str] | None:
+    lines = content.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line and not line[0].isspace():
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:\s|$)", line)
+            if match and match.group(1) in keys:
+                start = index
+                break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.strip() and not line[0].isspace() and not line.lstrip().startswith("#"):
+            end = index
+            break
+
+    block = "\n".join(lines[start:end]).strip()
+    discarded = "\n".join(lines[:start] + lines[end:]).strip()
+    return block, discarded
 
 
 def nullify_structure_ranges(structure_text: str, field_paths: list[str] | None = None) -> str:

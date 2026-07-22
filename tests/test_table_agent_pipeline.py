@@ -1109,6 +1109,53 @@ remaining_directions: []
     assert changelog == "Added the row number header."
 
 
+def test_layout_parser_salvages_structure_when_changelog_breaks_yaml():
+    from TableAgent.structure.layout.parsing import extract_layout_structure
+
+    content = """```yaml
+structure:
+  table1:
+    id: hours_of_work
+    name: Hours of work
+    headers:
+      - id: hours
+        label: Hours
+        orientation: column
+        header_range: A3
+        data_range: A5:A17
+        sub_headers: []
+changelog: Added headers (sub-headers: All industries and Agriculture).
+remaining_directions: [right]
+```"""
+
+    structure_text, discarded, directions, changelog = extract_layout_structure(content)
+    structure = yaml.safe_load(structure_text)
+
+    assert structure["table1"]["headers"][0]["data_range"] == "A5:A17"
+    assert directions == ["right"]
+    assert changelog == "Added headers (sub-headers: All industries and Agriculture)."
+    assert "changelog:" in discarded
+
+
+def test_layout_parser_does_not_salvage_malformed_structure_block():
+    from TableAgent.structure.layout.parsing import extract_layout_structure
+
+    content = """structure:
+  table1:
+    headers:
+      - label: Revenue
+        header_range: [invalid
+changelog: Added headers (sub-headers: Revenue).
+remaining_directions: []
+"""
+
+    structure_text, _, directions, changelog = extract_layout_structure(content)
+
+    assert structure_text == ""
+    assert directions == []
+    assert changelog == ""
+
+
 def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     from TableAgent.configs import run_scoped_table_agent_config
 
