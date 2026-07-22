@@ -1,128 +1,143 @@
 # TableAgent
 
-TableAgent extracts verified structure from Excel workbooks and answers natural-language
-questions over one or more sheets. The project combines workbook rendering, layout-model
-structure extraction, deterministic range verification, table retrieval, and
-notebook-backed QA.
-
-The repository is split into two clear layers:
-
-- `TableAgent/` contains the reusable extraction and QA library.
-- `service/` contains the model clients, application service, FastAPI routes, and CLI/server
-  entry points.
+TableAgent extracts verified table structure from Excel workbooks and answers
+natural-language questions over one or more sheets.
 
 ## Requirements
 
 - Python 3.13 or newer
 - [uv](https://docs.astral.sh/uv/) for dependency management
-- LibreOffice for workbook-to-image rendering
-- OpenAI-compatible chat-completions endpoints for the answer LLM and layout VLM, unless
-  custom clients are injected
+- LibreOffice for workbook rendering
+- OpenAI-compatible chat-completions endpoints for the answer LLM and layout VLM
 
-LibreOffice must be available as `soffice`/`libreoffice` on `PATH`, or configured with
-`table_agent.libreoffice_path`.
+LibreOffice must be available as `soffice` or `libreoffice` on `PATH`. Otherwise,
+set `table_agent.libreoffice_path` in the configuration.
 
-## Installation
+## Setup
+
+Install the dependencies:
 
 ```bash
 uv sync
 ```
 
-Create a private configuration file from the checked-in example:
+Create the local configuration:
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-PowerShell equivalent:
+PowerShell:
 
 ```powershell
 Copy-Item config.example.yaml config.yaml
 ```
 
-`config.yaml` is ignored by git. Do not commit model API keys or private endpoints.
+### Fill In The Configuration
 
-## Configuration
+Edit `config.yaml` before running TableAgent. The important sections are:
 
-The default configuration reads model settings from environment variables:
-
-| Variable | Purpose |
+| Configuration | What to fill in |
 | --- | --- |
-| `TABLE_AGENT_LLM_BASE_URL` | Answer-model OpenAI-compatible base URL |
-| `TABLE_AGENT_LLM_MODEL` | Answer-model name |
-| `TABLE_AGENT_LLM_API_KEY` | Answer-model API key |
-| `TABLE_AGENT_VLM_BASE_URL` | Layout-model OpenAI-compatible base URL |
-| `TABLE_AGENT_VLM_MODEL` | Layout-model name |
-| `TABLE_AGENT_VLM_API_KEY` | Layout-model API key |
-| `TABLE_AGENT_SERVICE_API_KEY` | Optional key required by every `/v1/*` endpoint |
+| `models.answer_model` | Answer LLM `base_url`, `model`, and `api_key` |
+| `vlm_models.layout_model` | Vision/layout model `base_url`, `model`, and `api_key` |
+| `llm.provider` | Name of the default profile under `models` |
+| `vlm.provider` | Name of the default profile under `vlm_models` |
+| `table_agent.libreoffice_path` | LibreOffice executable path when it is not on `PATH` |
+| `service.root_dir` | Where jobs, generated structures, and cached inputs are stored |
 
-Model URLs should include the API prefix, such as `http://localhost:8000/v1`. TableAgent
-appends `/chat/completions` when making requests.
+The profile names must match. For example, `llm.provider: answer_model` selects
+`models.answer_model`, while `vlm.provider: layout_model` selects
+`vlm_models.layout_model`.
 
-Important configuration groups:
+The checked-in example reads model values from these environment variables, so you
+can either keep those references and set the variables or replace them with values
+directly in `config.yaml`:
 
-- `models` and `vlm_models`: model endpoints, names, timeouts, and generation settings.
-- `table_agent`: cache, rendering, retrieval, verification, and QA settings.
-- `service`: API storage, worker count, upload limits, authentication, and local-path
-  policy.
+| Variable | Value |
+| --- | --- |
+| `TABLE_AGENT_LLM_BASE_URL` | Answer LLM API base URL |
+| `TABLE_AGENT_LLM_MODEL` | Answer LLM model name |
+| `TABLE_AGENT_LLM_API_KEY` | Answer LLM API key |
+| `TABLE_AGENT_VLM_BASE_URL` | Layout VLM API base URL |
+| `TABLE_AGENT_VLM_MODEL` | Layout VLM model name |
+| `TABLE_AGENT_VLM_API_KEY` | Layout VLM API key |
+| `TABLE_AGENT_SERVICE_API_KEY` | Optional API key for the HTTP service |
 
-See [`config.example.yaml`](config.example.yaml) for all supported settings.
+Model base URLs should include the API prefix, for example
+`http://localhost:8000/v1`. TableAgent appends `/chat/completions`. The VLM endpoint
+must accept images in OpenAI-compatible message content.
 
-## Run The API
+See [`config.example.yaml`](config.example.yaml) for the remaining pipeline,
+retrieval, rendering, and service settings.
 
-Start the HTTP service from the repository root:
+## Run From The CLI
+
+Run commands from the repository root. The CLI prints a JSON result containing the
+job ID, answers, and generated artifact paths.
+
+### Ingestion: Produce `structure.yaml`
+
+Run the `structure` stage to render the workbook, detect its tables, verify their
+ranges, and cache one `structure.yaml` per worksheet:
+
+```bash
+uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
+```
+
+This stage uses the VLM but does not use the answer LLM.
+
+With the default `service.root_dir`, the canonical files are stored at:
+
+```text
+outputs/table_agent/service/structure/sources/<source-id>/structure.yaml
+```
+
+The run also exports readable copies to:
+
+```text
+outputs/table_agent/service/jobs/<job-id>/structures/*.yaml
+```
+
+### Run QA Against Existing Structures
+
+After ingestion, run the `qa` stage with the same workbook. It reuses the cached
+structures and calls only the answer LLM:
+
+```bash
+uv run table-agent --config config.yaml --stage qa --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
+```
+
+If the workbook is new or has changed, `qa` reports a missing or stale structure
+cache. Run `structure` or `all` first.
+
+### Run End-To-End
+
+Run the `all` stage to ensure structures exist and then answer the question in one
+command:
+
+```bash
+uv run table-agent --config config.yaml --stage all --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
+```
+
+This stage requires both the layout VLM and answer LLM.
+
+Repeat `--workbook` to process multiple workbooks and repeat `--query` to ask
+multiple questions. Select a different configured model profile with `--llm NAME`
+or `--vlm NAME`. Run `uv run table-agent --help` for the complete CLI reference.
+
+Supported workbook extensions are `.xls`, `.xlsx`, `.xlsm`, `.xltx`, and `.xltm`.
+Each run is saved under `service.root_dir/jobs/<job-id>/`, including `run.json`.
+
+## Serve The API
+
+Start the HTTP service after configuring the same LLM and VLM profiles:
 
 ```bash
 uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 8000
 ```
 
-The top-level `llm.provider` and `vlm.provider` values are used by default. Override
-either selection with a configured profile name when starting the server:
-
-```bash
-uv run table-agent-api --config config.yaml --llm answer_model --vlm layout_model
-```
-
-For an installation without the generated console script:
-
-```bash
-python -m service.server --config config.yaml
-```
-
-### Command-Line Flags
-
-The `table-agent-api` console script and `python -m service.server` accept the same
-flags:
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `-h`, `--help` | — | Show the command help and exit |
-| `--config CONFIG` | `config.yaml` | Path to the private service configuration file |
-| `--llm LLM` | Configured default | Select a configured answer-model profile |
-| `--vlm VLM` | Configured default | Select a configured layout-model profile |
-| `--host HOST` | `127.0.0.1` | Network interface on which the API listens |
-| `--port PORT` | `8000` | TCP port on which the API listens |
-| `--log-level LOG_LEVEL` | `info` | Uvicorn log level, such as `critical`, `error`, `warning`, `info`, `debug`, or `trace` |
-
-### Endpoints
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Liveness check |
-| `GET` | `/health/ready` | Storage readiness check |
-| `GET` | `/v1/status` | Worker and job counts |
-| `POST` | `/v1/jobs/upload` | Submit uploaded workbooks |
-| `POST` | `/v1/jobs` | Submit trusted server-side paths when enabled |
-| `GET` | `/v1/jobs/{job_id}` | Read job status and results |
-| `GET` | `/v1/jobs/{job_id}/artifacts` | List generated artifacts |
-| `GET` | `/v1/jobs/{job_id}/artifacts/{path}` | Download an artifact |
-
-Health endpoints are public. When `service.api_key` is configured, requests to `/v1/*`
-must include `X-API-Key`.
-
-### Upload A Workbook
-
-The upload endpoint accepts a JSON `payload` form field and one or more `files` fields:
+Submit a workbook and wait for an end-to-end result:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/jobs/upload?wait=true" \
@@ -131,137 +146,19 @@ curl -X POST "http://127.0.0.1:8000/v1/jobs/upload?wait=true" \
   -F "files=@sample/QA_sample.xlsx"
 ```
 
-Without `wait=true`, the endpoint returns immediately. Poll `/v1/jobs/{job_id}` until
-the status becomes `succeeded` or `failed`.
+Omit `X-API-Key` when `service.api_key` is empty. Without `wait=true`, poll
+`GET /v1/jobs/{job_id}`. Generated files are available through
+`GET /v1/jobs/{job_id}/artifacts`, and the interactive API documentation is at
+`http://127.0.0.1:8000/docs`.
 
-Server-side workbook paths are disabled by default. To enable `/v1/jobs`, set
-`service.allow_local_paths: true` and restrict access with `service.allowed_input_roots`.
-
-## Run The CLI
-
-Use the one-shot `table-agent` command when you want to process selected workbooks
-without starting an HTTP server:
-
-```bash
-uv run table-agent \
-  --config config.yaml \
-  --stage all \
-  --workbook sample/QA_sample.xlsx \
-  --query "What is the total revenue?"
-```
-
-Repeat `--workbook` to process multiple files and `--query` to ask multiple questions.
-Use `--stage structure` to build or refresh structure without answering questions. The
-`qa` stage requires an existing valid structure cache, while `all` builds structure first.
-The command prints the run result as JSON; artifacts and the full result are also saved
-under the configured service root.
-
-### CLI Flags
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `-h`, `--help` | - | Show the command help and exit |
-| `--config CONFIG` | `config.yaml` | Path to the private service configuration file |
-| `--stage {structure,qa,all}` | `all` | Processing stage to run |
-| `--workbook PATH` | Required | Workbook to process; repeat for multiple workbooks |
-| `--query TEXT` | None | Question to answer; repeat for multiple questions; required for `qa` and `all` |
-| `--llm LLM` | Configured default | Select a configured answer-model profile |
-| `--vlm VLM` | Configured default | Select a configured layout-model profile |
-
-For an installation without the generated console script:
-
-```bash
-python -m service.cli --stage structure --workbook sample/QA_sample.xlsx
-```
-
-## Use The Python Service
-
-The service layer can be called without HTTP:
-
-```python
-from service import TableAgentService
-
-service = TableAgentService.from_config("config.yaml")
-result = service.run(
-    stage="all",
-    workbooks=["./sales.xlsx", "./costs.xlsx"],
-    queries=[
-        "Which quarter had the largest revenue increase?",
-        "List the largest cost outliers.",
-    ],
-)
-
-for item in result["answers"]:
-    print(item["answer"])
-```
-
-Custom model clients can be injected into `TableAgentService`. The answer client must
-provide `generate()`. The layout client must provide `generate_with_image()`.
-
-## Processing Stages
-
-| Stage | Behavior |
-| --- | --- |
-| `structure` | Render workbooks, extract structure, verify ranges, and populate the cache |
-| `qa` | Reuse valid cached structures and answer the supplied queries |
-| `all` | Generate or refresh structure first, then answer the queries |
-
-`qa` fails when a workbook has no valid structure cache. Run `structure` or `all` first.
-
-Supported input extensions are `.xls`, `.xlsx`, `.xlsm`, `.xltx`, and `.xltm`. Inputs
-are normalized into content-addressed `.xlsx` files under the configured service root.
-
-## Repository Layout
-
-```text
-TableAgent/
-  configs/              Configuration loading and pipeline settings
-  pipeline/             Structure extraction, retrieval, and QA orchestration
-  rendering/            Workbook conversion and image rendering
-  structure/            Layout extraction and deterministic verification
-  QA/                   Notebook environment, agents, actions, and operators
-  schema/                Shared data contracts
-service/
-  api.py                 FastAPI routes and asynchronous job manager
-  runtime.py             Workbook/query application service
-  clients.py             OpenAI-compatible LLM and VLM client
-  cli.py                 `table-agent` one-shot command entry point
-  server.py              `table-agent-api` command entry point
-sample/                  Example workbooks, structures, and a direct QA script
-tests/                   Unit and integration tests
-config.example.yaml      Public configuration template
-```
-
-The old root-level `configs`, `datasets`, `pipelines`, and `utils` packages now live
-under `TableAgent`. The inactive standalone `table2img` package and CLI were removed;
-workbook rendering remains under `TableAgent/rendering/`. Import core functionality
-from `TableAgent` and deployment functionality from `service`.
-
-## Artifacts And Cache
-
-By default, service data is written under `outputs/table_agent/service/`:
-
-```text
-inputs/                  Content-addressed normalized workbooks
-jobs/<job_id>/           Status, result metadata, and run artifacts
-structure/               Reusable prepared structures
-structure/cache/         Content-addressed structure cache
-uploads/                 Temporary upload staging, removed after each job
-```
-
-Change `service.root_dir` to relocate all service-owned data. Pipeline artifact and
-cache paths can also be configured independently under `table_agent`.
+Server-side workbook paths are disabled by default. To enable `POST /v1/jobs`, set
+`service.allow_local_paths: true` and restrict access with
+`service.allowed_input_roots`.
 
 ## Development
 
-Run the complete test suite:
+Run the test suite:
 
 ```bash
-python -m pytest -q
+uv run pytest -q
 ```
-
-The current suite covers configuration, rendering, structure verification, retrieval,
-multi-table operators, QA, the service runtime, and the HTTP API.
-
-For retrieval-specific extension guidance, see
-[`TableAgent/pipeline/retrieval/README.md`](TableAgent/pipeline/retrieval/README.md).
