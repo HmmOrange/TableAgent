@@ -231,6 +231,46 @@ can be added for the ingestion/structure package without mixing the APIs. Extern
 should import `create_model_client` from `TableAgent.integrations` instead of the internal
 `service` package.
 
+### Run the QA package directly
+
+The packaged QA boundary accepts one JSON request and prints one JSON response. The request paths
+are resolved relative to the request file and must point to an existing workbook and a per-sheet
+`structure.yaml`:
+
+```json
+{
+  "schema_version": 1,
+  "question": "How many people are listed?",
+  "workbook_path": "input/QA_sample.xlsx",
+  "structure_path": "prepared/People/structure.yaml",
+  "artifact_dir": "output/qa",
+  "table_id": "people_table"
+}
+```
+
+Run it from the repository root after filling the answer-model variables:
+
+```bash
+uv run --env-file ../queryAI/.env \
+  python -m TableAgent.integrations.qa_cli \
+  --config config.yaml \
+  --request request.json \
+  --output response.json
+```
+
+The response is stable JSON with `success`, `answer`, `error`, `artifacts`, `token_usage`, and
+`limitations` fields. The same boundary is available as a library:
+
+```python
+from TableAgent.integrations import TableQAPackage, load_qa_request
+
+with TableQAPackage.from_config("config.yaml") as package:
+    response = package.run(load_qa_request("request.json"))
+```
+
+This QA package consumes prepared structures and therefore calls the answer LLM only; it does not
+call the layout VLM or LibreOffice.
+
 ## Processing Stages
 
 | Stage | Behavior |

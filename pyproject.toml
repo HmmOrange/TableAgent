@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 table-agent = "service.cli:main"
 table-agent-api = "service.server:main"
+table-agent-qa = "TableAgent.integrations.qa_cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]
