@@ -13,7 +13,7 @@ The repository is split into two clear layers:
 
 ## Requirements
 
-- Python 3.13 or newer
+- Python 3.12 or 3.13
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - LibreOffice for workbook-to-image rendering
 - OpenAI-compatible chat-completions endpoints for the answer LLM and layout VLM, unless
@@ -197,6 +197,37 @@ for item in result["answers"]:
 
 Custom model clients can be injected into `TableAgentService`. The answer client must
 provide `generate()`. The layout client must provide `generate_with_image()`.
+
+## Use The Integration API
+
+Use `TableQAEngine` when another application already owns the workbook and prepared
+`structure.yaml`. This API bypasses TableAgent's service cache and does not generate structure:
+
+```python
+from pathlib import Path
+
+from TableAgent import TableQAEngine, TableQARequest
+
+engine = TableQAEngine(llm_client=answer_client)
+result = engine.answer(
+    TableQARequest(
+        question="What is the total revenue?",
+        workbook_path=Path("sales.xlsx"),
+        structure_path=Path("prepared/sales/structure.yaml"),
+        artifact_dir=Path("outputs/qa"),
+    )
+)
+```
+
+The caller owns file authorization, artifact transport, and workflow state. `TableQAEngine`
+validates its paths, wraps `TableQARunner`, and returns a stable `TableQAResponse`. Inject a custom
+runner or code action for offline testing; no model endpoint is required by the integration tests.
+Each prepared sheet must live in its own directory and its schema file must be named exactly
+`structure.yaml`; use the directory and request metadata to identify the sheet.
+
+Public application boundaries live under `TableAgent/integrations/`: `qa.py` owns the QA contract,
+while a separate `ingestion.py` module can be added for the ingestion/structure package without
+mixing the two APIs.
 
 ## Processing Stages
 

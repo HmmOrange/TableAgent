@@ -1,9 +1,9 @@
 [project]
 name = "table-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Image-assisted table structure extraction and question-answering pipeline"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "beautifulsoup4>=4.14.3",
     "exstruct>=0.8.1",
