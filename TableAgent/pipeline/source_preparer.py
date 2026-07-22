@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from TableAgent.schema import EvalSample
-
+from TableAgent.artifacts import (
+    legacy_sheet_dir,
+    sheet_artifact_dir,
+    workbook_artifact_dir,
+)
 from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import is_siflex, safe_name
+from TableAgent.schema import EvalSample
+from TableAgent.structure.layout.parsing import _is_valid_structure
 
 LAYOUT_WORKFLOW_VERSION = 4
 
@@ -35,7 +41,11 @@ class SourcePreparer:
         if not samples or not is_siflex(samples[0]):
             return
 
+        selected_sheets = set(self.selected_sheet_names(samples))
         for source_path in self._source_paths(samples):
+            identity = self._workbook_identity(samples, source_path)
+            workbook_name = str(identity.get("name") or source_path.name)
+            source_hash = str(identity.get("sha256") or self._sha256(source_path))
             try:
                 self._progress("prepare_extract", workbook=source_path.name)
                 workbook_payload = self.metadata_extractor.extract(source_path)
@@ -47,8 +57,22 @@ class SourcePreparer:
 
             sheets = workbook_payload.get("sheets") or {}
             for sheet_name in sheets:
+                if selected_sheets and sheet_name not in selected_sheets:
+                    continue
                 self._progress("prepare_metadata", workbook=source_path.name, sheet=sheet_name)
-                sheet_dir = self.source_dir(source_path, sheet_name)
+                sheet_dir = self.source_dir(
+                    source_path,
+                    sheet_name,
+                    workbook_name=workbook_name,
+                    source_hash=source_hash,
+                )
+                legacy_dir = legacy_sheet_dir(
+                    self.settings.source_artifact_dir or self.settings.artifact_dir,
+                    source_path.name,
+                    sheet_name,
+                )
+                if not sheet_dir.exists() and legacy_dir.is_dir():
+                    shutil.copytree(legacy_dir, sheet_dir)
                 sheet_dir.mkdir(parents=True, exist_ok=True)
                 paths = self._paths(sheet_dir)
                 structure_exists = paths["structure"].is_file()
@@ -64,7 +88,14 @@ class SourcePreparer:
                         sheet_name,
                     )
                     paths["metadata_yaml"].write_text(metadata.to_yaml(), encoding="utf-8")
-                    self._write_metadata_json(paths["metadata_json"], source_path, sheet_name, metadata)
+                    self._write_metadata_json(
+                        paths["metadata_json"],
+                        source_path,
+                        sheet_name,
+                        metadata,
+                        workbook_name=workbook_name,
+                        source_hash=source_hash,
+                    )
                     self._write_sheet_text(source_path, sheet_name, paths["text"])
                 except Exception as exc:
                     if logger:
@@ -100,9 +131,21 @@ class SourcePreparer:
                     )
                 self._progress("prepare_done", workbook=source_path.name, sheet=sheet_name)
 
-    def source_dir(self, source_path: Path, sheet_name: str) -> Path:
+    def source_dir(
+        self,
+        source_path: Path,
+        sheet_name: str,
+        *,
+        workbook_name: str | None = None,
+        source_hash: str | None = None,
+    ) -> Path:
         artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir
-        return artifact_dir / "sources" / f"{safe_name(source_path.name)}_{safe_name(sheet_name)}"
+        workbook_dir = workbook_artifact_dir(
+            artifact_dir,
+            workbook_name or source_path.name,
+            source_hash or self._sha256(source_path),
+        )
+        return sheet_artifact_dir(workbook_dir, sheet_name)
 
     @staticmethod
     def _source_paths(samples: list[EvalSample]) -> list[Path]:
@@ -113,6 +156,23 @@ class SourcePreparer:
                 if path and path.is_file() and path.suffix.lower() == ".xlsx":
                     sources.add(path)
         return sorted(sources)
+
+    @staticmethod
+    def selected_sheet_names(samples: list[EvalSample]) -> tuple[str, ...]:
+        for sample in samples:
+            values = sample.raw.get("selected_sheets") if isinstance(sample.raw, dict) else None
+            if isinstance(values, list):
+                return tuple(str(value) for value in values if str(value))
+        return ()
+
+    @staticmethod
+    def _workbook_identity(samples: list[EvalSample], source_path: Path) -> dict[str, Any]:
+        resolved = str(source_path.resolve())
+        for sample in samples:
+            identities = sample.raw.get("workbook_identities") if isinstance(sample.raw, dict) else None
+            if isinstance(identities, dict) and isinstance(identities.get(resolved), dict):
+                return dict(identities[resolved])
+        return {}
 
     @staticmethod
     def _paths(sheet_dir: Path) -> dict[str, Path]:
@@ -168,9 +228,14 @@ class SourcePreparer:
         source_path: Path,
         sheet_name: str,
         metadata: SheetMetadata,
+        *,
+        workbook_name: str | None = None,
+        source_hash: str | None = None,
     ) -> None:
         payload = {
             "workbook_path": str(source_path.resolve()),
+            "workbook_name": workbook_name or source_path.name,
+            "workbook_sha256": source_hash,
             "sheet_name": sheet_name,
             "safe_filename": safe_name(source_path.name),
             "safe_sheetname": safe_name(sheet_name),
@@ -179,3 +244,11 @@ class SourcePreparer:
             "merged_ranges": metadata.merged_ranges,
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()

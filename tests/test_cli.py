@@ -33,8 +33,32 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.stage == "all"
     assert args.workbook == ["sales.xlsx", "costs.xlsx"]
     assert args.query == ["Total revenue?", "Largest cost?"]
+    assert args.schema is False
+    assert args.metadata is False
+    assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
+
+
+def test_cli_parser_accepts_artifact_and_sheet_flags():
+    args = cli.build_parser().parse_args(
+        [
+            "--stage",
+            "structure",
+            "--workbook",
+            "book.xlsx",
+            "--schema",
+            "--metadata",
+            "--sheet",
+            "Summary,Detail",
+            "--sheet",
+            "Archive",
+        ]
+    )
+
+    assert args.schema is True
+    assert args.metadata is True
+    assert args.sheet == ["Summary,Detail", "Archive"]
 
 
 @pytest.mark.parametrize("stage", ["qa", "all"])
@@ -86,6 +110,9 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "stage": "structure",
         "workbooks": ["sales.xlsx", "costs.xlsx"],
         "queries": [],
+        "schema": False,
+        "metadata": False,
+        "sheets": [],
     }
     assert json.loads(capsys.readouterr().out) == {"job_id": "job-one", "stage": "structure"}
 

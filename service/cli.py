@@ -31,6 +31,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Question to answer. Repeat for multiple questions; required for qa and all.",
     )
     parser.add_argument(
+        "--schema",
+        action="store_true",
+        help="Generate a workbook schema artifact. If neither output flag is set, both are generated.",
+    )
+    parser.add_argument(
+        "--metadata",
+        action="store_true",
+        help="Generate a workbook metadata artifact. If neither output flag is set, both are generated.",
+    )
+    parser.add_argument(
+        "--sheet",
+        action="append",
+        default=[],
+        metavar="NAME[,NAME...]",
+        help="Process only the named worksheet(s). Repeat the flag or separate names with commas.",
+    )
+    parser.add_argument(
         "--llm",
         help="Configured LLM profile to use instead of the config.yaml default.",
     )
@@ -57,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             stage=args.stage,
             workbooks=args.workbook,
             queries=args.query,
+            schema=args.schema,
+            metadata=args.metadata,
+            sheets=args.sheet,
         )
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
         print(f"table-agent: error: {exc}", file=sys.stderr)

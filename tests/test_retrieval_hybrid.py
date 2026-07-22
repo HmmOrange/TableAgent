@@ -1,5 +1,6 @@
-import tempfile
 import json
+import shutil
+import tempfile
 from pathlib import Path
 import pytest
 from TableAgent.configs import TableAgentConfig
@@ -113,6 +114,55 @@ def test_hybrid_retrieval_fallback_to_lexical(temp_sources_dir):
     assert candidates[0].lexical_score > 0
     assert not candidates[0].embedding_used
     assert candidates[0].embedding_score == 0.0
+
+
+def test_source_retriever_discovers_nested_and_legacy_sheet_directories(temp_sources_dir):
+    nested = temp_sources_dir / "dummy.xlsx_12345678" / "NestedSheet"
+    nested.mkdir(parents=True)
+    (nested / "metadata.json").write_text(json.dumps({
+        "workbook_path": "/path/to/dummy.xlsx",
+        "sheet_name": "NestedSheet",
+        "layout_workflow_version": 4,
+    }), encoding="utf-8")
+    (nested / "structure.yaml").write_text("""
+table1:
+  id: nested
+  name: Nested records
+  description: Records stored in a nested artifact directory.
+  headers:
+    - id: record
+      label: Record
+      orientation: column
+""", encoding="utf-8")
+    (nested / "sheet_text.txt").write_text("nested records", encoding="utf-8")
+    (nested / "table.png").touch()
+    shutil.copytree(temp_sources_dir / "dummy_Sheet1", nested.parent / "Sheet1")
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(temp_sources_dir.parent),
+        "source_artifact_dir": str(temp_sources_dir.parent),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_top_k": 3,
+        "retrieval_candidate_max_chars": 1000,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex-test",
+        table_id="test",
+        table_content="",
+        question="nested records",
+        answer=[],
+        sample_path="siflex",
+        table_path="/path/to/dummy.xlsx",
+        raw={},
+    )
+
+    candidates = retriever.load_candidates(sample)
+
+    assert {candidate.sheet_name for candidate in candidates} == {"Sheet1", "Sheet2", "NestedSheet"}
+    assert len(candidates) == 3
+    assert candidates[0].sheet_name == "NestedSheet"
 
 def test_hybrid_retrieval_with_mock_embedding(temp_sources_dir):
     config = TableAgentConfig.from_config({

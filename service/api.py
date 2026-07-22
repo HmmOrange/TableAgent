@@ -16,16 +16,21 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
 from service.runtime import Stage, TableAgentService
 
 
 class PathJobRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     stage: Stage = "all"
     queries: list[str] = Field(default_factory=list)
     workbooks: list[str] = Field(min_length=1)
+    schema_: bool = Field(False, alias="schema")
+    metadata: bool = False
+    sheets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "PathJobRequest":
@@ -34,8 +39,13 @@ class PathJobRequest(BaseModel):
 
 
 class UploadJobRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     stage: Stage = "all"
     queries: list[str] = Field(default_factory=list)
+    schema_: bool = Field(False, alias="schema")
+    metadata: bool = False
+    sheets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
@@ -58,6 +68,9 @@ class JobManager:
         stage: Stage,
         queries: list[str],
         workbooks: list[Path],
+        schema: bool = False,
+        metadata: bool = False,
+        sheets: list[str] | None = None,
         cleanup_dir: Path | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex
@@ -82,6 +95,9 @@ class JobManager:
                 stage,
                 queries,
                 workbooks,
+                schema,
+                metadata,
+                list(sheets or []),
                 cleanup_dir,
             )
         return job_id
@@ -118,6 +134,9 @@ class JobManager:
         stage: Stage,
         queries: list[str],
         workbooks: list[Path],
+        schema: bool,
+        metadata: bool,
+        sheets: list[str],
         cleanup_dir: Path | None,
     ) -> None:
         self._update(job_id, status="running")
@@ -126,6 +145,9 @@ class JobManager:
                 stage=stage,
                 queries=queries,
                 workbooks=workbooks,
+                schema=schema,
+                metadata=metadata,
+                sheets=sheets,
                 job_id=job_id,
             )
         except Exception as exc:
@@ -250,7 +272,14 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        job_id = manager.submit(stage=request.stage, queries=request.queries, workbooks=workbooks)
+        job_id = manager.submit(
+            stage=request.stage,
+            queries=request.queries,
+            workbooks=workbooks,
+            schema=request.schema_,
+            metadata=request.metadata,
+            sheets=request.sheets,
+        )
         return manager.wait(job_id) if wait else manager.get(job_id) or {"job_id": job_id}
 
     @app.post("/v1/jobs/upload", status_code=status.HTTP_202_ACCEPTED)
@@ -296,6 +325,9 @@ def create_app(
             stage=request.stage,
             queries=request.queries,
             workbooks=saved,
+            schema=request.schema_,
+            metadata=request.metadata,
+            sheets=request.sheets,
             cleanup_dir=upload_dir,
         )
         return await asyncio.to_thread(manager.wait, job_id) if wait else manager.get(job_id) or {"job_id": job_id}

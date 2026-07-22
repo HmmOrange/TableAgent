@@ -66,15 +66,17 @@ is stable, the pipeline may use it directly instead of selecting only one sheet.
 
 ### 2. Build one candidate per table
 
-Prepared source artifacts remain organized by workbook and sheet:
+New prepared source artifacts are organized by workbook and sheet. The retriever
+also discovers the previous flattened directories for cache compatibility:
 
 ```text
-sources/<workbook>_<sheet>/
-├── metadata.json
-├── structure.yaml
-├── sheet_text.txt
-├── table.png
-└── table.html
+sources/<workbook-id>/
+  <sheet>/
+    metadata.json
+    structure.yaml
+    sheet_text.txt
+    table.png
+    table.html
 ```
 
 Read each `structure.yaml` and create one `TableCandidate` for every table entry. Do

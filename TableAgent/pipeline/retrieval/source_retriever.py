@@ -11,6 +11,7 @@ from TableAgent.llm import BaseLLM, LLMResponse
 from TableAgent.run_logging import Logger
 from TableAgent.schema import EvalSample
 
+from TableAgent.artifacts import iter_sheet_artifact_dirs
 from TableAgent.configs import TableAgentConfig
 from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import SourceCandidate, is_siflex
@@ -96,9 +97,19 @@ class SourceRetriever:
             for value in str(sample.table_path).split(";")
             if value.strip()
         }
+        selected_values = sample.raw.get("selected_sheets", []) if isinstance(sample.raw, dict) else []
+        selected_sheets = {str(value) for value in selected_values if str(value)}
         candidates = []
-        for source_dir in source_dirs.iterdir():
-            candidates.extend(self._candidates_from_dir(source_dir, allowed_paths, sample.question))
+        for source_dir in iter_sheet_artifact_dirs(source_dirs):
+            candidates.extend(
+                self._candidates_from_dir(
+                    source_dir,
+                    allowed_paths,
+                    sample.question,
+                    selected_sheets=selected_sheets,
+                )
+            )
+        candidates = self._deduplicate_candidates(candidates)
         if not candidates:
             return []
 
@@ -137,6 +148,18 @@ class SourceRetriever:
             scored.append(replace(candidate, score=score, embedding_used=embedding_used))
         return sorted(scored, key=lambda candidate: candidate.score, reverse=True)
 
+    @staticmethod
+    def _deduplicate_candidates(candidates: list[SourceCandidate]) -> list[SourceCandidate]:
+        unique: dict[tuple[str, str, str], SourceCandidate] = {}
+        for candidate in candidates:
+            key = (
+                str(candidate.workbook_path.resolve()),
+                candidate.sheet_name,
+                candidate.table_id,
+            )
+            unique.setdefault(key, candidate)
+        return list(unique.values())
+
     def _encode(self, texts: list[str]):
         async def get_embeddings():
             return await self.embedding_client.encode(texts)
@@ -155,6 +178,8 @@ class SourceRetriever:
         source_dir: Path,
         allowed_paths: set[str],
         query: str,
+        *,
+        selected_sheets: set[str] | None = None,
     ) -> list[SourceCandidate]:
         if not source_dir.is_dir():
             return []
@@ -180,6 +205,8 @@ class SourceRetriever:
             return []
         sheet_text = sheet_text_path.read_text(encoding="utf-8")
         sheet_name = str(metadata.get("sheet_name", ""))
+        if selected_sheets and sheet_name not in selected_sheets:
+            return []
         table_cards = build_table_retrieval_cards(
             workbook_path,
             sheet_name,

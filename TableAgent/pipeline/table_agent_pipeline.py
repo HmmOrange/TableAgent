@@ -179,6 +179,7 @@ class TableAgentPipeline(BasePipeline):
         """Count the structure work units shown by the CLI progress bar."""
         standard_samples = [sample for sample in samples if not is_siflex(sample)]
         siflex_samples = [sample for sample in samples if is_siflex(sample)]
+        selected_sheets = set(SourcePreparer.selected_sheet_names(siflex_samples))
         sheets_per_file = {f"sample:{sample.sample_id}": 1 for sample in standard_samples}
         files_per_key = {key: 1 for key in sheets_per_file}
 
@@ -186,7 +187,10 @@ class TableAgentPipeline(BasePipeline):
             try:
                 workbook = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
                 try:
-                    sheet_count = max(len(workbook.sheetnames), 1)
+                    sheet_count = max(
+                        len([name for name in workbook.sheetnames if not selected_sheets or name in selected_sheets]),
+                        1,
+                    )
                 finally:
                     workbook.close()
             except Exception:

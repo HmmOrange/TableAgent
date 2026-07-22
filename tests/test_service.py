@@ -4,8 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
+import yaml
 
 from TableAgent.pipeline.base import PipelineOutput
+from TableAgent.llm import LLMResponse
 from service.runtime import TableAgentService
 
 
@@ -22,18 +24,35 @@ class FakePipeline:
 
     def verify_samples(self, samples, force=False):
         workbook_path = Path(samples[0].table_path.split(";")[0])
-        structure_path = Path(self.config["source_artifact_dir"]) / "fake" / "structure.yaml"
-        structure_path.parent.mkdir(parents=True, exist_ok=True)
-        structure_path.write_text("table1:\n  headers: []\n", encoding="utf-8")
-        return [
-            SimpleNamespace(
-                workbook_path=workbook_path,
-                sheet_name="Sheet",
-                structure_path=structure_path,
-                status="good",
-                cache_hit=False,
+        workbook = openpyxl.load_workbook(workbook_path, read_only=True)
+        try:
+            sheet_names = list(workbook.sheetnames)
+        finally:
+            workbook.close()
+        selected = samples[0].raw.get("selected_sheets") or sheet_names
+        records = []
+        for sheet_name in selected:
+            structure_path = (
+                Path(self.config["source_artifact_dir"])
+                / "fake"
+                / sheet_name
+                / "structure.yaml"
             )
-        ]
+            structure_path.parent.mkdir(parents=True, exist_ok=True)
+            structure_path.write_text(
+                f"table1:\n  name: {sheet_name}\n  headers: []\n",
+                encoding="utf-8",
+            )
+            records.append(
+                SimpleNamespace(
+                    workbook_path=workbook_path,
+                    sheet_name=sheet_name,
+                    structure_path=structure_path,
+                    status="good",
+                    cache_hit=False,
+                )
+            )
+        return records
 
     def prepare_samples(self, samples):
         self.prepared.extend(samples)
@@ -56,6 +75,12 @@ class FakePipeline:
         )
 
 
+class FakeSummaryClient:
+    def generate(self, prompt, system_prompt=None):
+        description = "Workbook summary" if "workbook as a whole" in prompt else "Sheet summary"
+        return LLMResponse(content=f'{{"description": "{description}"}}')
+
+
 def _workbook(path: Path) -> Path:
     workbook = openpyxl.Workbook()
     workbook.active["A1"] = "value"
@@ -64,9 +89,19 @@ def _workbook(path: Path) -> Path:
     return path
 
 
+def _multi_sheet_workbook(path: Path) -> Path:
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Summary"
+    workbook.create_sheet("Detail")
+    workbook.create_sheet("Archive")
+    workbook.save(path)
+    workbook.close()
+    return path
+
+
 def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     FakePipeline.instances = []
-    answer_client = object()
+    answer_client = FakeSummaryClient()
     layout_client = object()
     source = _workbook(tmp_path / "book.xlsx")
     service = TableAgentService(
@@ -89,12 +124,85 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert len(FakePipeline.instances[1].runs) == 2
     assert result["workbooks"] == ["book.xlsx"]
     assert result["structures"][0]["artifact"].endswith(".yaml")
+    assert result["schema_artifacts"] == [
+        {"workbook": "book.xlsx", "artifact": "workbooks/book.xlsx/schema.yaml"}
+    ]
+    assert result["metadata_artifacts"] == [
+        {"workbook": "book.xlsx", "artifact": "workbooks/book.xlsx/metadata.json"}
+    ]
     assert [item["answer"] for item in result["answers"]] == [
         "answer: first question",
         "answer: second question",
     ]
     assert "artifacts" not in result["answers"][0]["qa"]
     assert (service.jobs_dir / "job-one" / "run.json").is_file()
+
+
+def test_metadata_only_structure_stage_skips_pipeline_and_vlm(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(
+        stage="structure",
+        workbooks=[source],
+        metadata=True,
+        job_id="metadata-only",
+    )
+
+    assert FakePipeline.instances == []
+    assert result["structures"] == []
+    assert result["schema_artifacts"] == []
+    assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
+
+
+def test_service_normalizes_repeated_comma_separated_sheet_filters(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _multi_sheet_workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(
+        stage="structure",
+        workbooks=[source],
+        schema=True,
+        sheets=["Summary, Detail", "Summary"],
+        job_id="selected-sheets",
+    )
+
+    assert [item["sheet"] for item in result["structures"]] == ["Summary", "Detail"]
+    schema_path = service.jobs_dir / "selected-sheets" / result["schema_artifacts"][0]["artifact"]
+    assert list(yaml.safe_load(schema_path.read_text(encoding="utf-8"))) == ["Summary", "Detail"]
+
+
+def test_service_rejects_missing_sheet_before_pipeline_work(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        pipeline_factory=FakePipeline,
+    )
+
+    try:
+        service.run(
+            stage="structure",
+            workbooks=[source],
+            metadata=True,
+            sheets=["Missing"],
+        )
+    except ValueError as exc:
+        assert "book.xlsx: Missing" in str(exc)
+    else:
+        raise AssertionError("Expected a missing-sheet validation error")
+
+    assert FakePipeline.instances == []
 
 
 def test_service_rejects_queries_missing_from_qa_stage(tmp_path: Path):

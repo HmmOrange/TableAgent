@@ -74,47 +74,225 @@ retrieval, rendering, and service settings.
 ## Run From The CLI
 
 Run commands from the repository root. The CLI prints a JSON result containing the
-job ID, answers, and generated artifact paths.
+job ID, processing results, answers, and generated artifact paths. Each run is saved
+under `service.root_dir/jobs/<job-id>/`, including the complete result in `run.json`.
 
-### Ingestion: Produce `structure.yaml`
+### Ingestion
 
-Run the `structure` stage to render the workbook, detect its tables, verify their
-ranges, and cache one `structure.yaml` per worksheet:
+#### Description and requirements
+
+Use the `structure` stage to ingest one or more workbooks. TableAgent renders each
+selected worksheet, detects and verifies its table ranges, and caches a
+`structure.yaml` file for later QA requests.
+
+- At least one `--workbook` is required. Supported extensions are `.xls`, `.xlsx`,
+  `.xlsm`, `.xltx`, and `.xltm`.
+- Structure generation requires LibreOffice and the configured layout VLM.
+- Schema generation also requires the configured answer LLM to describe the
+  workbook and its worksheets.
+- Metadata-only ingestion can run without the layout VLM. When no cached
+  `schema.yaml` exists, the workbook description is empty.
+
+#### Example: One workbook with default flags
+
+When neither `--schema` nor `--metadata` is supplied, TableAgent generates both:
 
 ```bash
 uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
 ```
 
-This stage uses the VLM but does not use the answer LLM.
+#### Output types by flag
 
-With the default `service.root_dir`, the canonical files are stored at:
+The output flags select which workbook-level artifacts are generated:
+
+| Output flags | Structure processing | Workbook artifacts |
+| --- | --- | --- |
+| None (default) | All selected worksheets | `schema.yaml` and `metadata.json` |
+| `--schema` | All selected worksheets | `schema.yaml` only |
+| `--metadata` | Skipped | `metadata.json` only |
+| `--schema --metadata` | All selected worksheets | `schema.yaml` and `metadata.json` |
+
+With the default `service.root_dir`, canonical artifacts are stored at:
 
 ```text
-outputs/table_agent/service/structure/sources/<source-id>/structure.yaml
+outputs/table_agent/service/structure/sources/<workbook-id>/
+  schema.yaml
+  metadata.json
+  <sheet-name>/
+    structure.yaml
+    metadata.yaml
+    metadata.json
+    sheet_text.txt
+    table.png
+    table.metadata.json
 ```
 
-The run also exports readable copies to:
+Each job also exports readable copies using the original workbook and worksheet
+names:
 
 ```text
-outputs/table_agent/service/jobs/<job-id>/structures/*.yaml
+outputs/table_agent/service/jobs/<job-id>/workbooks/<workbook-name>/
+  schema.yaml
+  metadata.json
+  <sheet-name>/
+    structure.yaml
+    ...
 ```
 
-### Run QA Against Existing Structures
+The CLI result includes per-sheet records in `structures` and workbook-level paths
+in `schema_artifacts` and `metadata_artifacts`. A schema embeds the parsed structure
+for each selected worksheet:
 
-After ingestion, run the `qa` stage with the same workbook. It reuses the cached
-structures and calls only the answer LLM:
+```yaml
+Summary:
+  id: summary
+  description: Concise LLM-generated description of the worksheet.
+  structure:
+    table1:
+      name: Revenue summary
+      headers: []
+```
+
+`metadata.json` uses the following stable keys:
+
+```json
+{
+  "name": "book.xlsx",
+  "description": "Workbook summary generated from schema.yaml.",
+  "sheet_names": ["Summary", "Detail"],
+  "author": null,
+  "date_created": null,
+  "date_modified": null,
+  "size_bytes": 12345
+}
+```
+
+#### Available flags
+
+| Flag | Description |
+| --- | --- |
+| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
+| `--stage structure` | Runs ingestion only. |
+| `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
+| `--schema` | Generates only the workbook schema unless `--metadata` is also supplied. |
+| `--metadata` | Generates only workbook metadata unless `--schema` is also supplied. |
+| `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
+| `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
+| `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
+
+Worksheet matching is exact and case-sensitive. When multiple workbooks are
+provided, every requested worksheet must exist in every workbook. Metadata always
+lists every worksheet in the workbook, even when `--sheet` limits structure and
+schema processing.
+
+For example, the following command generates a schema for `Summary`, `Detail`, and
+`Archive` only:
 
 ```bash
-uv run table-agent --config config.yaml --stage qa --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
+uv run table-agent --config config.yaml --stage structure \
+  --workbook sample/QA_sample.xlsx \
+  --schema \
+  --sheet "Summary,Detail" --sheet Archive
 ```
 
-If the workbook is new or has changed, `qa` reports a missing or stale structure
-cache. Run `structure` or `all` first.
+### QA
+
+#### Description and requirements
+
+Use the `qa` stage to answer natural-language questions using previously generated
+worksheet structures. This stage reuses the cached structures and calls the answer
+LLM; it does not call the layout VLM.
+
+- At least one `--workbook` and one non-empty `--query` are required.
+- The workbook must already have a valid structure cache created by the `structure`
+  or `all` stage.
+- If the workbook is new or has changed, QA reports a missing or stale cache. Run
+  ingestion again before retrying.
+
+#### Example: One workbook and one query
+
+```bash
+uv run table-agent --config config.yaml --stage qa \
+  --workbook sample/QA_sample.xlsx \
+  --query "What is the total revenue?"
+```
+
+#### Output
+
+The CLI prints a JSON result with the answer and supporting execution details:
+
+```json
+{
+  "job_id": "<job-id>",
+  "stage": "qa",
+  "workbooks": ["QA_sample.xlsx"],
+  "structures": [
+    {
+      "workbook": "QA_sample.xlsx",
+      "sheet": "Summary",
+      "status": "good",
+      "cache_hit": true,
+      "structure": "<cached structure>",
+      "artifact": "workbooks/QA_sample.xlsx/Summary/structure.yaml"
+    }
+  ],
+  "schema_artifacts": [
+    {
+      "workbook": "QA_sample.xlsx",
+      "artifact": "workbooks/QA_sample.xlsx/schema.yaml"
+    }
+  ],
+  "metadata_artifacts": [
+    {
+      "workbook": "QA_sample.xlsx",
+      "artifact": "workbooks/QA_sample.xlsx/metadata.json"
+    }
+  ],
+  "answers": [
+    {
+      "query": "What is the total revenue?",
+      "answer": "<answer>",
+      "latency": 0.0,
+      "token_usage": {},
+      "workbook": "QA_sample.xlsx",
+      "sheets": ["Summary"],
+      "verification": {},
+      "retrieval": {},
+      "qa": {}
+    }
+  ],
+  "artifacts": [
+    "workbooks/QA_sample.xlsx/Summary/structure.yaml",
+    "workbooks/QA_sample.xlsx/schema.yaml",
+    "workbooks/QA_sample.xlsx/metadata.json"
+  ]
+}
+```
+
+The exact values depend on the workbook, retrieval result, and model response.
+Cached per-sheet structures and the selected workbook artifacts are copied into the
+job directory. As with ingestion, omitting both output flags generates both
+`schema.yaml` and `metadata.json`.
+
+#### Available flags
+
+| Flag | Description |
+| --- | --- |
+| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
+| `--stage qa` | Runs QA against cached structures. |
+| `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
+| `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
+| `--schema` | Includes only the workbook schema unless `--metadata` is also supplied. |
+| `--metadata` | Includes only workbook metadata unless `--schema` is also supplied. |
+| `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
+| `--llm NAME` | Overrides the configured answer LLM profile. |
+
+The `--vlm` option is accepted by the CLI but is not used during the `qa` stage.
 
 ### Run End-To-End
 
-Run the `all` stage to ensure structures exist and then answer the question in one
-command:
+Run the `all` stage to ingest the workbook when needed and answer the question in
+one command:
 
 ```bash
 uv run table-agent --config config.yaml --stage all --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
@@ -122,12 +300,7 @@ uv run table-agent --config config.yaml --stage all --workbook sample/QA_sample.
 
 This stage requires both the layout VLM and answer LLM.
 
-Repeat `--workbook` to process multiple workbooks and repeat `--query` to ask
-multiple questions. Select a different configured model profile with `--llm NAME`
-or `--vlm NAME`. Run `uv run table-agent --help` for the complete CLI reference.
-
-Supported workbook extensions are `.xls`, `.xlsx`, `.xlsm`, `.xltx`, and `.xltm`.
-Each run is saved under `service.root_dir/jobs/<job-id>/`, including `run.json`.
+Run `uv run table-agent --help` for the complete CLI reference.
 
 ## Serve The API
 
@@ -142,9 +315,13 @@ Submit a workbook and wait for an end-to-end result:
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/jobs/upload?wait=true" \
   -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"all","queries":["What is the total revenue?"]}' \
+  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"schema":true,"metadata":true,"sheets":["Summary,Detail"]}' \
   -F "files=@sample/QA_sample.xlsx"
 ```
+
+Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `schema`, `metadata`, and
+`sheets`. When both booleans are false or omitted, the service generates both
+workbook artifacts. Sheet list entries may contain comma-separated names.
 
 Omit `X-API-Key` when `service.api_key` is empty. Without `wait=true`, poll
 `GET /v1/jobs/{job_id}`. Generated files are available through
