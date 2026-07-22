@@ -7,19 +7,23 @@ requires-python = ">=3.13"
 dependencies = [
     "beautifulsoup4>=4.14.3",
     "exstruct>=0.8.1",
+    "fastapi>=0.116.0",
     "nbformat>=5.10.0",
     "numpy>=2.0.0",
     "openpyxl>=3.1.0",
     "pandas>=3.0.0",
     "pillow>=10.0.0",
     "pypdfium2>=4.30.0",
+    "python-multipart>=0.0.20",
     "pyyaml>=6.0.3",
     "requests>=2.32.0",
+    "uvicorn>=0.35.0",
     "xlrd>=2.0.1",
 ]
 
 [project.scripts]
 table2img = "table2img.cli:main"
+table-agent-api = "TableAgent.server:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -27,6 +31,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.0",
     "pytest>=9.0.0",
 ]
 
@@ -47,4 +52,3 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "table2img/tests"]
-

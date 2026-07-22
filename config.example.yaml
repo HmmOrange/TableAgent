@@ -1,3 +1,29 @@
+llm:
+  provider: "answer_model"
+
+vlm:
+  provider: "layout_model"
+
+models:
+  answer_model:
+    provider: "openai_compatible"
+    base_url: "${TABLE_AGENT_LLM_BASE_URL:-http://localhost:8000/v1}"
+    model: "${TABLE_AGENT_LLM_MODEL:-your-answer-model}"
+    api_key: "${TABLE_AGENT_LLM_API_KEY:-EMPTY}"
+    temperature: 0.0
+    max_tokens: null
+    timeout_seconds: 180
+
+vlm_models:
+  layout_model:
+    provider: "openai_compatible"
+    base_url: "${TABLE_AGENT_VLM_BASE_URL:-http://localhost:8000/v1}"
+    model: "${TABLE_AGENT_VLM_MODEL:-your-vision-model}"
+    api_key: "${TABLE_AGENT_VLM_API_KEY:-EMPTY}"
+    temperature: 0.0
+    max_tokens: null
+    timeout_seconds: 180
+
 table_agent:
   phase: "all"
   structure_cache_dir: "cache/table_agent/structure"
@@ -42,3 +68,10 @@ table_agent:
   retrieval_lexical_weight: 0.5
   retrieval_embedding_weight: 0.5
 
+service:
+  root_dir: "outputs/table_agent/service"
+  max_workers: 1
+  max_upload_mb: 100
+  api_key: "${TABLE_AGENT_SERVICE_API_KEY:-}"
+  allow_local_paths: false
+  allowed_input_roots: []

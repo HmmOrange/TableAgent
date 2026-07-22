@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from configs import DEFAULT_CONFIG_PATH, load_config
+from TableAgent import create_model_client
 from TableAgent.QA import TableQARunner
 
 
@@ -36,8 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument(
         "--llm-profile",
-        default="direct_llm",
-        help="Config pipeline/provider name passed to initialize_llm.",
+        default="table_agent",
+        help="Config pipeline/provider name passed to create_model_client.",
     )
     parser.add_argument(
         "--table-id",
@@ -82,13 +83,11 @@ def _leaked_header_ids(answer: str | None, headers: list[dict[str, str]]) -> lis
 
 def main() -> int:
     args = build_parser().parse_args()
-    from cli import initialize_llm
-
     config = load_config(args.config)
     if args.table_id:
         config.setdefault("table_agent", {})["table_id"] = args.table_id
 
-    llm_client = initialize_llm(config, args.llm_profile)
+    llm_client = create_model_client(config, kind="llm", profile=args.llm_profile)
     runner = TableQARunner(
         args.structure,
         args.workbook,

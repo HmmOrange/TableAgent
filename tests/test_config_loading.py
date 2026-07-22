@@ -6,45 +6,46 @@ import yaml
 from configs import load_config, resolve_llm_config, resolve_vlm_config
 from TableAgent.configs import TableAgentConfig
 
+CONFIG_PATH = Path("config.example.yaml")
+
 
 def test_root_config_loads_all_sections():
-    config = load_config("config.yaml")
+    config = load_config(CONFIG_PATH)
 
-    assert "datasets" in config
-    assert "gpt_oss" in config["models"]
-    assert "gemma4_vlm" in config["vlm_models"]
+    assert "service" in config
+    assert "answer_model" in config["models"]
+    assert "layout_model" in config["vlm_models"]
     provider_name, _ = resolve_vlm_config(config, "table_agent")
-    assert provider_name == "qwen_local_vlm"
+    assert provider_name == "layout_model"
 
 
 def test_root_config_contains_pipeline_and_dataset_settings():
-    root_payload = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
-    config = load_config("config.yaml")
+    root_payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    config = load_config(CONFIG_PATH)
 
-    assert "datasets" in root_payload
+    assert "service" in root_payload
     assert "table_agent" in root_payload
-    assert config["datasets"]["hitab"]["xlsx_dir"] == "data/HiTab_xlsx"
     assert config["table_agent"]["generation_max_tokens"] == 8192
 
     provider_name, _ = resolve_vlm_config(config, "table_agent")
-    assert provider_name == "qwen_local_vlm"
+    assert provider_name == "layout_model"
 
 
 def test_table_agent_root_config_applies_pipeline_generation_cap():
-    config = load_config("config.yaml")
+    config = load_config(CONFIG_PATH)
 
     llm_provider_name, llm_config = resolve_llm_config(config, "table_agent")
     vlm_provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
 
-    assert llm_provider_name == "qwen_local"
+    assert llm_provider_name == "answer_model"
     assert llm_config["max_tokens"] is None
-    assert vlm_provider_name == "qwen_local_vlm"
+    assert vlm_provider_name == "layout_model"
     assert vlm_config["max_tokens"] is None
     assert config["table_agent"]["generation_max_tokens"] == 8192
 
 
 def test_table_agent_phase_is_named_structure():
-    table_agent_config = dict(load_config("config.yaml")["table_agent"])
+    table_agent_config = dict(load_config(CONFIG_PATH)["table_agent"])
     table_agent_config["phase"] = "structure"
 
     assert TableAgentConfig.from_config(table_agent_config).phase == "structure"
@@ -55,27 +56,27 @@ def test_table_agent_phase_is_named_structure():
 
 
 def test_resolve_vlm_provider_from_vlm_models():
-    config = load_config("config.yaml")
+    config = load_config(CONFIG_PATH)
 
     provider_name, vlm_config = resolve_vlm_config(config, "table_agent")
 
-    assert provider_name == "qwen_local_vlm"
-    assert vlm_config["base_url"] == "http://localhost:8010/v1"
+    assert provider_name == "layout_model"
+    assert vlm_config["base_url"] == "http://localhost:8000/v1"
 
 
 def test_resolve_llm_provider_from_root_config():
-    config = load_config("config.yaml")
+    config = load_config(CONFIG_PATH)
 
     provider_name, llm_config = resolve_llm_config(config, "table_agent")
 
-    assert provider_name == "qwen_local"
-    assert llm_config["base_url"] == "http://localhost:8010/v1"
+    assert provider_name == "answer_model"
+    assert llm_config["base_url"] == "http://localhost:8000/v1"
 
 
 def test_resolve_vlm_config_direct_lookup():
-    config = load_config("config.yaml")
-    provider_name, vlm_config = resolve_vlm_config(config, "gemma4_vlm")
-    assert provider_name == "gemma4_vlm"
+    config = load_config(CONFIG_PATH)
+    provider_name, vlm_config = resolve_vlm_config(config, "layout_model")
+    assert provider_name == "layout_model"
 
 
 def test_resolve_llm_fallback_to_top_level():

@@ -199,7 +199,7 @@ def fake_libreoffice_workbook_render(monkeypatch, tmp_path):
     real_from_config = TableAgentConfig.from_config
 
     def resolved_config(config=None):
-        merged = dict(load_config()["table_agent"])
+        merged = dict(load_config("config.example.yaml")["table_agent"])
         explicit = config or {}
         if "table_agent" in explicit:
             explicit = explicit["table_agent"]

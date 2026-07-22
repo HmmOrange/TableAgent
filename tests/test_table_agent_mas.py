@@ -81,7 +81,7 @@ def _patch_libreoffice_workbook_render(monkeypatch):
 def _settings(tmp_path: Path, **override) -> TableAgentConfig:
     from configs import load_config
     from TableAgent.configs import run_scoped_table_agent_config
-    config = load_config()
+    config = load_config("config.example.yaml")
     settings = run_scoped_table_agent_config(config, "test")
     settings.update({
         "artifact_dir": str(tmp_path),

@@ -14,18 +14,12 @@ From the repository root:
 
 ```bash
 uv sync
-uv run ise-table --dataset hitab --pipeline table_agent --limit 5 --repeats 1
-uv run ise-table --dataset mulhi --pipeline table_agent --limit 5 --repeats 1
-uv run ise-table --dataset siflex --pipeline table_agent --limit 5 --repeats 1
+Copy-Item config.example.yaml config.yaml
+uv run table-agent-api --config config.yaml
 ```
 
-TableAgent exposes three phases:
-
-```bash
-uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase structure --limit 5
-uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase qa --limit 5
-uv run ise-table --dataset hitab --pipeline table_agent --table-agent-phase all --limit 5
-```
+The public API exposes three stages: `structure`, `qa`, and `all`. See the root
+`README.md` for upload, status, and artifact endpoint examples.
 
 `structure` builds caches without an answer LLM, `qa` reuses valid caches without a
 layout VLM, and `all` forces structure generation before QA.
@@ -61,10 +55,10 @@ TableAgent/
 
 Code outside this package still participates in the pipeline:
 
-- [`../registry.py`](../registry.py) creates the answer LLM and layout VLM, then applies
-  benchmark-run artifact scoping.
-- [`../cli/__init__.py`](../cli/__init__.py) calls `set_run_id()`, `prepare_samples()`,
-  and `run()` during evaluation.
+- [`../TableAgent/service.py`](../TableAgent/service.py) provides the reusable workbook
+  and query service used by the HTTP API.
+- [`../TableAgent/clients.py`](../TableAgent/clients.py) provides the default
+  OpenAI-compatible answer and layout clients; custom clients remain injectable.
 - [`prompts/`](prompts/) contains separate modules for structure, answer, reranker,
   planner, ReAct, review, and synthesis prompts.
 - [`../utils/workbook_converter.py`](../utils/workbook_converter.py) normalizes benchmark
@@ -292,10 +286,10 @@ When changing a prompt:
 
 ## Configuration
 
-All dataset, pipeline, and model settings live in the root
-[`../config.yaml`](../config.yaml). YAML includes are not supported. The CLI loads the
-file once, passes the resolved `table_agent` section into `TableAgentConfig`, and then
-injects run-scoped QA artifact directories.
+Pipeline defaults live in the public [`../config.example.yaml`](../config.example.yaml).
+Copy it to the ignored root `config.yaml` and set model endpoints/keys through
+environment variables or that private file. YAML includes are not supported. The
+service scopes cache and artifact directories per installation.
 
 Key settings:
 
@@ -430,7 +424,7 @@ Keep changes surgical and place them at the narrowest ownership boundary:
 - Change source indexing or candidate scoring in `pipeline/retrieval.py`.
 - Change SiFlex preprocessing and cache behavior in `pipeline/source_preparer.py`.
 - Change workbook/image behavior in `rendering/`.
-- Add pipeline settings to `TableAgentConfig` and the root `config.yaml`.
+- Add pipeline settings to `TableAgentConfig` and the root `config.example.yaml`.
 
 For behavior changes, test the observable contract rather than private implementation
 details. Useful existing coverage includes:

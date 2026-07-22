@@ -21,7 +21,7 @@ def resolved_table_agent_config(monkeypatch):
     real_from_config = TableAgentConfig.from_config
 
     def resolve(config=None):
-        merged = dict(load_config()["table_agent"])
+        merged = dict(load_config("config.example.yaml")["table_agent"])
         explicit = config or {}
         if "table_agent" in explicit:
             explicit = explicit["table_agent"]

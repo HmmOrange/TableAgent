@@ -146,7 +146,7 @@ def resolve_table_agent_run_roots(
 
 def _required(config: dict[str, Any], key: str) -> Any:
     if key not in config:
-        raise KeyError(f"Missing table_agent.{key}; configure it in ./config.yaml")
+        raise KeyError(f"Missing table_agent.{key}; copy config.example.yaml to config.yaml and configure it")
     return config[key]
 
 

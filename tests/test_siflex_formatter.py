@@ -34,7 +34,7 @@ def resolved_table_agent_config(monkeypatch, tmp_path):
     real_from_config = TableAgentConfig.from_config
 
     def resolve(config=None):
-        merged = dict(load_config()["table_agent"])
+        merged = dict(load_config("config.example.yaml")["table_agent"])
         explicit = config or {}
         if "table_agent" in explicit:
             explicit = explicit["table_agent"]
@@ -205,8 +205,8 @@ def test_prepared_siflex_pipeline_returns_formatter_agent_answer(tmp_path, monke
 )
 def test_live_structure_sheet_q1_qa_and_formatter():
     """Run the real SIFLEX Q1 workbook through QA and the formatter agent."""
-    from cli import initialize_llm
     from configs import load_config
+    from TableAgent import create_model_client
     from TableAgent.QA import TableQARunner
 
     root = Path(__file__).resolve().parents[1]
@@ -230,7 +230,7 @@ def test_live_structure_sheet_q1_qa_and_formatter():
 
     config = load_config(root / "config.yaml")
     config["qa_console_progress"] = True
-    llm = initialize_llm(config, "direct_llm")
+    llm = create_model_client(config, kind="llm", profile="table_agent")
     runner = TableQARunner(
         structure_path=str(structure_path),
         workbook_path=str(workbook_path),
