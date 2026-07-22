@@ -317,7 +317,7 @@ def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
     assert "retrieval_info" not in output.metadata
 
 
-def test_table_agent_all_phase_does_not_abort_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
+def test_table_agent_all_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
     from TableAgent.pipeline.structure_cache import StructureCacheRecord
 
     sample = EvalSample(
@@ -351,7 +351,8 @@ def test_table_agent_all_phase_does_not_abort_on_invalid_prepared_cache(tmp_path
     )
     monkeypatch.setattr(pipeline, "verify_samples", lambda samples, force=True: [invalid])
 
-    pipeline.prepare_samples([sample])
+    with pytest.raises(RuntimeError, match="verification failed for 1 cache entries"):
+        pipeline.prepare_samples([sample])
 
 
 def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
@@ -1163,7 +1164,7 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
 
     assert Path(first_output.metadata["structure_path"]) == Path(third_output.metadata["structure_path"])
     assert first_output.metadata["cache_key"] == third_output.metadata["cache_key"]
-    assert pipeline.settings.source_artifact_dir == Path("cache/table_agent/structure/v1/prepared")
+    assert pipeline.settings.source_artifact_dir == Path("cache/table_agent/structure/v5/prepared")
 
 
 def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
@@ -1186,8 +1187,8 @@ def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
         renderer=FakeRenderer(),
     )
 
-    assert siflex.structure_cache.root == cache_dir / "v1" / "datasets" / "siflex"
-    assert realhitbench.structure_cache.root == cache_dir / "v1" / "datasets" / "realhitbench"
+    assert siflex.structure_cache.root == cache_dir / "v5" / "datasets" / "siflex"
+    assert realhitbench.structure_cache.root == cache_dir / "v5" / "datasets" / "realhitbench"
     assert siflex.structure_cache.root != realhitbench.structure_cache.root
 
 

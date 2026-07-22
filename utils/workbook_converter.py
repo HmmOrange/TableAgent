@@ -53,6 +53,12 @@ def _write_sample(workbook: Workbook, sample: EvalSample) -> str:
         _write_rows(sheet, table.rows, table.merged_regions)
         return "html"
 
+    if "\\begin{tabular}" in content:
+        rows = latex_table_to_rows(sample.table_content)
+        sheet = workbook.create_sheet(_sheet_title(sample.table_id or "Table"))
+        _write_rows(sheet, rows, [])
+        return "latex"
+
     try:
         payload = json.loads(sample.table_content)
     except json.JSONDecodeError:
@@ -222,6 +228,191 @@ def _plain_text_to_rows(content: str) -> list[list[str]]:
             if not re.fullmatch(r"\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*", line)
         ]
     return [[line] for line in lines]
+
+
+def latex_table_to_rows(content: str) -> list[list[str]]:
+    """Parse RealHiTBench's generated LaTeX tabular data into plain rows."""
+    body = _outer_tabular_body(content)
+    if body is None:
+        return _plain_text_to_rows(content)
+
+    rows: list[list[str]] = []
+    for raw_cells in _split_latex_tabular(body):
+        row: list[str] = []
+        for raw_cell in raw_cells:
+            span = _latex_multicolumn_span(raw_cell)
+            row.append(_clean_latex_cell(raw_cell))
+            row.extend([""] * (span - 1))
+        if any(cell.strip() for cell in row):
+            rows.append(row)
+    return _rectangularize(rows)
+
+
+def _outer_tabular_body(content: str) -> str | None:
+    match = re.search(r"\\begin\{tabular\}(?:\[[^\]]*\])?\{", content)
+    if match is None:
+        return None
+
+    column_spec_end = _matching_brace(content, match.end() - 1)
+    if column_spec_end is None:
+        return None
+    body_start = column_spec_end + 1
+    depth = 1
+    position = body_start
+    begin_token = r"\begin{tabular}"
+    end_token = r"\end{tabular}"
+    while position < len(content):
+        next_begin = content.find(begin_token, position)
+        next_end = content.find(end_token, position)
+        if next_end == -1:
+            return None
+        if next_begin != -1 and next_begin < next_end:
+            depth += 1
+            position = next_begin + len(begin_token)
+            continue
+        depth -= 1
+        if depth == 0:
+            return content[body_start:next_end]
+        position = next_end + len(end_token)
+    return None
+
+
+def _matching_brace(text: str, start: int) -> int | None:
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{" and (index == 0 or text[index - 1] != "\\"):
+            depth += 1
+        elif text[index] == "}" and (index == 0 or text[index - 1] != "\\"):
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _split_latex_tabular(body: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    row: list[str] = []
+    cell: list[str] = []
+    nested_depth = 0
+    position = 0
+    begin_token = r"\begin{tabular}"
+    end_token = r"\end{tabular}"
+
+    while position < len(body):
+        if body.startswith(begin_token, position):
+            nested_depth += 1
+            column_match = re.match(r"\\begin\{tabular\}(?:\[[^\]]*\])?\{", body[position:])
+            if column_match is None:
+                position += len(begin_token)
+                continue
+            column_start = position + column_match.end() - 1
+            column_end = _matching_brace(body, column_start)
+            position = (column_end + 1) if column_end is not None else position + column_match.end()
+            continue
+        if body.startswith(end_token, position):
+            nested_depth = max(0, nested_depth - 1)
+            position += len(end_token)
+            continue
+        if body.startswith(r"\\", position):
+            if nested_depth == 0:
+                row.append("".join(cell))
+                rows.append(row)
+                row = []
+                cell = []
+            else:
+                cell.append(" ")
+            position += 2
+            continue
+        if body[position] == "&" and nested_depth == 0 and (position == 0 or body[position - 1] != "\\"):
+            row.append("".join(cell))
+            cell = []
+            position += 1
+            continue
+        cell.append(body[position])
+        position += 1
+
+    if cell or row:
+        row.append("".join(cell))
+        rows.append(row)
+    return rows
+
+
+def _latex_multicolumn_span(cell: str) -> int:
+    match = re.search(r"\\multicolumn\{(\d+)\}", cell)
+    return max(1, int(match.group(1))) if match else 1
+
+
+def _clean_latex_cell(cell: str) -> str:
+    text = re.sub(r"\\(?:toprule|midrule|bottomrule|hline|cline\{[^}]*\})", "", cell)
+    text = re.sub(r"\\rowcolor(?:\[[^\]]*\])?\{[^}]*\}", "", text)
+    text = re.sub(r"\\cellcolor(?:\[[^\]]*\])?\{[^}]*\}", "", text)
+    text = re.sub(r"\\color(?:\[[^\]]*\])?\{[^}]*\}", "", text)
+
+    text = _unwrap_latex_commands(text)
+
+    replacements = {
+        r"\&": "&",
+        r"\%": "%",
+        r"\$": "$",
+        r"\#": "#",
+        r"\_": "_",
+        r"\{": "{",
+        r"\}": "}",
+        "{[}": "[",
+        "{]}": "]",
+        "~": " ",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"\\[A-Za-z]+(?:\[[^\]]*\])?", "", text)
+    text = text.replace("{", "").replace("}", "")
+    return " ".join(text.split())
+
+
+def _unwrap_latex_commands(text: str) -> str:
+    arities = {
+        "multicolumn": 3,
+        "multirow": 3,
+        "textbf": 1,
+        "textit": 1,
+        "emph": 1,
+        "underline": 1,
+        "textsuperscript": 1,
+        "textsubscript": 1,
+    }
+    output: list[str] = []
+    position = 0
+    while position < len(text):
+        if text[position] != "\\":
+            output.append(text[position])
+            position += 1
+            continue
+
+        command_match = re.match(r"\\([A-Za-z]+)", text[position:])
+        if command_match is None:
+            output.append(text[position])
+            position += 1
+            continue
+        command = command_match.group(1)
+        position += command_match.end()
+        arity = arities.get(command)
+        if arity is None:
+            continue
+
+        arguments: list[str] = []
+        for _ in range(arity):
+            while position < len(text) and text[position].isspace():
+                position += 1
+            if position >= len(text) or text[position] != "{":
+                break
+            end = _matching_brace(text, position)
+            if end is None:
+                break
+            arguments.append(_unwrap_latex_commands(text[position + 1:end]))
+            position = end + 1
+        if arguments:
+            output.append(arguments[-1])
+    return "".join(output)
 
 
 def _rectangularize(rows: Any) -> list[list[Any]]:
