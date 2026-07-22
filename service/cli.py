@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"table-agent: error: {exc}", file=sys.stderr)
         return 1
 
+    stdout_encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if stdout_encoding != "utf8" and callable(reconfigure):
+        reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 

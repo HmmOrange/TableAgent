@@ -104,3 +104,38 @@ def test_cli_reports_expected_runtime_errors(monkeypatch, capsys):
 
     assert result == 1
     assert "Config file not found: missing.yaml" in capsys.readouterr().err
+
+
+def test_cli_reconfigures_stdout_for_unicode_json(monkeypatch):
+    class EncodedStdout:
+        def __init__(self):
+            self.encoding = "cp1252"
+            self.parts = []
+
+        def reconfigure(self, *, encoding):
+            self.encoding = encoding
+
+        def write(self, value):
+            value.encode(self.encoding)
+            self.parts.append(value)
+
+        def flush(self):
+            pass
+
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(path, **kwargs):
+            return FakeTableAgentService()
+
+        def run(self, **kwargs):
+            return {"answer": "Nguyen Thi H\u1ef1u"}
+
+    stdout = EncodedStdout()
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+    monkeypatch.setattr(cli.sys, "stdout", stdout)
+
+    result = cli.main(["--stage", "structure", "--workbook", "book.xlsx"])
+
+    assert result == 0
+    assert stdout.encoding == "utf-8"
+    assert json.loads("".join(stdout.parts))["answer"] == "Nguyen Thi H\u1ef1u"
