@@ -76,6 +76,13 @@ Start the HTTP service from the repository root:
 uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 8000
 ```
 
+The top-level `llm.provider` and `vlm.provider` values are used by default. Override
+either selection with a configured profile name when starting the server:
+
+```bash
+uv run table-agent-api --config config.yaml --llm answer_model --vlm layout_model
+```
+
 For an installation without the generated console script:
 
 ```bash

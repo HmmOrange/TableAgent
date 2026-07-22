@@ -35,6 +35,7 @@ class OpenAICompatibleLLM(BaseLLM):
         max_retries: int = 2,
         retry_delay_seconds: float = 1,
         extra_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
         session: requests.Session | None = None,
     ):
         super().__init__(model_name=model_name, temperature=temperature)
@@ -45,6 +46,7 @@ class OpenAICompatibleLLM(BaseLLM):
         self.max_retries = max(0, max_retries)
         self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.extra_headers = dict(extra_headers or {})
+        self.extra_body = dict(extra_body or {})
         self.session = session or requests.Session()
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
@@ -84,6 +86,7 @@ class OpenAICompatibleLLM(BaseLLM):
         }
         if self.max_tokens is not None:
             payload["max_tokens"] = self.max_tokens
+        payload.update(self.extra_body)
 
         headers = {"Content-Type": "application/json", **self.extra_headers}
         if self.api_key:
@@ -110,14 +113,26 @@ class OpenAICompatibleLLM(BaseLLM):
         response.raise_for_status()
         data = response.json()
         try:
-            content = _content_text(data["choices"][0]["message"]["content"])
+            choice = data["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("Model response is missing choices[0].message.content") from exc
+            raise ValueError("Model response is missing choices[0].message") from exc
+        content = _content_text(
+            message.get("content")
+            or message.get("reasoning")
+            or message.get("reasoning_content")
+        )
         usage = data.get("usage") or {}
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+        token_capped = (
+            str(choice.get("finish_reason") or "").lower() == "length"
+            or (self.max_tokens is not None and completion_tokens >= self.max_tokens)
+        )
         return LLMResponse(
             content=content,
             prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            completion_tokens=completion_tokens,
+            token_capped=token_capped,
         )
 
     def close(self) -> None:
@@ -165,10 +180,13 @@ def create_model_client(
         max_retries=int(model_config.get("max_retries", 2)),
         retry_delay_seconds=float(model_config.get("retry_delay_seconds", 1)),
         extra_headers=model_config.get("headers"),
+        extra_body=model_config.get("extra_body"),
     )
 
 
 def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):

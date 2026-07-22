@@ -123,3 +123,26 @@ def test_local_paths_are_disabled_by_default(tmp_path: Path):
         assert "disabled" in str(exc)
     else:
         raise AssertionError("Expected local paths to be disabled")
+
+
+def test_service_uses_explicit_model_profiles(monkeypatch, tmp_path: Path):
+    calls = []
+
+    def fake_create_model_client(config, *, kind, profile):
+        calls.append((kind, profile))
+        return object()
+
+    monkeypatch.setattr("service.runtime.create_model_client", fake_create_model_client)
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_profile="alternate_answer",
+        vlm_profile="alternate_layout",
+    )
+
+    service._answer_client()
+    service._layout_client()
+
+    assert calls == [
+        ("llm", "alternate_answer"),
+        ("vlm", "alternate_layout"),
+    ]

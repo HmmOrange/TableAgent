@@ -34,6 +34,8 @@ class TableAgentService:
         *,
         llm_client: Any | None = None,
         layout_vlm_client: Any | None = None,
+        llm_profile: str | None = None,
+        vlm_profile: str | None = None,
         root_dir: str | Path | None = None,
         pipeline_factory: Callable[..., TableAgentPipeline] = TableAgentPipeline,
     ):
@@ -58,6 +60,8 @@ class TableAgentService:
         )
         self._llm_client = llm_client
         self._layout_vlm_client = layout_vlm_client
+        self.llm_profile = llm_profile or "table_agent"
+        self.vlm_profile = vlm_profile or "table_agent"
         self.pipeline_factory = pipeline_factory
 
     @classmethod
@@ -168,12 +172,20 @@ class TableAgentService:
 
     def _answer_client(self) -> Any:
         if self._llm_client is None:
-            self._llm_client = create_model_client(self.config, kind="llm")
+            self._llm_client = create_model_client(
+                self.config,
+                kind="llm",
+                profile=self.llm_profile,
+            )
         return self._llm_client
 
     def _layout_client(self) -> Any:
         if self._layout_vlm_client is None:
-            self._layout_vlm_client = create_model_client(self.config, kind="vlm")
+            self._layout_vlm_client = create_model_client(
+                self.config,
+                kind="vlm",
+                profile=self.vlm_profile,
+            )
         return self._layout_vlm_client
 
     def _pipeline_config(self, phase: Stage, job_dir: Path) -> dict[str, Any]:
