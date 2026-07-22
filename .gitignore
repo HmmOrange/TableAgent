@@ -15,3 +15,5 @@ __pycache__/
 config.yaml
 
 /data/
+
+.vscode
