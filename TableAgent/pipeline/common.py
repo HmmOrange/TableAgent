@@ -27,11 +27,6 @@ class SourceCandidate:
     table_id: str = ""
     table_name: str = ""
     table_description: str = ""
-    entity_score: float = 0.0
-    matched_terms: tuple[str, ...] = ()
-    missing_terms: tuple[str, ...] = ()
-    retrieval_rank: int = 0
-    retrieval_audit: tuple[dict[str, Any], ...] = ()
 
 
 def safe_name(value: str) -> str:

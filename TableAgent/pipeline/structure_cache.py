@@ -18,7 +18,7 @@ from TableAgent.prompts.structure import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_US
 from TableAgent.structure.layout.workflow import TableLayoutWorkflow
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 5
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 

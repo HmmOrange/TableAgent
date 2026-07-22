@@ -48,8 +48,6 @@ class TableAgentConfig:
     retrieval_embedding_provider: str | None
     retrieval_lexical_weight: float
     retrieval_embedding_weight: float
-    retrieval_entity_weight: float
-    retrieval_audit_top_k: int
 
 
     @classmethod
@@ -99,8 +97,6 @@ class TableAgentConfig:
             retrieval_embedding_provider=merged.get("retrieval_embedding_provider"),
             retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.5)),
             retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.5)),
-            retrieval_entity_weight=float(merged.get("retrieval_entity_weight", 2.0)),
-            retrieval_audit_top_k=int(merged.get("retrieval_audit_top_k", 10)),
         )
 
 
@@ -129,7 +125,7 @@ def run_scoped_table_agent_config(config: dict[str, Any], run_name: str) -> dict
     agent_config.update({
         "artifact_dir": str(run_artifact_dir / repeat_dir_template.format(run_id=1)),
         "run_artifact_dir": str(run_artifact_dir),
-        "source_artifact_dir": str(structure_cache_dir / "v1" / "prepared"),
+        "source_artifact_dir": str(structure_cache_dir / "v5" / "prepared"),
         "repeat_dir_template": repeat_dir_template,
     })
     return agent_config

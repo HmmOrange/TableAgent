@@ -122,13 +122,7 @@ class TableAgentPipeline(BasePipeline):
         records = self.verify_samples(samples, force=self.settings.phase == "all")
         failed = [record for record in records if not record.valid]
         if failed:
-            message = f"TableAgent verification failed for {len(failed)} cache entries"
-            if self.settings.phase == "structure":
-                raise RuntimeError(message)
-            active_logger = logger if logger is not None else globals().get("logger")
-            log_warning = getattr(active_logger, "warning", None)
-            if callable(log_warning):
-                log_warning("%s; continuing and letting per-sample QA handle failures", message)
+            raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
 
     def verify_samples(self, samples: list[EvalSample], *, force: bool = True) -> list[StructureCacheRecord]:
         siflex_samples = [sample for sample in samples if is_siflex(sample) and self.settings.run_retrieval]
@@ -490,11 +484,6 @@ class TableAgentPipeline(BasePipeline):
             "lexical_score": getattr(candidate, "lexical_score", candidate.score),
             "embedding_score": getattr(candidate, "embedding_score", 0.0),
             "embedding_used": getattr(candidate, "embedding_used", False),
-            "entity_score": getattr(candidate, "entity_score", 0.0),
-            "matched_terms": list(getattr(candidate, "matched_terms", ())),
-            "missing_terms": list(getattr(candidate, "missing_terms", ())),
-            "retrieval_rank": getattr(candidate, "retrieval_rank", 0),
-            "retrieval_audit": list(getattr(candidate, "retrieval_audit", ())),
             "fallback_used": getattr(candidate, "fallback_used", False),
             "table_id": getattr(candidate, "table_id", ""),
             "table_name": getattr(candidate, "table_name", ""),
