@@ -89,6 +89,21 @@ For an installation without the generated console script:
 python -m service.server --config config.yaml
 ```
 
+### Command-Line Flags
+
+The `table-agent-api` console script and `python -m service.server` accept the same
+flags:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-h`, `--help` | — | Show the command help and exit |
+| `--config CONFIG` | `config.yaml` | Path to the private service configuration file |
+| `--llm LLM` | Configured default | Select a configured answer-model profile |
+| `--vlm VLM` | Configured default | Select a configured layout-model profile |
+| `--host HOST` | `127.0.0.1` | Network interface on which the API listens |
+| `--port PORT` | `8000` | TCP port on which the API listens |
+| `--log-level LOG_LEVEL` | `info` | Uvicorn log level, such as `critical`, `error`, `warning`, `info`, `debug`, or `trace` |
+
 ### Endpoints
 
 | Method | Path | Purpose |
