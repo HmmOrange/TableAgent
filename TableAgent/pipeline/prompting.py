@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datasets.base import EvalSample
+from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.pipeline.common import SourceCandidate, is_siflex

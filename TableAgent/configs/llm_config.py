@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from configs.models_config import available_models, normalize_model_config
+from TableAgent.configs.models_config import available_models, normalize_model_config
 
 
 def resolve_llm_config(config: dict[str, Any], name_or_pipeline: str) -> tuple[str, dict[str, Any]]:
@@ -21,7 +21,7 @@ def resolve_llm_config(config: dict[str, Any], name_or_pipeline: str) -> tuple[s
             
     # c) otherwise fall back to top-level llm.provider (or vlm.provider for VLM pipelines)
     if not provider_name:
-        if name_or_pipeline == "table2img_vlm" or name_or_pipeline.endswith("_vlm"):
+        if name_or_pipeline.endswith("_vlm"):
             vlm_section = config.get("vlm")
             if isinstance(vlm_section, dict):
                 provider_name = vlm_section.get("provider")
@@ -32,7 +32,7 @@ def resolve_llm_config(config: dict[str, Any], name_or_pipeline: str) -> tuple[s
             
     # d) raise a clear ValueError if no selection exists or the provider key is unknown
     if not provider_name:
-        if name_or_pipeline == "table2img_vlm" or name_or_pipeline.endswith("_vlm"):
+        if name_or_pipeline.endswith("_vlm"):
             raise ValueError(
                 f"No VLM provider selection exists for VLM pipeline '{name_or_pipeline}' and "
                 "no top-level default 'vlm.provider' is configured."
@@ -48,4 +48,3 @@ def resolve_llm_config(config: dict[str, Any], name_or_pipeline: str) -> tuple[s
         raise ValueError(f"LLM provider '{provider_name_str}' is unknown or not defined in model configurations.")
         
     return provider_name_str, normalize_model_config(models[provider_name_str])
-

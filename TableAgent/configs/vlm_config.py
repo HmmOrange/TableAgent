@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from configs.models_config import available_models, normalize_model_config
+from TableAgent.configs.models_config import available_models, normalize_model_config
 
 
 def resolve_vlm_config(
@@ -45,4 +45,3 @@ def resolve_vlm_config(
         raise ValueError(f"VLM provider '{provider_name_str}' is unknown or not defined in model configurations.")
         
     return provider_name_str, normalize_model_config(models[provider_name_str])
-

@@ -24,8 +24,7 @@ from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
 from TableAgent.structure.verification import DeterministicVerifier
 from TableAgent.structure.verification.checks import verify_structure
-from table2img.core import RenderResult
-from utils.llm.base import LLMResponse
+from TableAgent.llm import LLMResponse
 
 
 class StaticLayoutVLM:
@@ -57,19 +56,6 @@ class StaticLayoutVLM:
         }, sort_keys=False))
 
 
-class RecordingRenderer:
-    def __init__(self):
-        self.ranges = []
-
-    def __call__(self, document, image_path, **kwargs):
-        image_path = Path(image_path)
-        self.ranges.append(document)
-        image_path.write_bytes(b"viewport")
-        html_path = image_path.with_suffix(".html")
-        html_path.write_text(document.html, encoding="utf-8")
-        return RenderResult(image_path, html_path, 100, 80, Path("fake"))
-
-
 def _patch_libreoffice_workbook_render(monkeypatch):
     def fake_render(workbook_path, sheet_name, cell_range, image_path, **kwargs):
         image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +65,7 @@ def _patch_libreoffice_workbook_render(monkeypatch):
 
 
 def _settings(tmp_path: Path, **override) -> TableAgentConfig:
-    from configs import load_config
+    from TableAgent.configs import load_config
     from TableAgent.configs import run_scoped_table_agent_config
     config = load_config("config.example.yaml")
     settings = run_scoped_table_agent_config(config, "test")
@@ -831,8 +817,7 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path)
-    recording_renderer = RecordingRenderer()
-    renderer = WorkbookRenderer(settings, recording_renderer, logger=None)
+    renderer = WorkbookRenderer(settings, logger=None)
     workflow = TableLayoutWorkflow(
         settings,
         renderer,
@@ -868,7 +853,7 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path, monkeypatch):
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path, max_retry=2)
-    renderer = WorkbookRenderer(settings, RecordingRenderer(), logger=None)
+    renderer = WorkbookRenderer(settings, logger=None)
     workflow = TableLayoutWorkflow(
         settings,
         renderer,
@@ -902,7 +887,7 @@ def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path,
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path)
-    renderer = WorkbookRenderer(settings, RecordingRenderer(), logger=None)
+    renderer = WorkbookRenderer(settings, logger=None)
     workflow = TableLayoutWorkflow(
         settings,
         renderer,
@@ -953,7 +938,7 @@ def test_workflow_discards_vlm_suggested_empty_range(tmp_path: Path, monkeypatch
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path)
-    renderer = WorkbookRenderer(settings, RecordingRenderer(), logger=None)
+    renderer = WorkbookRenderer(settings, logger=None)
     workflow = TableLayoutWorkflow(
         settings,
         renderer,

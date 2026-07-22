@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from TableAgent.clients import OpenAICompatibleLLM, create_model_client
+from service.clients import OpenAICompatibleLLM, create_model_client
 
 
 class FakeResponse:

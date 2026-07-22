@@ -537,7 +537,7 @@ class FakeLLM:
         self.calls = []
 
     def generate(self, prompt: str, system_prompt: str = None) -> Any:
-        from utils.llm.base import LLMResponse
+        from TableAgent.llm import LLMResponse
         self.calls.append((prompt, system_prompt))
         if "Review whether this attempt" in prompt:
             return LLMResponse(content=_llm_json({
@@ -667,7 +667,7 @@ def test_llm_code_generation_repairs_invalid_json_response():
     from TableAgent.QA.actions.base_action import CodeGenerationRequest
     from TableAgent.QA.actions.llm_code_generation import LLMCodeGenerationAction
     from TableAgent.schema.subtask import SubTask
-    from utils.llm.base import LLMResponse
+    from TableAgent.llm import LLMResponse
 
     class RepairingLLM:
         def __init__(self):

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from datasets.base import EvalSample
-from utils.llm.base import LLMResponse
+from TableAgent.llm import LLMResponse
+from TableAgent.schema import EvalSample
 
 
 @dataclass(frozen=True)

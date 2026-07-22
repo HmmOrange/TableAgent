@@ -8,8 +8,8 @@ from typing import Any
 
 import requests
 
-from configs import resolve_llm_config, resolve_vlm_config
-from utils.llm.base import BaseLLM, LLMResponse
+from TableAgent.configs import resolve_llm_config, resolve_vlm_config
+from TableAgent.llm import BaseLLM, LLMResponse
 
 
 OPENAI_COMPATIBLE_PROVIDERS = {

@@ -36,16 +36,12 @@ table_agent:
   artifact_dir: "outputs/table_agent"
   max_refinement_rounds: 3
   max_context_chars: 60000
-  image_scale: 2.0
-  render_backend: "pillow"
   render_timeout_seconds: 60
   libreoffice_path: null
   libreoffice_image_resolution: 600
   workbook_show_coordinates: true
   generation_max_tokens: 8192
   max_image_dimension: 8192
-  max_viewport_width: 4096
-  max_viewport_height: 4096
   max_image_pixels: 33554432
   image_tile_size: null
   image_tile_overlap: 256

@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from datasets.base import EvalSample
-from utils.workbook_converter import sample_to_xlsx
+from TableAgent.rendering.converter import sample_to_xlsx
+from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import SheetMetadata
@@ -149,8 +149,6 @@ class StructureCache:
             "layout_prompt_sha256": hashlib.sha256(
                 (LAYOUT_MAS_SYSTEM_PROMPT + LAYOUT_MAS_USER_PROMPT_TEMPLATE).encode("utf-8")
             ).hexdigest(),
-            "render_backend": self.settings.render_backend,
-            "image_scale": self.settings.image_scale,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
 

@@ -17,16 +17,12 @@ class TableAgentConfig:
     repeat_dir_template: str
     max_refinement_rounds: int
     max_context_chars: int
-    image_scale: float
-    render_backend: str
     render_timeout_seconds: float
     libreoffice_path: Path | None
     libreoffice_image_resolution: int
     workbook_show_coordinates: bool
     generation_max_tokens: int | None
     max_image_dimension: int | None
-    max_viewport_width: int
-    max_viewport_height: int
     max_image_pixels: int | None
     image_tile_size: int | None
     image_tile_overlap: int
@@ -49,7 +45,6 @@ class TableAgentConfig:
     retrieval_lexical_weight: float
     retrieval_embedding_weight: float
 
-
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
         merged = table_agent_config_dict(config)
@@ -64,8 +59,6 @@ class TableAgentConfig:
             repeat_dir_template=str(merged.get("repeat_dir_template", "repeat_{run_id}")),
             max_refinement_rounds=int(_required(merged, "max_refinement_rounds")),
             max_context_chars=int(_required(merged, "max_context_chars")),
-            image_scale=float(_required(merged, "image_scale")),
-            render_backend=str(merged.get("render_backend", "auto")).strip().lower(),
             render_timeout_seconds=float(_required(merged, "render_timeout_seconds")),
             libreoffice_path=_optional_path(merged.get("libreoffice_path")),
             libreoffice_image_resolution=int(
@@ -74,8 +67,6 @@ class TableAgentConfig:
             workbook_show_coordinates=_bool(merged.get("workbook_show_coordinates", True)),
             generation_max_tokens=_optional_int(merged.get("generation_max_tokens")),
             max_image_dimension=_optional_int(merged.get("max_image_dimension")),
-            max_viewport_width=int(_required(merged, "max_viewport_width")),
-            max_viewport_height=int(_required(merged, "max_viewport_height")),
             max_image_pixels=_optional_int(merged.get("max_image_pixels")),
             image_tile_size=_optional_int(merged.get("image_tile_size")),
             image_tile_overlap=int(_required(merged, "image_tile_overlap")),

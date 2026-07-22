@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from utils.llm.base import BaseLLM, LLMResponse
+from TableAgent.llm import BaseLLM, LLMResponse
 
 
 SIFLEX_FORMATTER_SYSTEM_PROMPT = """You are the SIFLEX answer-formatting agent.

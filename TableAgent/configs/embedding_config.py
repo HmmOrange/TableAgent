@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from configs.models_config import available_models, normalize_model_config
+from TableAgent.configs.models_config import available_models, normalize_model_config
 
 
 def resolve_embedding_config(

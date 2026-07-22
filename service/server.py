@@ -4,7 +4,7 @@ import argparse
 
 import uvicorn
 
-from TableAgent.api import create_app
+from service.api import create_app
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
-from TableAgent.service import Stage, TableAgentService
+from service.runtime import Stage, TableAgentService
 
 
 class PathJobRequest(BaseModel):

@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import requests
 
-from configs.embedding_config import resolve_embedding_config
+from TableAgent.configs.embedding_config import resolve_embedding_config
 
 
 class MockEmbeddingModel:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from TableAgent.api import create_app
+from service.api import create_app
 
 
 class FakeService:

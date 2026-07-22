@@ -3,30 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-
-def compute_viewport_and_scale(
-    estimated_width: int,
-    estimated_height: int,
-    image_scale: float,
-    max_viewport_width: int,
-    max_viewport_height: int,
-    max_image_dimension: int | None,
-    max_image_pixels: int | None,
-) -> tuple[int, int, float]:
-    viewport_width = min(max(320, estimated_width), max_viewport_width)
-    viewport_height = min(max(240, estimated_height), max_viewport_height)
-    scale = image_scale
-
-    if max_image_dimension is not None and max(viewport_width, viewport_height) * scale > max_image_dimension:
-        scale = max_image_dimension / max(viewport_width, viewport_height)
-    if max_image_pixels is not None:
-        base_pixels = viewport_width * viewport_height
-        if base_pixels * (scale ** 2) > max_image_pixels:
-            scale = (max_image_pixels / base_pixels) ** 0.5
-
-    return viewport_width, viewport_height, max(0.1, scale)
-
-
 def _generate_image_tiles(
     image_path: Path,
     tile_size: int,

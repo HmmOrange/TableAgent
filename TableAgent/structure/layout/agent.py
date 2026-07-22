@@ -13,7 +13,7 @@ from TableAgent.prompts.structure import (
     LAYOUT_MAS_USER_PROMPT_TEMPLATE,
 )
 from TableAgent.agents.base import AgentMessage, BaseTableAgent
-from utils.llm.base import BaseLLM, LLMResponse
+from TableAgent.llm import BaseLLM, LLMResponse
 
 from TableAgent.structure.layout.parsing import (
     _is_valid_structure,

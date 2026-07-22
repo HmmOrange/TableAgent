@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import openpyxl
 
-from pipelines.base import PipelineOutput
-from TableAgent.service import TableAgentService
+from TableAgent.pipeline.base import PipelineOutput
+from service.runtime import TableAgentService
 
 
 class FakePipeline:

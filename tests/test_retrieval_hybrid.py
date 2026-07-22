@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from TableAgent.configs import TableAgentConfig
 from TableAgent.pipeline.retrieval import SourceRetriever
-from datasets.base import EvalSample
-from utils.llm.base import BaseLLM, LLMResponse
+from TableAgent.schema import EvalSample
+from TableAgent.llm import BaseLLM, LLMResponse
 
 class FakeLLM(BaseLLM):
     def __init__(self, response_content: str = "selected_index: 0\nrationale: test"):
@@ -17,7 +17,7 @@ class FakeLLM(BaseLLM):
 
 @pytest.fixture(autouse=True)
 def resolved_table_agent_config(monkeypatch):
-    from configs import load_config
+    from TableAgent.configs import load_config
     real_from_config = TableAgentConfig.from_config
 
     def resolve(config=None):

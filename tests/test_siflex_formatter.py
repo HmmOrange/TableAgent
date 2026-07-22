@@ -7,12 +7,12 @@ import time
 
 import pytest
 
-from datasets.base import EvalSample
+from TableAgent.schema import EvalSample
 from TableAgent.pipeline.common import SourceCandidate
 from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.table_agent_pipeline import TableAgentPipeline
 from TableAgent.configs import TableAgentConfig
-from utils.llm.base import LLMResponse
+from TableAgent.llm import LLMResponse
 
 
 class FormatterLLM:
@@ -30,7 +30,7 @@ class FormatterLLM:
 
 @pytest.fixture(autouse=True)
 def resolved_table_agent_config(monkeypatch, tmp_path):
-    from configs import load_config
+    from TableAgent.configs import load_config
     real_from_config = TableAgentConfig.from_config
 
     def resolve(config=None):
@@ -205,8 +205,8 @@ def test_prepared_siflex_pipeline_returns_formatter_agent_answer(tmp_path, monke
 )
 def test_live_structure_sheet_q1_qa_and_formatter():
     """Run the real SIFLEX Q1 workbook through QA and the formatter agent."""
-    from configs import load_config
-    from TableAgent import create_model_client
+    from TableAgent.configs import load_config
+    from service import create_model_client
     from TableAgent.QA import TableQARunner
 
     root = Path(__file__).resolve().parents[1]

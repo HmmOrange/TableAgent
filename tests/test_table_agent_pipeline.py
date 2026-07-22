@@ -5,10 +5,9 @@ import yaml
 from PIL import Image
 import pytest
 
-from datasets.base import EvalSample
-from pipelines.table_agent_pipeline import TableAgentPipeline
-from table2img.core import RenderResult
-from utils.llm.base import LLMResponse
+from TableAgent.schema import EvalSample
+from TableAgent.pipeline import TableAgentPipeline
+from TableAgent.llm import LLMResponse
 from TableAgent.configs import TableAgentConfig
 
 
@@ -169,25 +168,6 @@ class FakeLayoutVLM:
         )
 
 
-class FakeRenderer:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, document, image_path, **kwargs):
-        self.calls.append((document, Path(image_path), kwargs))
-        image_path = Path(image_path)
-        image_path.write_bytes(b"fake-image")
-        html_path = image_path.with_suffix(".html")
-        html_path.write_text(document.html, encoding="utf-8")
-        return RenderResult(
-            image_path=image_path,
-            html_path=html_path,
-            width=100,
-            height=80,
-            browser_path=Path("fake-browser"),
-        )
-
-
 @pytest.fixture(autouse=True)
 def fake_libreoffice_workbook_render(monkeypatch, tmp_path):
     def fake_render(workbook_path, sheet_name, cell_range, image_path, **kwargs):
@@ -195,7 +175,7 @@ def fake_libreoffice_workbook_render(monkeypatch, tmp_path):
         Image.new("RGB", (100, 80), "white").save(image_path)
 
     monkeypatch.setattr("TableAgent.rendering.workbook._render_xlsx_range_with_libreoffice", fake_render)
-    from configs import load_config
+    from TableAgent.configs import load_config
     real_from_config = TableAgentConfig.from_config
 
     def resolved_config(config=None):
@@ -223,12 +203,10 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     )
     llm = FakeLLM()
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     output = pipeline.run(sample)
@@ -245,7 +223,6 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert Path(output.metadata["changelog_path"]).is_file()
     assert Path(output.metadata["events_path"]).is_file()
     assert output.metadata["workbook_sheets"] == ["table-1"]
-    assert len(renderer.calls) == 0
     assert len(layout_vlm.calls) == 1
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert output.metadata["qa"]["token_usage"] == {"prompt": 12, "completion": 2}
@@ -265,7 +242,6 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
         llm_client=SuccessfulQALLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=FakeRenderer(),
     )
 
     output = pipeline.run(sample)
@@ -297,7 +273,6 @@ def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
             "max_refinement_rounds": 1,
             "run_retrieval": False,
         },
-        renderer=FakeRenderer(),
     )
 
     def fail_prepare(*args, **kwargs):
@@ -337,7 +312,6 @@ def test_table_agent_all_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, 
             "max_refinement_rounds": 1,
             "phase": "all",
         },
-        renderer=FakeRenderer(),
     )
     invalid = StructureCacheRecord(
         key="bad",
@@ -375,7 +349,6 @@ def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: 
             "max_refinement_rounds": 1,
             "phase": "structure",
         },
-        renderer=FakeRenderer(),
     )
     invalid = StructureCacheRecord(
         key="bad",
@@ -426,7 +399,6 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path / "artifacts")},
-        renderer=FakeRenderer(),
     )
     captured = {}
 
@@ -461,7 +433,6 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path / "all"), "structure_cache_dir": str(cache_dir), "phase": "all"},
-        renderer=FakeRenderer(),
     )
     first = all_pipeline.run(sample)
 
@@ -469,7 +440,6 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
         llm_client=FakeLLM(),
         layout_vlm_client=None,
         config={"artifact_dir": str(tmp_path / "qa"), "structure_cache_dir": str(cache_dir), "phase": "qa"},
-        renderer=FakeRenderer(),
     )
     second = qa_pipeline.run(sample)
 
@@ -484,7 +454,6 @@ def test_table_agent_qa_phase_fails_on_missing_cache(tmp_path: Path):
         llm_client=FakeLLM(),
         layout_vlm_client=None,
         config={"artifact_dir": str(tmp_path), "structure_cache_dir": str(tmp_path / "missing"), "phase": "qa"},
-        renderer=FakeRenderer(),
     )
     with pytest.raises(RuntimeError, match="Missing or stale structure cache"):
         pipeline.run(sample)
@@ -496,7 +465,6 @@ def test_table_agent_structure_phase_does_not_require_answer_llm(tmp_path: Path)
         llm_client=None,
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "structure_cache_dir": str(tmp_path / "cache"), "phase": "structure"},
-        renderer=FakeRenderer(),
     )
     records = pipeline.verify_samples([sample])
     assert records[0].valid
@@ -611,7 +579,6 @@ def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, mo
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path)},
-        renderer=FakeRenderer(),
     )
 
     response, qa_info = pipeline._run_verified_qa(
@@ -665,13 +632,11 @@ def legacy_table_agent_siflex_retrieval(tmp_path: Path):
     )
 
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # 1. Pre-encode sheets
@@ -723,7 +688,6 @@ def legacy_table_agent_run_prepares_siflex_source_lazily(tmp_path: Path):
         llm_client=llm,
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=FakeRenderer(),
     )
     progress_messages = []
     pipeline.set_progress_callback(progress_messages.append)
@@ -763,13 +727,11 @@ def legacy_table_agent_prepare_samples_regenerates_invalid_structure(tmp_path: P
 
     llm = FakeLLM()
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # Pre-create the directory and put an invalid structure.yaml in there
@@ -810,13 +772,11 @@ def legacy_table_agent_run_ignores_invalid_structures(tmp_path: Path):
 
     llm = FakeLLM()
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # 1. Pre-encode sheets
@@ -856,12 +816,10 @@ def legacy_table_agent_fallback_invalid_structure_marked_not_good(tmp_path: Path
         def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
             return LLMResponse(content="ERROR: Connection error.", prompt_tokens=0, completion_tokens=0)
 
-    renderer = FakeRenderer()
     pipeline = TableAgentPipeline(
         llm_client=ErrorLLM(),
         layout_vlm_client=ErrorLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     output = pipeline.run(sample)
@@ -874,7 +832,6 @@ def test_table_agent_siflex_answer_prompt_formatting(tmp_path: Path):
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config={"artifact_dir": str(tmp_path)},
-        renderer=FakeRenderer(),
     )
 
     # 1. Non-SiFlex sample
@@ -950,7 +907,6 @@ def test_table_agent_default_applies_generation_cap_and_early_breaks(tmp_path: P
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path)},
-        renderer=FakeRenderer(),
     )
     assert llm.max_tokens == 8192
     assert layout_vlm.max_tokens == 8192
@@ -973,7 +929,6 @@ def test_table_agent_max_tokens_config_driven(tmp_path: Path):
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "generation_max_tokens": 1024},
-        renderer=FakeRenderer(),
     )
     assert llm.max_tokens == 1024
     assert layout_vlm.max_tokens == 1024
@@ -986,7 +941,6 @@ def test_table_agent_max_tokens_config_driven(tmp_path: Path):
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "generation_max_tokens": None},
-        renderer=FakeRenderer(),
     )
     assert llm.max_tokens == 500
     assert layout_vlm.max_tokens == 600
@@ -994,7 +948,7 @@ def test_table_agent_max_tokens_config_driven(tmp_path: Path):
 
 
 def test_is_valid_structure_rules():
-    from pipelines.table_agent_pipeline import _is_valid_structure
+    from TableAgent.structure.layout.parsing import _is_valid_structure
     
     # 1. Reject structures with 'error' key
     assert not _is_valid_structure("headers: []\nerror: Failed to generate structure")
@@ -1032,7 +986,7 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
-    from pipelines.table_agent_pipeline import extract_strict_structure
+    from TableAgent.structure.layout.parsing import extract_strict_structure
 
     structure_text, _ = extract_strict_structure(
         "headers:\n"
@@ -1049,7 +1003,7 @@ def test_strict_structure_normalizes_uncertain_ranges_to_null():
 
 
 def test_strict_structure_extraction_discards_reasoning_and_extra_keys():
-    from pipelines.table_agent_pipeline import extract_strict_structure
+    from TableAgent.structure.layout.parsing import extract_strict_structure
 
     content = """I analyzed the table before producing the result.
 ```yaml
@@ -1118,7 +1072,6 @@ remaining_directions: []
         llm_client=FakeLLM(),
         layout_vlm_client=ReasoningLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 0},
-        renderer=FakeRenderer(),
     )
 
     output = pipeline.run(sample)
@@ -1146,7 +1099,6 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
         config=scoped_config,
-        renderer=FakeRenderer(),
     )
     sample = EvalSample(
         index=0,
@@ -1178,13 +1130,11 @@ def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
         llm_client=None,
         layout_vlm_client=FakeLayoutVLM(),
         config={**common, "cache_namespace": "siflex"},
-        renderer=FakeRenderer(),
     )
     realhitbench = TableAgentPipeline(
         llm_client=None,
         layout_vlm_client=FakeLayoutVLM(),
         config={**common, "cache_namespace": "realhitbench"},
-        renderer=FakeRenderer(),
     )
 
     assert siflex.structure_cache.root == cache_dir / "v5" / "datasets" / "siflex"
@@ -1244,13 +1194,11 @@ def legacy_table_agent_retrieval_rejects_placeholder_structures(tmp_path: Path):
     )
 
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # Pre-encode sheets
@@ -1300,13 +1248,11 @@ def legacy_table_agent_prepare_samples_uses_error_sidecar(tmp_path: Path):
             return LLMResponse(content="", prompt_tokens=0, completion_tokens=0)
 
     llm = FakeLLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=ErrorLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # First prepare_samples call: should attempt generation, fail (VLM returns empty),
@@ -1336,7 +1282,6 @@ def legacy_table_agent_prepare_samples_uses_error_sidecar(tmp_path: Path):
         llm_client=llm,
         layout_vlm_client=SuccessLayoutVLM(),
         config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
-        renderer=renderer,
     )
 
     # Run prepare_samples again. Since structure.error exists, it should NOT regenerate,
@@ -1362,80 +1307,36 @@ def test_table_agent_image_dimension_config_and_render_kwargs(tmp_path: Path):
     )
     llm = FakeLLM()
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
     
-    # Configure with small max_image_dimension to trigger scaling down
     pipeline = TableAgentPipeline(
         llm_client=llm,
         layout_vlm_client=layout_vlm,
         config={
             "artifact_dir": str(tmp_path),
             "max_refinement_rounds": 1,
-            "image_scale": 2.0,
             "max_image_dimension": 200,
-            "max_viewport_width": 1000,
-            "max_viewport_height": 800,
             "libreoffice_image_resolution": 240,
         },
-        renderer=renderer,
     )
     
     # Expose configs check
     cfg = pipeline.get_config()
     assert cfg["agent"]["max_image_dimension"] == 200
-    assert cfg["agent"]["max_viewport_width"] == 1000
-    assert cfg["agent"]["max_viewport_height"] == 800
     assert cfg["agent"]["libreoffice_image_resolution"] == 240
     
     # Run the pipeline
     output = pipeline.run(sample)
     
-    # Workbook image rendering now goes through LibreOffice directly, not the HTML renderer callback.
     assert Path(output.metadata["image_path"]).is_file()
-    assert len(renderer.calls) == 0
 
 
-def test_table_agent_image_fitting_and_tiling(tmp_path: Path):
+def test_table_agent_image_resizing_and_tiling(tmp_path: Path):
     from PIL import Image
-    from pipelines.table_agent_pipeline import (
-        compute_viewport_and_scale,
+    from TableAgent.rendering.image_utils import (
         _generate_image_tiles,
         _resize_image_file_to_fit,
     )
 
-    # 1. Test compute_viewport_and_scale
-    # Case A: dimension limits
-    vw, vh, scale = compute_viewport_and_scale(
-        estimated_width=1000,
-        estimated_height=1000,
-        image_scale=2.0,
-        max_viewport_width=800,
-        max_viewport_height=800,
-        max_image_dimension=400,
-        max_image_pixels=None,
-    )
-    # vw/vh are limited to 800x800. max(800, 800) * 2.0 = 1600 > 400.
-    # Scale should become 400 / 800 = 0.5
-    assert vw == 800
-    assert vh == 800
-    assert abs(scale - 0.5) < 1e-5
-
-    # Case B: pixel limits
-    vw, vh, scale = compute_viewport_and_scale(
-        estimated_width=1000,
-        estimated_height=1000,
-        image_scale=2.0,
-        max_viewport_width=800,
-        max_viewport_height=800,
-        max_image_dimension=None,
-        max_image_pixels=10000,
-    )
-    # vw/vh are 800x800. Total base pixels = 640000.
-    # Total pixels at scale=2.0 would be 640000 * 4 = 2.56M > 10000.
-    # Scale should become (10000 / 640000) ** 0.5 = (1/64) ** 0.5 = 0.125
-    assert abs(scale - 0.125) < 1e-5
-
-    # 2. Test _generate_image_tiles and _resize_image_file_to_fit on a large fake image
     large_img_path = tmp_path / "large_table.png"
     # Create a dummy image of size 1200 x 800
     img = Image.new("RGB", (1200, 800), color="white")
@@ -1458,7 +1359,7 @@ def test_table_agent_image_fitting_and_tiling(tmp_path: Path):
         assert resized_img.height <= 400
         assert resized_img.width * resized_img.height <= 200000
 
-    # 3. Test decompression bomb safety
+    # Test decompression bomb safety.
     bomb_path = tmp_path / "bomb.png"
     try:
         # Create a 10000x9000 (90MP) image in mode "1" (binary, keeps RAM tiny ~11MB)
@@ -1523,7 +1424,6 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
     )
 
     layout_vlm = FakeLayoutVLM()
-    renderer = FakeRenderer()
 
     pipeline = TableAgentPipeline(
         llm_client=llm,
@@ -1534,7 +1434,6 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
             "retrieval_rerank_with_llm": True,
             "retrieval_top_k": 2,
         },
-        renderer=renderer,
     )
 
     # 1. Pre-encode sheets

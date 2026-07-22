@@ -3,6 +3,7 @@ from TableAgent.schema.header import Header
 from TableAgent.schema.subtask import SubTask
 from TableAgent.schema.experience import ExperienceRecord, ExperiencePool
 from TableAgent.schema.qa import AgentOutput, QAResult
+from TableAgent.schema.evaluation import EvalSample
 
 __all__ = [
     "Cell",
@@ -14,4 +15,5 @@ __all__ = [
     "ExperiencePool",
     "AgentOutput",
     "QAResult",
+    "EvalSample",
 ]

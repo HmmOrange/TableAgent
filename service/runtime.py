@@ -11,14 +11,13 @@ from typing import Any, Callable, Iterable, Literal
 import openpyxl
 import pandas as pd
 
-from configs import load_config
-from datasets.base import EvalSample
-from pipelines.base import PipelineOutput
-
-from TableAgent.clients import create_model_client
+from service.clients import create_model_client
+from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
+from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
 from TableAgent.pipeline.source_preparer import LAYOUT_WORKFLOW_VERSION
+from TableAgent.schema import EvalSample
 from TableAgent.structure.layout.parsing import _is_valid_structure
 
 

@@ -22,8 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-table2img = "table2img.cli:main"
-table-agent-api = "TableAgent.server:main"
+table-agent-api = "service.server:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -39,16 +38,11 @@ dev = [
 namespaces = false
 include = [
     "TableAgent*",
-    "table2img*",
-    "datasets*",
-    "pipelines*",
-    "utils*",
-    "configs*",
+    "service*",
 ]
 exclude = [
-    "table2img.tests*",
     "tests*",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "table2img/tests"]
+testpaths = ["tests"]

@@ -7,9 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from datasets.base import EvalSample
-from utils.llm.base import BaseLLM, LLMResponse
-from utils.log.logger import Logger
+from TableAgent.llm import BaseLLM, LLMResponse
+from TableAgent.run_logging import Logger
+from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.structure.layout.parsing import _is_valid_structure

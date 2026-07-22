@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from TableAgent.agents.base import BaseTableAgent
-from utils.llm.base import BaseLLM, LLMResponse
+from TableAgent.llm import BaseLLM, LLMResponse
 
 
 class QAAgent(BaseTableAgent):

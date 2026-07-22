@@ -7,28 +7,34 @@ import subprocess
 import tempfile
 import threading
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-
-from datasets.base import EvalSample
-from table2img.core import RenderResult
-from utils.workbook_converter import WorkbookConversion, sample_to_xlsx
+from typing import Any
 
 from TableAgent.configs import TableAgentConfig
+from TableAgent.rendering.converter import WorkbookConversion, sample_to_xlsx
 from TableAgent.rendering.image_utils import (
     _generate_image_tiles,
     _resize_image_file_to_fit,
-    compute_viewport_and_scale,
 )
+from TableAgent.schema import EvalSample
 
 
 _PDFIUM_LOCK = threading.Lock()
 
 
+@dataclass(frozen=True)
+class RenderResult:
+    image_path: Path
+    html_path: Path | None
+    width: int | None
+    height: int | None
+    browser_path: Path
+
+
 class WorkbookRenderer:
-    def __init__(self, settings: TableAgentConfig, renderer: Callable[..., RenderResult], logger: Any):
+    def __init__(self, settings: TableAgentConfig, logger: Any):
         self.settings = settings
-        self.renderer = renderer
         self.logger = logger
 
     def sample_to_image(self, sample: EvalSample, sample_dir: Path):
@@ -102,27 +108,6 @@ class WorkbookRenderer:
             show_coordinates=self.settings.workbook_show_coordinates,
         )
         return result
-
-    def render_document(self, document: Any, image_path: Path) -> RenderResult:
-        _, _, scale = compute_viewport_and_scale(
-            estimated_width=document.estimated_width,
-            estimated_height=document.estimated_height,
-            image_scale=self.settings.image_scale,
-            max_viewport_width=self.settings.max_viewport_width,
-            max_viewport_height=self.settings.max_viewport_height,
-            max_image_dimension=self.settings.max_image_dimension,
-            max_image_pixels=self.settings.max_image_pixels,
-        )
-        return self.renderer(
-            document,
-            image_path,
-            scale=scale,
-            backend=self.settings.render_backend,
-            keep_html=True,
-            timeout_seconds=self.settings.render_timeout_seconds,
-            max_viewport_width=self.settings.max_viewport_width,
-            max_viewport_height=self.settings.max_viewport_height,
-        )
 
     def postprocess_image(self, image_path: Path) -> list[dict[str, Any]]:
         tiles = []

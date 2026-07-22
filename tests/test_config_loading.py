@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from configs import load_config, resolve_llm_config, resolve_vlm_config
+from TableAgent.configs import load_config, resolve_llm_config, resolve_vlm_config
 from TableAgent.configs import TableAgentConfig
 
 CONFIG_PATH = Path("config.example.yaml")
@@ -112,7 +112,7 @@ def test_resolve_llm_vlm_pipeline_fallback_to_vlm_provider():
             }
         }
     }
-    provider_name, llm_config = resolve_llm_config(config, "table2img_vlm")
+    provider_name, llm_config = resolve_llm_config(config, "layout_vlm")
     assert provider_name == "qwen_local_vlm"
     assert llm_config["base_url"] == "http://localhost:8010/v1"
     assert llm_config["model"] == "Qwen/Qwen3.6-35B-A3B-FP8"
@@ -163,7 +163,7 @@ def test_resolve_unknown_provider_raises_value_error():
 
 
 def test_temperature_validation():
-    from configs.models_config import normalize_model_config
+    from TableAgent.configs.models_config import normalize_model_config
 
     normalize_model_config({"temperature": 0.5})
     normalize_model_config({"temperature": 0.0})
@@ -178,7 +178,7 @@ def test_temperature_validation():
 
 
 def test_provider_validation():
-    from configs.models_config import normalize_model_config
+    from TableAgent.configs.models_config import normalize_model_config
 
     normalize_model_config({"provider": "gemini"})
     normalize_model_config({"provider": "openai"})
@@ -191,7 +191,7 @@ def test_provider_validation():
 
 
 def test_duplicate_model_definition():
-    from configs.models_config import available_models
+    from TableAgent.configs.models_config import available_models
 
     bad_config = {
         "models": {"gpt_oss": {"provider": "openai"}},
@@ -202,7 +202,7 @@ def test_duplicate_model_definition():
 
 
 def test_non_dict_group_definition():
-    from configs.models_config import available_models
+    from TableAgent.configs.models_config import available_models
 
     bad_config = {
         "models": ["not-a-dict"],
@@ -212,7 +212,7 @@ def test_non_dict_group_definition():
 
 
 def test_non_dict_model_definition():
-    from configs.models_config import available_models
+    from TableAgent.configs.models_config import available_models
 
     bad_config = {
         "models": {"gpt_oss": "not-a-dict"},
@@ -231,7 +231,7 @@ def test_config_include_is_rejected(tmp_path):
 def test_resolve_env_field_empty_string_falls_back(monkeypatch):
     monkeypatch.setenv("TEST_EMPTY_ENV", "")
 
-    from configs.models_config import _resolve_env_field
+    from TableAgent.configs.models_config import _resolve_env_field
 
     res = _resolve_env_field(
         {"api_key": "fallback-key", "api_key_env": "TEST_EMPTY_ENV"},

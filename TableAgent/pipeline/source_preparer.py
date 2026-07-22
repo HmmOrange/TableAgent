@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from datasets.base import EvalSample
+from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata

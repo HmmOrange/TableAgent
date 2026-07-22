@@ -2,8 +2,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from datasets.base import EvalSample
-from utils.workbook_converter import sample_to_xlsx
+from TableAgent.schema import EvalSample
+from TableAgent.rendering.converter import sample_to_xlsx
 
 
 def test_html_table_converts_to_xlsx_with_merged_cells(tmp_path: Path):

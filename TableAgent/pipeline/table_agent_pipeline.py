@@ -7,19 +7,18 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import openpyxl
 import yaml
-from datasets.base import EvalSample
-from pipelines.base import BasePipeline, PipelineOutput
 from TableAgent.prompts.answer import ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT_TEMPLATE
 from TableAgent.prompts.reranker import RERANKER_SYSTEM_PROMPT, RERANKER_USER_PROMPT_TEMPLATE
-from table2img.core import RenderResult, render_document
-from utils.workbook_converter import sample_to_xlsx
-from utils.llm.base import BaseLLM, LLMResponse
-from utils.log.logger import Logger
 
 from TableAgent.configs import TableAgentConfig
+from TableAgent.llm import BaseLLM, LLMResponse
+from TableAgent.pipeline.base import BasePipeline, PipelineOutput
 from TableAgent.QA.agents.answer_agent import QAAgent
 from TableAgent.QA.runner import TableQARunner
 from TableAgent.perception.metadata import SheetMetadata
+from TableAgent.rendering.converter import sample_to_xlsx
+from TableAgent.run_logging import Logger
+from TableAgent.schema import EvalSample
 from TableAgent.structure.layout.agent import LayoutAgent
 from TableAgent.structure.layout.parsing import _is_valid_structure
 from TableAgent.pipeline.common import (
@@ -58,7 +57,6 @@ class TableAgentPipeline(BasePipeline):
         llm_client: BaseLLM | None,
         layout_vlm_client: BaseLLM | None,
         config: dict[str, Any] | None = None,
-        renderer: Callable[..., RenderResult] = render_document,
         table_retriever: TableRetrieverContract | None = None,
     ):
         self.llm = llm_client
@@ -71,7 +69,7 @@ class TableAgentPipeline(BasePipeline):
         if self.settings.phase in {"structure", "all"} and self.layout_vlm is None:
             raise ValueError(f"TableAgent phase '{self.settings.phase}' requires a layout VLM client")
         self.prompts = PromptBuilder(self.settings, self)
-        self.workbook_renderer = WorkbookRenderer(self.settings, renderer, logger)
+        self.workbook_renderer = WorkbookRenderer(self.settings, logger)
         self.layout_agent = LayoutAgent(self.layout_vlm) if self.layout_vlm is not None else None
         self.verifier = DeterministicVerifier()
         self.qa_agent = QAAgent(self.llm, self.answer_system_prompt) if self.llm is not None else None
