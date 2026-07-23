@@ -35,6 +35,7 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.query == ["Total revenue?", "Largest cost?"]
     assert args.schema is False
     assert args.metadata is False
+    assert args.embed is False
     assert args.force is False
     assert args.sheet == []
     assert args.llm == "alternate_answer"
@@ -50,6 +51,7 @@ def test_cli_parser_accepts_artifact_and_sheet_flags():
             "book.xlsx",
             "--schema",
             "--metadata",
+            "--embed",
             "--sheet",
             "Summary,Detail",
             "--sheet",
@@ -59,6 +61,7 @@ def test_cli_parser_accepts_artifact_and_sheet_flags():
 
     assert args.schema is True
     assert args.metadata is True
+    assert args.embed is True
     assert args.sheet == ["Summary,Detail", "Archive"]
 
 
@@ -131,6 +134,7 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "queries": [],
         "schema": False,
         "metadata": False,
+        "embed": False,
         "sheets": [],
         "force": True,
     }

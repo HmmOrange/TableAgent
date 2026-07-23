@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate a workbook metadata artifact. If neither output flag is set, both are generated.",
     )
     parser.add_argument(
+        "--embed",
+        action="store_true",
+        help="Generate retrieval_cards.pkl with embeddings for ingestion retrieval cards.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Regenerate cached worksheet structures instead of reusing valid structures.",
@@ -85,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
             queries=args.query,
             schema=args.schema,
             metadata=args.metadata,
+            embed=args.embed,
             sheets=args.sheet,
             force=args.force,
         )

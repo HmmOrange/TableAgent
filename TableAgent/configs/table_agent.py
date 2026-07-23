@@ -48,6 +48,7 @@ class TableAgentConfig:
     retrieval_audit_top_k: int
     retrieval_query_type: str
     retrieval_max_batches: int
+    embed_retrieval_cards: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -96,6 +97,7 @@ class TableAgentConfig:
             retrieval_audit_top_k=int(merged.get("retrieval_audit_top_k", 10)),
             retrieval_query_type=str(merged.get("retrieval_query_type", "auto")),
             retrieval_max_batches=int(merged.get("retrieval_max_batches", 3)),
+            embed_retrieval_cards=_bool(merged.get("embed_retrieval_cards", False)),
         )
 
 

@@ -30,6 +30,7 @@ class PathJobRequest(BaseModel):
     workbooks: list[str] = Field(min_length=1)
     schema_: bool = Field(False, alias="schema")
     metadata: bool = False
+    embed: bool = False
     sheets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -45,6 +46,7 @@ class UploadJobRequest(BaseModel):
     queries: list[str] = Field(default_factory=list)
     schema_: bool = Field(False, alias="schema")
     metadata: bool = False
+    embed: bool = False
     sheets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -70,6 +72,7 @@ class JobManager:
         workbooks: list[Path],
         schema: bool = False,
         metadata: bool = False,
+        embed: bool = False,
         sheets: list[str] | None = None,
         cleanup_dir: Path | None = None,
     ) -> str:
@@ -97,6 +100,7 @@ class JobManager:
                 workbooks,
                 schema,
                 metadata,
+                embed,
                 list(sheets or []),
                 cleanup_dir,
             )
@@ -136,6 +140,7 @@ class JobManager:
         workbooks: list[Path],
         schema: bool,
         metadata: bool,
+        embed: bool,
         sheets: list[str],
         cleanup_dir: Path | None,
     ) -> None:
@@ -147,6 +152,7 @@ class JobManager:
                 workbooks=workbooks,
                 schema=schema,
                 metadata=metadata,
+                embed=embed,
                 sheets=sheets,
                 job_id=job_id,
             )
@@ -278,6 +284,7 @@ def create_app(
             workbooks=workbooks,
             schema=request.schema_,
             metadata=request.metadata,
+            embed=request.embed,
             sheets=request.sheets,
         )
         return manager.wait(job_id) if wait else manager.get(job_id) or {"job_id": job_id}
@@ -327,6 +334,7 @@ def create_app(
             workbooks=saved,
             schema=request.schema_,
             metadata=request.metadata,
+            embed=request.embed,
             sheets=request.sheets,
             cleanup_dir=upload_dir,
         )

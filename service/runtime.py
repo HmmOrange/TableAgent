@@ -94,6 +94,7 @@ class TableAgentService:
         job_id: str | None = None,
         schema: bool = False,
         metadata: bool = False,
+        embed: bool = False,
         sheets: Iterable[str] = (),
         force: bool = False,
     ) -> dict[str, Any]:
@@ -134,7 +135,7 @@ class TableAgentService:
             pipeline = self.pipeline_factory(
                 llm_client=summary_client,
                 layout_vlm_client=self._layout_client(),
-                config=self._pipeline_config("structure", job_dir),
+                config=self._pipeline_config("structure", job_dir, embed=embed),
             )
             records = pipeline.verify_samples([base_sample], force=force)
             structures = self._structure_results(records, normalized, job_dir)
@@ -166,7 +167,7 @@ class TableAgentService:
             pipeline = self.pipeline_factory(
                 llm_client=self._answer_client(),
                 layout_vlm_client=None,
-                config=self._pipeline_config("qa", job_dir),
+                config=self._pipeline_config("qa", job_dir, embed=embed),
             )
             pipeline.prepare_samples(samples)
             for sample in samples:
@@ -178,6 +179,7 @@ class TableAgentService:
             job_dir,
             include_schema=include_schema,
             include_metadata=include_metadata,
+            embed=embed,
             selected_sheets=selected_sheets,
         )
 
@@ -225,7 +227,7 @@ class TableAgentService:
             )
         return self._layout_vlm_client
 
-    def _pipeline_config(self, phase: Stage, job_dir: Path) -> dict[str, Any]:
+    def _pipeline_config(self, phase: Stage, job_dir: Path, *, embed: bool = False) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
             {
@@ -234,6 +236,7 @@ class TableAgentService:
                 "source_artifact_dir": str(self.structure_dir),
                 "structure_cache_dir": str(self.structure_dir / "cache"),
                 "cache_namespace": "service",
+                "embed_retrieval_cards": bool(embed),
             }
         )
         return agent_config
@@ -245,6 +248,7 @@ class TableAgentService:
         *,
         include_schema: bool,
         include_metadata: bool,
+        embed: bool,
         selected_sheets: tuple[str, ...],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         schema_artifacts: list[dict[str, str]] = []
@@ -279,17 +283,37 @@ class TableAgentService:
             job_retrieval_records: list[dict[str, Any]] = []
             for sheet_name, structure_path in structure_paths:
                 source_retrieval_records.extend(
-                    write_sheet_retrieval_cards(structure_path.parent, Path(item["name"]), sheet_name)
+                    write_sheet_retrieval_cards(
+                        structure_path.parent,
+                        Path(item["name"]),
+                        sheet_name,
+                        include_embeddings=embed,
+                    )
                 )
                 job_sheet_dir = sheet_artifact_dir(job_workbook_dir, sheet_name)
                 if job_sheet_dir.is_dir():
                     job_retrieval_records.extend(
-                        write_sheet_retrieval_cards(job_sheet_dir, Path(item["name"]), sheet_name)
+                        write_sheet_retrieval_cards(
+                            job_sheet_dir,
+                            Path(item["name"]),
+                            sheet_name,
+                            include_embeddings=embed,
+                        )
                     )
             if source_retrieval_records:
-                write_workbook_retrieval_cards(workbook_dir, item["name"], source_retrieval_records)
+                write_workbook_retrieval_cards(
+                    workbook_dir,
+                    item["name"],
+                    source_retrieval_records,
+                    include_embeddings=embed,
+                )
             if job_retrieval_records:
-                write_workbook_retrieval_cards(job_workbook_dir, item["name"], job_retrieval_records)
+                write_workbook_retrieval_cards(
+                    job_workbook_dir,
+                    item["name"],
+                    job_retrieval_records,
+                    include_embeddings=embed,
+                )
 
             schema_path = workbook_dir / "schema.yaml"
             if include_schema:
