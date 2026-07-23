@@ -141,24 +141,24 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert (service.jobs_dir / "job-one" / "run.json").is_file()
 
 
-def test_metadata_only_structure_stage_skips_pipeline_and_vlm(tmp_path: Path):
+def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")
     service = TableAgentService(
         {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
         pipeline_factory=FakePipeline,
     )
 
     result = service.run(
         stage="structure",
         workbooks=[source],
-        metadata=True,
-        job_id="metadata-only",
+        job_id="structure-artifacts",
     )
 
-    assert FakePipeline.instances == []
-    assert result["structures"] == []
-    assert result["schema_artifacts"] == []
+    assert len(FakePipeline.instances) == 1
+    assert result["schema_artifacts"][0]["artifact"] == "workbooks/book.xlsx/schema.yaml"
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
 
 
@@ -172,7 +172,7 @@ def test_service_forwards_force_to_structure_pipeline(tmp_path: Path):
         pipeline_factory=FakePipeline,
     )
 
-    service.run(stage="structure", workbooks=[source], schema=True, force=True)
+    service.run(stage="structure", workbooks=[source], force=True)
 
     assert FakePipeline.instances[0].forces == [True]
 
@@ -181,10 +181,12 @@ def test_service_generates_readable_timestamp_job_id(tmp_path: Path):
     source = _workbook(tmp_path / "book.xlsx")
     service = TableAgentService(
         {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
         pipeline_factory=FakePipeline,
     )
 
-    result = service.run(stage="structure", workbooks=[source], metadata=True)
+    result = service.run(stage="structure", workbooks=[source])
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z", result["job_id"])
 
@@ -202,7 +204,6 @@ def test_service_normalizes_repeated_comma_separated_sheet_filters(tmp_path: Pat
     result = service.run(
         stage="structure",
         workbooks=[source],
-        schema=True,
         sheets=["Summary, Detail", "Summary"],
         job_id="selected-sheets",
     )
@@ -224,7 +225,6 @@ def test_service_rejects_missing_sheet_before_pipeline_work(tmp_path: Path):
         service.run(
             stage="structure",
             workbooks=[source],
-            metadata=True,
             sheets=["Missing"],
         )
     except ValueError as exc:

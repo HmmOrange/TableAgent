@@ -33,8 +33,6 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.stage == "all"
     assert args.workbook == ["sales.xlsx", "costs.xlsx"]
     assert args.query == ["Total revenue?", "Largest cost?"]
-    assert args.schema is False
-    assert args.metadata is False
     assert args.embed is False
     assert args.force is False
     assert args.sheet == []
@@ -42,15 +40,13 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.vlm == "alternate_layout"
 
 
-def test_cli_parser_accepts_artifact_and_sheet_flags():
+def test_cli_parser_accepts_embed_and_sheet_flags():
     args = cli.build_parser().parse_args(
         [
             "--stage",
             "structure",
             "--workbook",
             "book.xlsx",
-            "--schema",
-            "--metadata",
             "--embed",
             "--sheet",
             "Summary,Detail",
@@ -59,10 +55,16 @@ def test_cli_parser_accepts_artifact_and_sheet_flags():
         ]
     )
 
-    assert args.schema is True
-    assert args.metadata is True
     assert args.embed is True
     assert args.sheet == ["Summary,Detail", "Archive"]
+
+
+@pytest.mark.parametrize("flag", ["--schema", "--metadata"])
+def test_cli_rejects_removed_output_flags(flag):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(["--stage", "structure", "--workbook", "book.xlsx", flag])
+
+    assert exc_info.value.code == 2
 
 
 @pytest.mark.parametrize("stage", ["qa", "all"])
@@ -132,8 +134,6 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "stage": "structure",
         "workbooks": ["sales.xlsx", "costs.xlsx"],
         "queries": [],
-        "schema": False,
-        "metadata": False,
         "embed": False,
         "sheets": [],
         "force": True,

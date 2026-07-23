@@ -28,8 +28,6 @@ class PathJobRequest(BaseModel):
     stage: Stage = "all"
     queries: list[str] = Field(default_factory=list)
     workbooks: list[str] = Field(min_length=1)
-    schema_: bool = Field(False, alias="schema")
-    metadata: bool = False
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
 
@@ -44,8 +42,6 @@ class UploadJobRequest(BaseModel):
 
     stage: Stage = "all"
     queries: list[str] = Field(default_factory=list)
-    schema_: bool = Field(False, alias="schema")
-    metadata: bool = False
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
 
@@ -70,8 +66,6 @@ class JobManager:
         stage: Stage,
         queries: list[str],
         workbooks: list[Path],
-        schema: bool = False,
-        metadata: bool = False,
         embed: bool = False,
         sheets: list[str] | None = None,
         cleanup_dir: Path | None = None,
@@ -98,8 +92,6 @@ class JobManager:
                 stage,
                 queries,
                 workbooks,
-                schema,
-                metadata,
                 embed,
                 list(sheets or []),
                 cleanup_dir,
@@ -138,8 +130,6 @@ class JobManager:
         stage: Stage,
         queries: list[str],
         workbooks: list[Path],
-        schema: bool,
-        metadata: bool,
         embed: bool,
         sheets: list[str],
         cleanup_dir: Path | None,
@@ -150,8 +140,6 @@ class JobManager:
                 stage=stage,
                 queries=queries,
                 workbooks=workbooks,
-                schema=schema,
-                metadata=metadata,
                 embed=embed,
                 sheets=sheets,
                 job_id=job_id,
@@ -282,8 +270,6 @@ def create_app(
             stage=request.stage,
             queries=request.queries,
             workbooks=workbooks,
-            schema=request.schema_,
-            metadata=request.metadata,
             embed=request.embed,
             sheets=request.sheets,
         )
@@ -332,8 +318,6 @@ def create_app(
             stage=request.stage,
             queries=request.queries,
             workbooks=saved,
-            schema=request.schema_,
-            metadata=request.metadata,
             embed=request.embed,
             sheets=request.sheets,
             cleanup_dir=upload_dir,

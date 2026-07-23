@@ -19,13 +19,12 @@ class FakeService:
         self.calls = []
         self.accept_local_paths = False
 
-    def run(self, *, stage, queries, workbooks, schema, metadata, sheets, job_id):
+    def run(self, *, stage, queries, workbooks, embed, sheets, job_id):
         self.calls.append(
             {
                 "stage": stage,
                 "queries": queries,
-                "schema": schema,
-                "metadata": metadata,
+                "embed": embed,
                 "sheets": sheets,
             }
         )
@@ -60,8 +59,8 @@ def test_health_status_and_upload_job(tmp_path: Path):
             "/v1/jobs/upload?wait=true",
             data={
                 "payload": (
-                    '{"stage":"all","queries":["question"],"schema":true,'
-                    '"metadata":true,"sheets":["Summary,Detail","Archive"]}'
+                    '{"stage":"all","queries":["question"],'
+                    '"embed":true,"sheets":["Summary,Detail","Archive"]}'
                 )
             },
             files={"files": ("book.xlsx", b"workbook-bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
@@ -79,8 +78,7 @@ def test_health_status_and_upload_job(tmp_path: Path):
             {
                 "stage": "all",
                 "queries": ["question"],
-                "schema": True,
-                "metadata": True,
+                "embed": True,
                 "sheets": ["Summary,Detail", "Archive"],
             }
         ]
@@ -109,8 +107,7 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
                 "stage": "structure",
                 "queries": [],
                 "workbooks": [str(tmp_path / "book.xlsx")],
-                "schema": True,
-                "metadata": False,
+                "embed": True,
                 "sheets": ["Summary,Detail"],
             },
         )
@@ -120,8 +117,7 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
         {
             "stage": "structure",
             "queries": [],
-            "schema": True,
-            "metadata": False,
+            "embed": True,
             "sheets": ["Summary,Detail"],
         }
     ]

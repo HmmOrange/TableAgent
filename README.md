@@ -95,27 +95,15 @@ selected worksheet structures with the layout VLM.
 - Structure generation requires LibreOffice and the configured layout VLM.
 - Schema generation also requires the configured answer LLM to describe the
   workbook and its worksheets.
-- Metadata-only ingestion can run without the layout VLM. When no cached
-  `schema.yaml` exists, the workbook description is empty.
 
-#### Example: One workbook with default flags
+#### Example: One workbook
 
-When neither `--schema` nor `--metadata` is supplied, TableAgent generates both:
+Ingestion always generates `schema.yaml`, `metadata.json`, and retrieval card
+artifacts:
 
 ```bash
 uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
 ```
-
-#### Output types by flag
-
-The output flags select which workbook-level artifacts are generated:
-
-| Output flags | Structure processing | Workbook artifacts |
-| --- | --- | --- |
-| None (default) | All selected worksheets | `schema.yaml` and `metadata.json` |
-| `--schema` | All selected worksheets | `schema.yaml` only |
-| `--metadata` | Skipped | `metadata.json` only |
-| `--schema --metadata` | All selected worksheets | `schema.yaml` and `metadata.json` |
 
 With the default `service.root_dir`, canonical artifacts are stored at:
 
@@ -196,8 +184,6 @@ Summary:
 | `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
 | `--stage structure` | Runs ingestion only. |
 | `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
-| `--schema` | Generates only the workbook schema unless `--metadata` is also supplied. |
-| `--metadata` | Generates only workbook metadata unless `--schema` is also supplied. |
 | `--embed` | Also writes `retrieval_cards.pkl` with retrieval card embeddings. |
 | `--force` | Regenerates cached worksheet structures. Valid only with `--stage structure` or `--stage all`. |
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
@@ -209,13 +195,11 @@ provided, every requested worksheet must exist in every workbook. Metadata alway
 lists every worksheet in the workbook, even when `--sheet` limits structure and
 schema processing.
 
-For example, the following command generates a schema for `Summary`, `Detail`, and
-`Archive` only:
+For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
 
 ```bash
 uv run table-agent --config config.yaml --stage structure \
   --workbook sample/QA_sample.xlsx \
-  --schema \
   --sheet "Summary,Detail" --sheet Archive
 ```
 
@@ -302,8 +286,7 @@ The CLI prints a JSON result with the answer and supporting execution details:
 
 The exact values depend on the workbook, retrieval result, and model response.
 Cached per-sheet structures and the selected workbook artifacts are copied into the
-job directory. As with ingestion, omitting both output flags generates both
-`schema.yaml` and `metadata.json`.
+job directory.
 
 #### Available flags
 
@@ -313,8 +296,6 @@ job directory. As with ingestion, omitting both output flags generates both
 | `--stage qa` | Runs QA against cached structures. |
 | `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
 | `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
-| `--schema` | Includes only the workbook schema unless `--metadata` is also supplied. |
-| `--metadata` | Includes only workbook metadata unless `--schema` is also supplied. |
 | `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
 | `--llm NAME` | Overrides the configured answer LLM profile. |
 
@@ -346,13 +327,13 @@ Submit a workbook and wait for an end-to-end result:
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/jobs/upload?wait=true" \
   -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"schema":true,"metadata":true,"sheets":["Summary,Detail"]}' \
+  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"embed":true,"sheets":["Summary,Detail"]}' \
   -F "files=@sample/QA_sample.xlsx"
 ```
 
-Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `schema`, `metadata`, and
-`sheets`. When both booleans are false or omitted, the service generates both
-workbook artifacts. Sheet list entries may contain comma-separated names.
+Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
+Ingestion always generates workbook schema and metadata artifacts. Sheet list
+entries may contain comma-separated names.
 
 Omit `X-API-Key` when `service.api_key` is empty. Without `wait=true`, poll
 `GET /v1/jobs/{job_id}`. Generated files are available through

@@ -92,8 +92,6 @@ class TableAgentService:
         queries: Iterable[str] = (),
         workbooks: Iterable[str | Path],
         job_id: str | None = None,
-        schema: bool = False,
-        metadata: bool = False,
         embed: bool = False,
         sheets: Iterable[str] = (),
         force: bool = False,
@@ -104,7 +102,6 @@ class TableAgentService:
         if not workbook_list:
             raise ValueError("At least one workbook is required")
         normalized = self._normalize_workbooks(workbook_list)
-        include_schema, include_metadata = _resolve_artifacts(schema, metadata)
         selected_sheets = _normalize_sheet_filters(sheets)
         self._validate_sheet_filters(normalized, selected_sheets)
 
@@ -129,11 +126,10 @@ class TableAgentService:
         structures: list[dict[str, Any]] = []
         answers: list[dict[str, Any]] = []
 
-        needs_structure = stage == "all" or (stage == "structure" and include_schema)
+        needs_structure = stage in {"all", "structure"}
         if needs_structure:
-            summary_client = self._answer_client() if include_schema else None
             pipeline = self.pipeline_factory(
-                llm_client=summary_client,
+                llm_client=self._answer_client(),
                 layout_vlm_client=self._layout_client(),
                 config=self._pipeline_config("structure", job_dir, embed=embed),
             )
@@ -177,8 +173,6 @@ class TableAgentService:
         schema_artifacts, metadata_artifacts = self._build_workbook_artifacts(
             normalized,
             job_dir,
-            include_schema=include_schema,
-            include_metadata=include_metadata,
             embed=embed,
             selected_sheets=selected_sheets,
         )
@@ -246,15 +240,11 @@ class TableAgentService:
         normalized: list[dict[str, Any]],
         job_dir: Path,
         *,
-        include_schema: bool,
-        include_metadata: bool,
         embed: bool,
         selected_sheets: tuple[str, ...],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         schema_artifacts: list[dict[str, str]] = []
         metadata_artifacts: list[dict[str, str]] = []
-        if not include_schema and not include_metadata:
-            return schema_artifacts, metadata_artifacts
 
         for item in normalized:
             workbook_dir = workbook_artifact_dir(
@@ -316,41 +306,37 @@ class TableAgentService:
                 )
 
             schema_path = workbook_dir / "schema.yaml"
-            if include_schema:
-                missing = [name for name in sheet_names if not any(name == value[0] for value in structure_paths)]
-                if missing:
-                    raise RuntimeError(
-                        f"Missing valid structures for workbook '{item['name']}': {', '.join(missing)}"
-                    )
-                build_workbook_schema(
-                    structure_paths,
-                    schema_path,
-                    SummaryGenerator(self._answer_client()),
+            missing = [name for name in sheet_names if not any(name == value[0] for value in structure_paths)]
+            if missing:
+                raise RuntimeError(
+                    f"Missing valid structures for workbook '{item['name']}': {', '.join(missing)}"
                 )
-                target = job_workbook_dir / "schema.yaml"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(schema_path, target)
-                schema_artifacts.append(
-                    {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
-                )
+            build_workbook_schema(
+                structure_paths,
+                schema_path,
+                SummaryGenerator(self._answer_client()),
+            )
+            target = job_workbook_dir / "schema.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(schema_path, target)
+            schema_artifacts.append(
+                {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
+            )
 
-            if include_metadata:
-                available_schema = schema_path if schema_path.is_file() else None
-                summarizer = SummaryGenerator(self._answer_client()) if available_schema is not None else None
-                metadata_path = workbook_dir / "metadata.json"
-                build_workbook_metadata(
-                    item["source_path"],
-                    item["name"],
-                    metadata_path,
-                    schema_path=available_schema,
-                    summarizer=summarizer,
-                )
-                target = job_workbook_dir / "metadata.json"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(metadata_path, target)
-                metadata_artifacts.append(
-                    {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
-                )
+            metadata_path = workbook_dir / "metadata.json"
+            build_workbook_metadata(
+                item["source_path"],
+                item["name"],
+                metadata_path,
+                schema_path=schema_path,
+                summarizer=SummaryGenerator(self._answer_client()),
+            )
+            target = job_workbook_dir / "metadata.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(metadata_path, target)
+            metadata_artifacts.append(
+                {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
+            )
 
         return schema_artifacts, metadata_artifacts
 
@@ -648,12 +634,6 @@ def _validate_queries(queries: Iterable[str], *, required: bool) -> list[str]:
     if required and not result:
         raise ValueError("At least one non-empty query is required for qa and all stages")
     return result
-
-
-def _resolve_artifacts(schema: bool, metadata: bool) -> tuple[bool, bool]:
-    if not schema and not metadata:
-        return True, True
-    return bool(schema), bool(metadata)
 
 
 def _normalize_sheet_filters(values: Iterable[str]) -> tuple[str, ...]:

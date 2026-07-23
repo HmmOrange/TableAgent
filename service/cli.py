@@ -31,16 +31,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Question to answer. Repeat for multiple questions; required for qa and all.",
     )
     parser.add_argument(
-        "--schema",
-        action="store_true",
-        help="Generate a workbook schema artifact. If neither output flag is set, both are generated.",
-    )
-    parser.add_argument(
-        "--metadata",
-        action="store_true",
-        help="Generate a workbook metadata artifact. If neither output flag is set, both are generated.",
-    )
-    parser.add_argument(
         "--embed",
         action="store_true",
         help="Generate retrieval_cards.pkl with embeddings for ingestion retrieval cards.",
@@ -75,8 +65,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--query is required when --stage is qa or all")
     if args.force and args.stage == "qa":
         parser.error("--force requires --stage structure or all")
-    if args.force and args.stage == "structure" and args.metadata and not args.schema:
-        parser.error("--force requires structure generation; do not use --metadata alone")
 
     try:
         service = TableAgentService.from_config(
@@ -88,8 +76,6 @@ def main(argv: list[str] | None = None) -> int:
             stage=args.stage,
             workbooks=args.workbook,
             queries=args.query,
-            schema=args.schema,
-            metadata=args.metadata,
             embed=args.embed,
             sheets=args.sheet,
             force=args.force,
