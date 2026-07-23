@@ -130,6 +130,12 @@ outputs/table_agent/service/structure/sources/<workbook-id>/
     sheet_text.txt
     table.png
     table.metadata.json
+    retrieval_cards.jsonl
+    retrieval_cards.csv
+    retrieval_cards.pkl
+  retrieval_cards.jsonl
+  retrieval_cards.csv
+  retrieval_cards.pkl
 ```
 
 Each job also exports readable copies using the original workbook and worksheet
@@ -139,10 +145,23 @@ names:
 outputs/table_agent/service/jobs/<job-id>/workbooks/<workbook-name>/
   schema.yaml
   metadata.json
+  retrieval_cards.jsonl
+  retrieval_cards.csv
+  retrieval_cards.pkl
   <sheet-name>/
     structure.yaml
+    retrieval_cards.jsonl
+    retrieval_cards.csv
+    retrieval_cards.pkl
     ...
 ```
+
+`retrieval_cards.jsonl` and `retrieval_cards.csv` contain the card text used by
+retrieval. Records are labeled with `retrieval_type` (`data` or `metadata`) and
+`retrieval_level` (`workbook`, `sheet`, or `table`). The card text intentionally
+omits layout-only noise such as used ranges and merged ranges. `retrieval_cards.pkl`
+stores the same records plus an `embedding` field with the embedding model,
+dimension, and vector values.
 
 The CLI result includes per-sheet records in `structures` and workbook-level paths
 in `schema_artifacts` and `metadata_artifacts`. A schema embeds the parsed structure
