@@ -3,8 +3,11 @@
 from .cards import (
     _build_retrieval_card,
     _extract_headers_text,
+    build_metadata_retrieval_card,
+    build_sheet_metadata_payload,
     build_source_retrieval_card,
     build_table_retrieval_cards,
+    extract_columns,
     extract_headers_text,
 )
 from .contracts import (
@@ -27,10 +30,13 @@ __all__ = [
     "TableRetriever",
     "TableRetrieverContract",
     "TableSearchRequest",
+    "build_metadata_retrieval_card",
+    "build_sheet_metadata_payload",
     "build_source_retrieval_card",
     "build_table_retrieval_cards",
     "choose_from_reranker",
     "cosine_similarity",
+    "extract_columns",
     "extract_headers_text",
     "hybrid_score",
     "normalize_scores",
