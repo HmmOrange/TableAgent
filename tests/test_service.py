@@ -138,7 +138,10 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
         "answer: second question",
     ]
     assert "artifacts" not in result["answers"][0]["qa"]
-    assert (service.jobs_dir / "job-one" / "run.json").is_file()
+    assert (service.root_dir / "job-one" / "run.json").is_file()
+    assert not (service.root_dir / "jobs").exists()
+    assert not (service.root_dir / "inputs").exists()
+    assert not (service.root_dir / "structure").exists()
 
 
 def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
@@ -162,7 +165,7 @@ def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
 
 
-def test_service_forwards_force_to_structure_pipeline(tmp_path: Path):
+def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")
     service = TableAgentService(
@@ -172,7 +175,26 @@ def test_service_forwards_force_to_structure_pipeline(tmp_path: Path):
         pipeline_factory=FakePipeline,
     )
 
-    service.run(stage="structure", workbooks=[source], force=True)
+    result = service.run(stage="qa", workbooks=[source], queries=["question"])
+
+    assert len(FakePipeline.instances) == 2
+    assert FakePipeline.instances[0].layout_vlm_client is not None
+    assert FakePipeline.instances[0].forces == [True]
+    assert FakePipeline.instances[1].layout_vlm_client is None
+    assert result["answers"][0]["answer"] == "answer: question"
+
+
+def test_service_always_regenerates_structure_in_a_fresh_workspace(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    service.run(stage="structure", workbooks=[source])
 
     assert FakePipeline.instances[0].forces == [True]
 
@@ -209,8 +231,46 @@ def test_service_normalizes_repeated_comma_separated_sheet_filters(tmp_path: Pat
     )
 
     assert [item["sheet"] for item in result["structures"]] == ["Summary", "Detail"]
-    schema_path = service.jobs_dir / "selected-sheets" / result["schema_artifacts"][0]["artifact"]
+    schema_path = service.root_dir / "selected-sheets" / result["schema_artifacts"][0]["artifact"]
     assert list(yaml.safe_load(schema_path.read_text(encoding="utf-8"))) == ["Summary", "Detail"]
+
+
+def test_ephemeral_service_run_returns_contents_without_persisting(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    output_root = tmp_path / "output"
+    service = TableAgentService(
+        {"service": {"root_dir": str(output_root)}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(stage="structure", workbooks=[source], persist=False)
+
+    assert result["artifacts"] == []
+    assert result["structures"][0]["artifact"] is None
+    assert "table1" in result["schema_artifacts"][0]["schema"]
+    assert result["metadata_artifacts"][0]["metadata"]["name"] == "book.xlsx"
+    assert not output_root.exists()
+
+
+def test_service_deletes_selected_or_all_saved_runs(tmp_path: Path):
+    root = tmp_path / "output"
+    service = TableAgentService({"service": {"root_dir": str(root)}})
+    for run_id in ("run-one", "run-two"):
+        run_dir = root / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(f'{{"job_id": "{run_id}"}}', encoding="utf-8")
+    unrelated = root / "unrelated"
+    unrelated.mkdir()
+
+    selected = service.delete_runs(["run-one", "missing"])
+    all_runs = service.delete_runs(all_runs=True)
+
+    assert selected == {"deleted": ["run-one"], "missing": ["missing"]}
+    assert all_runs == {"deleted": ["run-two"], "missing": []}
+    assert unrelated.is_dir()
 
 
 def test_service_rejects_missing_sheet_before_pipeline_work(tmp_path: Path):

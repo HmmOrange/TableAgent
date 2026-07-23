@@ -34,10 +34,11 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.workbook == ["sales.xlsx", "costs.xlsx"]
     assert args.query == ["Total revenue?", "Largest cost?"]
     assert args.embed is False
-    assert args.force is False
     assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
+    assert args.delete_job == []
+    assert args.delete_all_jobs is False
 
 
 def test_cli_parser_accepts_embed_and_sheet_flags():
@@ -75,19 +76,9 @@ def test_cli_requires_query_for_answering_stages(stage):
     assert exc_info.value.code == 2
 
 
-def test_cli_rejects_force_for_qa_stage():
+def test_cli_rejects_removed_force_flag():
     with pytest.raises(SystemExit) as exc_info:
-        cli.main(
-            [
-                "--stage",
-                "qa",
-                "--workbook",
-                "book.xlsx",
-                "--query",
-                "Question?",
-                "--force",
-            ]
-        )
+        cli.build_parser().parse_args(["--stage", "structure", "--workbook", "book.xlsx", "--force"])
 
     assert exc_info.value.code == 2
 
@@ -122,7 +113,6 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
             "alternate_answer",
             "--vlm",
             "alternate_layout",
-            "--force",
         ]
     )
 
@@ -136,9 +126,52 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "queries": [],
         "embed": False,
         "sheets": [],
-        "force": True,
     }
     assert json.loads(capsys.readouterr().out) == {"job_id": "job-one", "stage": "structure"}
+
+
+def test_cli_deletes_selected_jobs_without_requiring_workbooks(monkeypatch, capsys):
+    captured = {}
+
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(path, **kwargs):
+            captured["config"] = path
+            return FakeTableAgentService()
+
+        def delete_runs(self, run_ids, *, all_runs):
+            captured["run_ids"] = run_ids
+            captured["all_runs"] = all_runs
+            return {"deleted": list(run_ids), "missing": []}
+
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+
+    result = cli.main(["--config", "private.yaml", "--delete-job", "run-one", "--delete-job", "run-two"])
+
+    assert result == 0
+    assert captured == {
+        "config": "private.yaml",
+        "run_ids": ["run-one", "run-two"],
+        "all_runs": False,
+    }
+    assert json.loads(capsys.readouterr().out)["deleted"] == ["run-one", "run-two"]
+
+
+def test_cli_deletes_all_jobs(monkeypatch, capsys):
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(path, **kwargs):
+            return FakeTableAgentService()
+
+        def delete_runs(self, run_ids, *, all_runs):
+            assert run_ids == []
+            assert all_runs is True
+            return {"deleted": ["run-one"], "missing": []}
+
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+
+    assert cli.main(["--delete-all-jobs"]) == 0
+    assert json.loads(capsys.readouterr().out)["deleted"] == ["run-one"]
 
 
 def test_cli_reports_expected_runtime_errors(monkeypatch, capsys):

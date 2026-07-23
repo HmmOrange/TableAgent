@@ -8,7 +8,7 @@ from service.runtime import TableAgentService
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run TableAgent once over one or more workbooks.")
+    parser = argparse.ArgumentParser(description="Run TableAgent or delete saved CLI runs.")
     parser.add_argument("--config", default="config.yaml", help="Path to the private service configuration.")
     parser.add_argument(
         "--stage",
@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workbook",
         action="append",
-        required=True,
+        default=[],
         metavar="PATH",
         help="Workbook to process. Repeat for multiple workbooks.",
     )
@@ -36,11 +36,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate retrieval_cards.pkl with embeddings for ingestion retrieval cards.",
     )
     parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Regenerate cached worksheet structures instead of reusing valid structures.",
-    )
-    parser.add_argument(
         "--sheet",
         action="append",
         default=[],
@@ -55,16 +50,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--vlm",
         help="Configured VLM profile to use instead of the config.yaml default.",
     )
+    cleanup = parser.add_mutually_exclusive_group()
+    cleanup.add_argument(
+        "--delete-job",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="Delete a saved run directory. Repeat for multiple runs.",
+    )
+    cleanup.add_argument(
+        "--delete-all-jobs",
+        action="store_true",
+        help="Delete every saved TableAgent run under service.root_dir.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.stage in {"qa", "all"} and not any(query.strip() for query in args.query):
+    cleanup_requested = bool(args.delete_job or args.delete_all_jobs)
+    if cleanup_requested and (args.workbook or args.query or args.embed or args.sheet):
+        parser.error("cleanup flags cannot be combined with workbook processing flags")
+    if not cleanup_requested and not args.workbook:
+        parser.error("--workbook is required unless deleting saved jobs")
+    if not cleanup_requested and args.stage in {"qa", "all"} and not any(query.strip() for query in args.query):
         parser.error("--query is required when --stage is qa or all")
-    if args.force and args.stage == "qa":
-        parser.error("--force requires --stage structure or all")
 
     try:
         service = TableAgentService.from_config(
@@ -72,14 +83,16 @@ def main(argv: list[str] | None = None) -> int:
             llm_profile=args.llm,
             vlm_profile=args.vlm,
         )
-        result = service.run(
-            stage=args.stage,
-            workbooks=args.workbook,
-            queries=args.query,
-            embed=args.embed,
-            sheets=args.sheet,
-            force=args.force,
-        )
+        if cleanup_requested:
+            result = service.delete_runs(args.delete_job, all_runs=args.delete_all_jobs)
+        else:
+            result = service.run(
+                stage=args.stage,
+                workbooks=args.workbook,
+                queries=args.query,
+                embed=args.embed,
+                sheets=args.sheet,
+            )
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
         print(f"table-agent: error: {exc}", file=sys.stderr)
         return 1
