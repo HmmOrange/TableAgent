@@ -9,6 +9,7 @@ from typing import Any, Callable
 from TableAgent.artifacts import (
     legacy_sheet_dir,
     sheet_artifact_dir,
+    write_sheet_retrieval_cards,
     workbook_artifact_dir,
 )
 from TableAgent.configs import TableAgentConfig
@@ -104,6 +105,7 @@ class SourcePreparer:
                         source_hash=source_hash,
                     )
                     self._write_sheet_text(source_path, sheet_name, paths["text"])
+                    self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                 except Exception as exc:
                     if logger:
                         logger.error("TableAgent metadata preparation failed for %s:%s: %s", source_path, sheet_name, exc)
@@ -117,9 +119,11 @@ class SourcePreparer:
                     structure_exists = False
 
                 if has_current_structure:
+                    self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                     self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)
                     continue
                 if structure_exists and not regenerate_invalid:
+                    self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                     self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)
                     continue
                 if paths["error"].is_file():
@@ -142,6 +146,7 @@ class SourcePreparer:
                         f"Failed to generate structure (empty/invalid/token-capped). Raw: {structure_text}",
                         encoding="utf-8",
                     )
+                self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                 self._progress("prepare_done", workbook=source_path.name, sheet=sheet_name)
 
     def source_dir(
@@ -257,6 +262,19 @@ class SourcePreparer:
             "merged_ranges": metadata.merged_ranges,
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _write_retrieval_cards(
+        sheet_dir: Path,
+        source_path: Path,
+        sheet_name: str,
+        logger: Any | None = None,
+    ) -> None:
+        try:
+            write_sheet_retrieval_cards(sheet_dir, source_path, sheet_name)
+        except Exception as exc:
+            if logger:
+                logger.error("TableAgent retrieval card export failed for %s:%s: %s", source_path, sheet_name, exc)
 
     @staticmethod
     def _sha256(path: Path) -> str:

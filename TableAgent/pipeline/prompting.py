@@ -29,12 +29,17 @@ class PromptBuilder:
                 f"Candidate {index}:\n"
                 f"workbook: {candidate.workbook_path.name}\n"
                 f"sheet: {candidate.sheet_name}\n"
+                f"retrieval_type: {candidate.retrieval_type}\n"
+                f"retrieval_level: {candidate.retrieval_level}\n"
                 f"table_id: {candidate.table_id}\n"
                 f"table_name: {candidate.table_name}\n"
                 f"score: {candidate.score}\n"
                 f"lexical_score: {candidate.lexical_score}\n"
                 f"embedding_score: {candidate.embedding_score}\n"
                 f"embedding_used: {candidate.embedding_used}\n"
+                f"entity_score: {candidate.entity_score}\n"
+                f"matched_terms: {list(candidate.matched_terms)}\n"
+                f"missing_terms: {list(candidate.missing_terms)}\n"
                 f"retrieval_card:\n{card}"
             )
         return "\n\n".join(lines)

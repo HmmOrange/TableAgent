@@ -1,10 +1,17 @@
 import json
+import pickle
 import shutil
 import tempfile
 from pathlib import Path
 import pytest
+from TableAgent.artifacts import write_sheet_retrieval_cards, write_workbook_retrieval_cards
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.retrieval import SourceRetriever
+from TableAgent.pipeline.retrieval import (
+    SourceRetriever,
+    build_metadata_retrieval_card,
+    build_sheet_metadata_payload,
+    build_table_retrieval_cards,
+)
 from TableAgent.schema import EvalSample
 from TableAgent.llm import BaseLLM, LLMResponse
 
@@ -769,7 +776,6 @@ table2:
     assert "table1:" not in sheet_candidates[0].structure_text
     assert "Maintenance item" in sheet_candidates[0].retrieval_card
 
-@pytest.mark.xfail(reason="Entity-score fields are not present in the extracted source snapshot")
 def test_candidate_prompt_text_labels(temp_sources_dir):
     from TableAgent.pipeline.prompting import PromptBuilder
     from TableAgent.pipeline.common import SourceCandidate
@@ -812,7 +818,100 @@ def test_candidate_prompt_text_labels(temp_sources_dir):
     assert "some structure" not in prompt_text
 
 
-@pytest.mark.xfail(reason="Entity-score fields are not present in the extracted source snapshot")
+def test_retrieval_cards_omit_layout_ranges_from_card_text():
+    structure_text = """
+table1:
+  id: maintenance
+  name: Maintenance Plan
+  description: Plan rows by equipment.
+  table_range: A1:D20
+  headers:
+    - id: equipment
+      label: Equipment
+      description: Equipment name
+      orientation: column
+"""
+    table_cards = build_table_retrieval_cards(
+        Path("/path/to/book.xlsx"),
+        "Plan",
+        structure_text,
+        "maintenance equipment preview",
+    )
+    metadata_payload = build_sheet_metadata_payload(
+        Path("/path/to/book.xlsx"),
+        "Plan",
+        structure_text,
+        "maintenance equipment preview",
+        {"used_range": "A1:D20", "merged_ranges": ["A1:D1"]},
+    )
+    metadata_card = build_metadata_retrieval_card(metadata_payload)
+
+    assert table_cards
+    assert "Maintenance Plan" in table_cards[0]["retrieval_card"]
+    assert "Equipment" in table_cards[0]["retrieval_card"]
+    assert "A1:D20" not in table_cards[0]["retrieval_card"]
+    assert "Range:" not in table_cards[0]["retrieval_card"]
+    assert "A1:D20" not in metadata_card
+    assert "A1:D1" not in metadata_card
+    assert "Used range:" not in metadata_card
+    assert "Merged ranges:" not in metadata_card
+
+
+def test_ingestion_retrieval_card_exports_omit_layout_noise(tmp_path: Path):
+    sheet_dir = tmp_path / "Book.xlsx" / "Plan"
+    sheet_dir.mkdir(parents=True)
+    (sheet_dir / "metadata.yaml").write_text(
+        """
+used_range: A1:D20
+merged_ranges:
+  - A1:D1
+""",
+        encoding="utf-8",
+    )
+    (sheet_dir / "structure.yaml").write_text(
+        """
+table1:
+  id: maintenance
+  name: Maintenance Plan
+  description: Plan for maintenance.
+  table_range: A1:D20
+  headers:
+    - id: equipment
+      label: Equipment
+      orientation: column
+""",
+        encoding="utf-8",
+    )
+    (sheet_dir / "sheet_text.txt").write_text("maintenance equipment preview", encoding="utf-8")
+
+    sheet_records = write_sheet_retrieval_cards(sheet_dir, Path("Book.xlsx"), "Plan")
+    workbook_records = write_workbook_retrieval_cards(tmp_path / "Book.xlsx", "Book.xlsx", sheet_records)
+
+    assert {record["retrieval_type"] for record in sheet_records} == {"metadata", "data"}
+    assert workbook_records[0]["retrieval_level"] == "workbook"
+    for artifact in (
+        sheet_dir / "retrieval_cards.jsonl",
+        sheet_dir / "retrieval_cards.csv",
+        tmp_path / "Book.xlsx" / "retrieval_cards.jsonl",
+        tmp_path / "Book.xlsx" / "retrieval_cards.csv",
+    ):
+        text = artifact.read_text(encoding="utf-8")
+        assert "Maintenance Plan" in text
+        assert "A1:D20" not in text
+        assert "A1:D1" not in text
+        assert "used_range" not in text
+        assert "merged_ranges" not in text
+
+    embedded_records = pickle.loads((sheet_dir / "retrieval_cards.pkl").read_bytes())
+    assert embedded_records
+    for record in embedded_records:
+        embedding = record["embedding"]
+        assert embedding["model"] == "mock-hash-embedding"
+        assert embedding["dimension"] == 128
+        assert len(embedding["values"]) == 128
+        assert all(isinstance(value, float) for value in embedding["values"])
+
+
 def test_retrieval_entity_match_promotes_specific_value_candidate(temp_sources_dir):
     summary_dir = temp_sources_dir / "dummy_Summary"
     summary_dir.mkdir()

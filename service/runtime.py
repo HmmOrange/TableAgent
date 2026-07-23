@@ -21,6 +21,8 @@ from TableAgent.artifacts import (
     iter_sheet_artifact_dirs,
     legacy_sheet_dir,
     sheet_artifact_dir,
+    write_sheet_retrieval_cards,
+    write_workbook_retrieval_cards,
     workbook_artifact_dir,
 )
 from TableAgent.configs import load_config
@@ -272,6 +274,22 @@ class TableAgentService:
                 if structure_path is None:
                     continue
                 structure_paths.append((sheet_name, structure_path))
+
+            source_retrieval_records: list[dict[str, Any]] = []
+            job_retrieval_records: list[dict[str, Any]] = []
+            for sheet_name, structure_path in structure_paths:
+                source_retrieval_records.extend(
+                    write_sheet_retrieval_cards(structure_path.parent, Path(item["name"]), sheet_name)
+                )
+                job_sheet_dir = sheet_artifact_dir(job_workbook_dir, sheet_name)
+                if job_sheet_dir.is_dir():
+                    job_retrieval_records.extend(
+                        write_sheet_retrieval_cards(job_sheet_dir, Path(item["name"]), sheet_name)
+                    )
+            if source_retrieval_records:
+                write_workbook_retrieval_cards(workbook_dir, item["name"], source_retrieval_records)
+            if job_retrieval_records:
+                write_workbook_retrieval_cards(job_workbook_dir, item["name"], job_retrieval_records)
 
             schema_path = workbook_dir / "schema.yaml"
             if include_schema:

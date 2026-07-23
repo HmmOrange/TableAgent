@@ -508,11 +508,14 @@ class TableAgentPipeline(BasePipeline):
         responses: list[LLMResponse],
         start_time: float,
     ) -> PipelineOutput:
+        is_metadata_retrieval = getattr(candidate, "retrieval_type", "data") == "metadata"
         image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
         fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
         structure_path = candidate.directory / "structure.yaml"
-        if candidate.table_id:
-            structure_path = self._sample_dir(sample) / "retrieved_structure.yaml"
+        if candidate.table_id or is_metadata_retrieval:
+            structure_path = self._sample_dir(sample) / (
+                "retrieved_metadata.yaml" if is_metadata_retrieval else "retrieved_structure.yaml"
+            )
             structure_path.parent.mkdir(parents=True, exist_ok=True)
             structure_path.write_text(candidate.structure_text, encoding="utf-8")
         related_structure_paths = self._related_structure_paths(candidate)
@@ -523,18 +526,37 @@ class TableAgentPipeline(BasePipeline):
             sheet=candidate.sheet_name,
             table=candidate.table_id,
         )
-        answer_response, qa_info = self._run_verified_qa(
-            question=sample.question,
-            structure_path=structure_path,
-            workbook_path=candidate.workbook_path,
-            qa_artifact_dir=self._sample_dir(sample) / "qa",
-            fallback_prompt=image_prompt,
-            fallback_image_path=candidate.image_path,
-            fallback_text_prompt=fallback_prompt,
-            related_structure_paths=related_structure_paths,
-            excluded_sheet_names=self._perfect_retrieval_excluded_sheets(candidate.workbook_path),
-            enable_final_answer_review=True,
-        )
+        if is_metadata_retrieval:
+            answer_response = self.qa_agent.run(
+                prompt=fallback_prompt,
+                image_path=None,
+                fallback_prompt=fallback_prompt,
+            )
+            qa_info = {
+                "success": True,
+                "error": None,
+                "execution_time": 0,
+                "token_usage": {
+                    "prompt": int(getattr(answer_response, "prompt_tokens", 0) or 0),
+                    "completion": int(getattr(answer_response, "completion_tokens", 0) or 0),
+                },
+                "artifacts": {},
+                "fallback_used": True,
+                "mode": "metadata_context",
+            }
+        else:
+            answer_response, qa_info = self._run_verified_qa(
+                question=sample.question,
+                structure_path=structure_path,
+                workbook_path=candidate.workbook_path,
+                qa_artifact_dir=self._sample_dir(sample) / "qa",
+                fallback_prompt=image_prompt,
+                fallback_image_path=candidate.image_path,
+                fallback_text_prompt=fallback_prompt,
+                related_structure_paths=related_structure_paths,
+                excluded_sheet_names=self._perfect_retrieval_excluded_sheets(candidate.workbook_path),
+                enable_final_answer_review=True,
+            )
         responses.append(answer_response)
         predicted_answer = self._finalize_siflex_answer(sample, answer_response.content, responses, qa_info)
         self._progress(
@@ -549,10 +571,18 @@ class TableAgentPipeline(BasePipeline):
             "embedding_score": getattr(candidate, "embedding_score", 0.0),
             "embedding_used": getattr(candidate, "embedding_used", False),
             "fallback_used": getattr(candidate, "fallback_used", False),
+            "retrieval_type": getattr(candidate, "retrieval_type", "data"),
+            "retrieval_level": getattr(candidate, "retrieval_level", ""),
+            "retrieval_trace": list(getattr(candidate, "retrieval_trace", ())),
+            "entity_score": getattr(candidate, "entity_score", 0.0),
+            "matched_terms": list(getattr(candidate, "matched_terms", ())),
+            "missing_terms": list(getattr(candidate, "missing_terms", ())),
+            "retrieval_rank": getattr(candidate, "retrieval_rank", 0),
             "table_id": getattr(candidate, "table_id", ""),
             "table_name": getattr(candidate, "table_name", ""),
             "table_description": getattr(candidate, "table_description", ""),
             "perfect_retrieval": self.settings.perfect_retrieval,
+            "retrieval_audit": list(getattr(candidate, "retrieval_audit", ())),
         }
         if hasattr(candidate, "reranker_selected_index"):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
