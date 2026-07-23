@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -11,26 +10,25 @@ from service.api import create_app
 class FakeService:
     def __init__(self, root: Path):
         self.root_dir = root
-        self.jobs_dir = root / "jobs"
-        self.jobs_dir.mkdir(parents=True)
         self.max_workers = 1
         self.max_upload_bytes = 1024 * 1024
         self.api_key = None
         self.calls = []
         self.accept_local_paths = False
 
-    def run(self, *, stage, queries, workbooks, schema, metadata, sheets, job_id):
+    def run(self, *, stage, queries, workbooks, embed, sheets, persist):
         self.calls.append(
             {
                 "stage": stage,
                 "queries": queries,
-                "schema": schema,
-                "metadata": metadata,
+                "embed": embed,
                 "sheets": sheets,
+                "persist": persist,
+                "workbooks": [str(path) for path in workbooks],
             }
         )
         return {
-            "job_id": job_id,
+            "job_id": "ephemeral-run",
             "stage": stage,
             "workbooks": [Path(path).name for path in workbooks],
             "structures": [],
@@ -57,33 +55,30 @@ def test_health_status_and_upload_job(tmp_path: Path):
         assert client.get("/health/ready").json()["status"] == "ready"
 
         response = client.post(
-            "/v1/jobs/upload?wait=true",
+            "/v1/jobs/upload",
             data={
                 "payload": (
-                    '{"stage":"all","queries":["question"],"schema":true,'
-                    '"metadata":true,"sheets":["Summary,Detail","Archive"]}'
+                    '{"stage":"all","queries":["question"],'
+                    '"embed":true,"sheets":["Summary,Detail","Archive"]}'
                 )
             },
             files={"files": ("book.xlsx", b"workbook-bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         )
         body = response.json()
 
-        assert response.status_code == 202
-        assert body["status"] == "succeeded"
-        assert body["result"]["answers"][0]["answer"] == "ok"
-        job_id = body["job_id"]
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z", job_id)
-        assert client.get(f"/v1/jobs/{job_id}").json()["status"] == "succeeded"
-        assert client.get("/v1/status").json()["jobs"]["succeeded"] == 1
-        assert service.calls == [
-            {
-                "stage": "all",
-                "queries": ["question"],
-                "schema": True,
-                "metadata": True,
-                "sheets": ["Summary,Detail", "Archive"],
-            }
-        ]
+        assert response.status_code == 200
+        assert body["answers"][0]["answer"] == "ok"
+        assert client.get("/v1/status").json()["persistence"] is False
+        assert service.calls[0]["stage"] == "all"
+        assert service.calls[0]["queries"] == ["question"]
+        assert service.calls[0]["embed"] is True
+        assert service.calls[0]["sheets"] == ["Summary,Detail", "Archive"]
+        assert service.calls[0]["persist"] is False
+        uploaded_path = Path(service.calls[0]["workbooks"][0])
+        assert client.get("/v1/jobs/ephemeral-run").status_code == 404
+        assert client.get("/v1/jobs/ephemeral-run/artifacts").status_code == 404
+    assert not uploaded_path.exists()
+    assert not service.root_dir.exists()
 
 
 def test_server_side_paths_are_forbidden_by_default(tmp_path: Path):
@@ -104,27 +99,22 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
 
     with TestClient(app) as client:
         response = client.post(
-            "/v1/jobs?wait=true",
+            "/v1/jobs",
             json={
                 "stage": "structure",
                 "queries": [],
                 "workbooks": [str(tmp_path / "book.xlsx")],
-                "schema": True,
-                "metadata": False,
+                "embed": True,
                 "sheets": ["Summary,Detail"],
             },
         )
 
-    assert response.status_code == 202
-    assert service.calls == [
-        {
-            "stage": "structure",
-            "queries": [],
-            "schema": True,
-            "metadata": False,
-            "sheets": ["Summary,Detail"],
-        }
-    ]
+    assert response.status_code == 200
+    assert service.calls[0]["stage"] == "structure"
+    assert service.calls[0]["queries"] == []
+    assert service.calls[0]["embed"] is True
+    assert service.calls[0]["sheets"] == ["Summary,Detail"]
+    assert service.calls[0]["persist"] is False
 
 
 def test_all_stage_requires_a_query(tmp_path: Path):

@@ -67,7 +67,7 @@ table_agent:
   retrieval_embedding_weight: 0.5
 
 service:
-  root_dir: "outputs/table_agent/service"
+  root_dir: "outputs"
   max_workers: 1
   max_upload_mb: 100
   api_key: "${TABLE_AGENT_SERVICE_API_KEY:-}"

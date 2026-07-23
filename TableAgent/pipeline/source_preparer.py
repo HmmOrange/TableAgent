@@ -263,15 +263,20 @@ class SourcePreparer:
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    @staticmethod
     def _write_retrieval_cards(
+        self,
         sheet_dir: Path,
         source_path: Path,
         sheet_name: str,
         logger: Any | None = None,
     ) -> None:
         try:
-            write_sheet_retrieval_cards(sheet_dir, source_path, sheet_name)
+            write_sheet_retrieval_cards(
+                sheet_dir,
+                source_path,
+                sheet_name,
+                include_embeddings=bool(self.settings.embed_retrieval_cards),
+            )
         except Exception as exc:
             if logger:
                 logger.error("TableAgent retrieval card export failed for %s:%s: %s", source_path, sheet_name, exc)

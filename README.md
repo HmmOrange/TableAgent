@@ -44,7 +44,7 @@ Edit `config.yaml` before running TableAgent. The important sections are:
 | `llm.provider` | Name of the default profile under `models` |
 | `vlm.provider` | Name of the default profile under `vlm_models` |
 | `table_agent.libreoffice_path` | LibreOffice executable path when it is not on `PATH` |
-| `service.root_dir` | Where jobs, generated structures, and cached inputs are stored |
+| `service.root_dir` | Root directory for saved CLI run output |
 
 The profile names must match. For example, `llm.provider: answer_model` selects
 `models.answer_model`, while `vlm.provider: layout_model` selects
@@ -74,8 +74,10 @@ retrieval, rendering, and service settings.
 ## Run From The CLI
 
 Run commands from the repository root. The CLI prints a JSON result containing the
-job ID, processing results, answers, and generated artifact paths. Each run is saved
-under `service.root_dir/jobs/<job-id>/`, including the complete result in `run.json`.
+run ID, processing results, answers, and generated artifact paths. Each CLI run is
+saved directly under `service.root_dir/<run-id>/`, including the complete result in
+`run.json`. Pipeline scratch files and normalized workbooks are temporary and are
+removed after the run; a later run never reuses a prior structure.
 When no job ID is supplied programmatically, the generated ID is a UTC timestamp such
 as `2026-07-22T16-05-54.123456Z`.
 
@@ -84,83 +86,54 @@ as `2026-07-22T16-05-54.123456Z`.
 #### Description and requirements
 
 Use the `structure` stage to ingest one or more workbooks. TableAgent renders each
-selected worksheet, detects and verifies its table ranges, and caches a
-`structure.yaml` file for later QA requests.
-
-By default, valid cached structures are reused. Add `--force` to regenerate the
-selected worksheet structures with the layout VLM.
+selected worksheet, detects and verifies its table ranges, and writes the resulting
+artifacts into that run's output directory. The structures are not a reusable cache.
 
 - At least one `--workbook` is required. Supported extensions are `.xls`, `.xlsx`,
   `.xlsm`, `.xltx`, and `.xltm`.
 - Structure generation requires LibreOffice and the configured layout VLM.
 - Schema generation also requires the configured answer LLM to describe the
   workbook and its worksheets.
-- Metadata-only ingestion can run without the layout VLM. When no cached
-  `schema.yaml` exists, the workbook description is empty.
 
-#### Example: One workbook with default flags
+#### Example: One workbook
 
-When neither `--schema` nor `--metadata` is supplied, TableAgent generates both:
+Ingestion always generates `schema.yaml`, `metadata.json`, and retrieval card
+artifacts:
 
 ```bash
 uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
 ```
 
-#### Output types by flag
-
-The output flags select which workbook-level artifacts are generated:
-
-| Output flags | Structure processing | Workbook artifacts |
-| --- | --- | --- |
-| None (default) | All selected worksheets | `schema.yaml` and `metadata.json` |
-| `--schema` | All selected worksheets | `schema.yaml` only |
-| `--metadata` | Skipped | `metadata.json` only |
-| `--schema --metadata` | All selected worksheets | `schema.yaml` and `metadata.json` |
-
-With the default `service.root_dir`, canonical artifacts are stored at:
+With `service.root_dir: outputs`, a saved run is stored at:
 
 ```text
-outputs/table_agent/service/structure/sources/<workbook-id>/
-  schema.yaml
-  metadata.json
-  <sheet-name>/
-    structure.yaml
-    metadata.yaml
+outputs/<run-id>/
+  run.json
+  workbooks/<workbook-name>/
+    schema.yaml
     metadata.json
-    sheet_text.txt
-    table.png
-    table.metadata.json
     retrieval_cards.jsonl
     retrieval_cards.csv
-    retrieval_cards.pkl
-  retrieval_cards.jsonl
-  retrieval_cards.csv
-  retrieval_cards.pkl
-```
-
-Each job also exports readable copies using the original workbook and worksheet
-names:
-
-```text
-outputs/table_agent/service/jobs/<job-id>/workbooks/<workbook-name>/
-  schema.yaml
-  metadata.json
-  retrieval_cards.jsonl
-  retrieval_cards.csv
-  retrieval_cards.pkl
-  <sheet-name>/
-    structure.yaml
-    retrieval_cards.jsonl
-    retrieval_cards.csv
-    retrieval_cards.pkl
-    ...
+    <sheet-name>/
+      structure.yaml
+      metadata.yaml
+      metadata.json
+      sheet_text.txt
+      table.png
+      table.metadata.json
+      retrieval_cards.jsonl
+      retrieval_cards.csv
+  artifacts/
+    ... QA and execution artifacts ...
 ```
 
 `retrieval_cards.jsonl` and `retrieval_cards.csv` contain the card text used by
 retrieval. Records are labeled with `retrieval_type` (`data` or `metadata`) and
 `retrieval_level` (`workbook`, `sheet`, or `table`). The card text intentionally
-omits layout-only noise such as used ranges and merged ranges. `retrieval_cards.pkl`
-stores the same records plus an `embedding` field with the embedding model,
+omits layout-only noise such as used ranges and merged ranges.
+
+Add `--embed` when you want ingestion to also export `retrieval_cards.pkl`. The
+pickle stores the same records plus an `embedding` field with the embedding model,
 dimension, and vector values.
 
 The CLI result includes per-sheet records in `structures` and workbook-level paths
@@ -198,48 +171,43 @@ Summary:
 | `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
 | `--stage structure` | Runs ingestion only. |
 | `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
-| `--schema` | Generates only the workbook schema unless `--metadata` is also supplied. |
-| `--metadata` | Generates only workbook metadata unless `--schema` is also supplied. |
-| `--force` | Regenerates cached worksheet structures. Valid only with `--stage structure` or `--stage all`. |
+| `--embed` | Also writes `retrieval_cards.pkl` with retrieval card embeddings. |
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
 | `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
 | `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
+| `--delete-job ID` | Deletes one saved run directory. Repeat for multiple run IDs. |
+| `--delete-all-jobs` | Deletes every saved run directory under `service.root_dir`. |
 
 Worksheet matching is exact and case-sensitive. When multiple workbooks are
 provided, every requested worksheet must exist in every workbook. Metadata always
 lists every worksheet in the workbook, even when `--sheet` limits structure and
 schema processing.
 
-For example, the following command generates a schema for `Summary`, `Detail`, and
-`Archive` only:
+For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
 
 ```bash
 uv run table-agent --config config.yaml --stage structure \
   --workbook sample/QA_sample.xlsx \
-  --schema \
   --sheet "Summary,Detail" --sheet Archive
 ```
 
-To rebuild the cached structures for the selected worksheets, add `--force`:
+To remove selected or all saved CLI output:
 
 ```bash
-uv run table-agent --config config.yaml --stage structure \
-  --workbook sample/QA_sample.xlsx --force
+uv run table-agent --config config.yaml --delete-job 2026-07-22T16-05-54.123456Z
+uv run table-agent --config config.yaml --delete-all-jobs
 ```
 
 ### QA
 
 #### Description and requirements
 
-Use the `qa` stage to answer natural-language questions using previously generated
-worksheet structures. This stage reuses the cached structures and calls the answer
-LLM; it does not call the layout VLM.
+Use the `qa` stage to answer natural-language questions. This stage generates fresh
+worksheet structures in the same run, then calls the answer LLM. It does not depend
+on a previous ingestion run.
 
 - At least one `--workbook` and one non-empty `--query` are required.
-- The workbook must already have a valid structure cache created by the `structure`
-  or `all` stage.
-- If the workbook is new or has changed, QA reports a missing or stale cache. Run
-  ingestion again before retrying.
+- Structure generation requires LibreOffice and the configured layout VLM.
 
 #### Example: One workbook and one query
 
@@ -263,8 +231,7 @@ The CLI prints a JSON result with the answer and supporting execution details:
       "workbook": "QA_sample.xlsx",
       "sheet": "Summary",
       "status": "good",
-      "cache_hit": true,
-      "structure": "<cached structure>",
+      "structure": "<generated structure>",
       "artifact": "workbooks/QA_sample.xlsx/Summary/structure.yaml"
     }
   ],
@@ -302,9 +269,8 @@ The CLI prints a JSON result with the answer and supporting execution details:
 ```
 
 The exact values depend on the workbook, retrieval result, and model response.
-Cached per-sheet structures and the selected workbook artifacts are copied into the
-job directory. As with ingestion, omitting both output flags generates both
-`schema.yaml` and `metadata.json`.
+The selected worksheet structures and workbook artifacts are saved only inside this
+run directory.
 
 #### SiFlex benchmark integration
 
@@ -360,15 +326,13 @@ uv run python -m TableAgent.benchmarks.siflex \
 | Flag | Description |
 | --- | --- |
 | `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
-| `--stage qa` | Runs QA against cached structures. |
+| `--stage qa` | Generates structures and runs QA in one invocation. |
 | `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
 | `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
-| `--schema` | Includes only the workbook schema unless `--metadata` is also supplied. |
-| `--metadata` | Includes only workbook metadata unless `--schema` is also supplied. |
 | `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
 | `--llm NAME` | Overrides the configured answer LLM profile. |
 
-The `--vlm` option is accepted by the CLI but is not used during the `qa` stage.
+The `--vlm` option selects the layout VLM used to generate structures for QA.
 
 ### Run End-To-End
 
@@ -391,23 +355,24 @@ Start the HTTP service after configuring the same LLM and VLM profiles:
 uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 8000
 ```
 
-Submit a workbook and wait for an end-to-end result:
+Submit a workbook and receive the end-to-end result directly:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/v1/jobs/upload?wait=true" \
+curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
   -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"schema":true,"metadata":true,"sheets":["Summary,Detail"]}' \
+  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"embed":true,"sheets":["Summary,Detail"]}' \
   -F "files=@sample/QA_sample.xlsx"
 ```
 
-Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `schema`, `metadata`, and
-`sheets`. When both booleans are false or omitted, the service generates both
-workbook artifacts. Sheet list entries may contain comma-separated names.
+Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
+Ingestion always generates workbook schema and metadata artifacts. Sheet list
+entries may contain comma-separated names.
 
-Omit `X-API-Key` when `service.api_key` is empty. Without `wait=true`, poll
-`GET /v1/jobs/{job_id}`. Generated files are available through
-`GET /v1/jobs/{job_id}/artifacts`, and the interactive API documentation is at
-`http://127.0.0.1:8000/docs`.
+Omit `X-API-Key` when `service.api_key` is empty. The serving layer keeps no jobs,
+logs, uploads, workbooks, structures, or other artifacts on disk. It uses temporary
+workspace files while processing and returns the result contents in the response;
+there is no polling or artifact-download endpoint. The interactive API documentation
+is at `http://127.0.0.1:8000/docs`.
 
 Server-side workbook paths are disabled by default. To enable `POST /v1/jobs`, set
 `service.allow_local_paths: true` and restrict access with

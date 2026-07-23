@@ -889,6 +889,8 @@ table1:
 
     assert {record["retrieval_type"] for record in sheet_records} == {"metadata", "data"}
     assert workbook_records[0]["retrieval_level"] == "workbook"
+    assert not (sheet_dir / "retrieval_cards.pkl").exists()
+    assert not (tmp_path / "Book.xlsx" / "retrieval_cards.pkl").exists()
     for artifact in (
         sheet_dir / "retrieval_cards.jsonl",
         sheet_dir / "retrieval_cards.csv",
@@ -902,6 +904,18 @@ table1:
         assert "used_range" not in text
         assert "merged_ranges" not in text
 
+    sheet_records = write_sheet_retrieval_cards(
+        sheet_dir,
+        Path("Book.xlsx"),
+        "Plan",
+        include_embeddings=True,
+    )
+    write_workbook_retrieval_cards(
+        tmp_path / "Book.xlsx",
+        "Book.xlsx",
+        sheet_records,
+        include_embeddings=True,
+    )
     embedded_records = pickle.loads((sheet_dir / "retrieval_cards.pkl").read_bytes())
     assert embedded_records
     for record in embedded_records:

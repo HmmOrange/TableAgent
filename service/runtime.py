@@ -3,10 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import uuid
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Literal
 
 import openpyxl
@@ -18,8 +17,6 @@ from TableAgent.artifacts import (
     build_workbook_metadata,
     build_workbook_schema,
     copy_artifact_tree,
-    iter_sheet_artifact_dirs,
-    legacy_sheet_dir,
     sheet_artifact_dir,
     write_sheet_retrieval_cards,
     write_workbook_retrieval_cards,
@@ -29,9 +26,7 @@ from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
-from TableAgent.pipeline.source_preparer import LAYOUT_WORKFLOW_VERSION
 from TableAgent.schema import EvalSample
-from TableAgent.structure.layout.parsing import _is_valid_structure
 
 
 Stage = Literal["structure", "qa", "all"]
@@ -56,13 +51,8 @@ class TableAgentService:
         service_config = self.config.get("service") or {}
         if not isinstance(service_config, dict):
             raise ValueError("service configuration must be a mapping")
-        configured_root = root_dir or service_config.get("root_dir", "outputs/table_agent/service")
+        configured_root = root_dir or service_config.get("root_dir", "outputs")
         self.root_dir = Path(configured_root).expanduser().resolve()
-        self.input_dir = self.root_dir / "inputs"
-        self.jobs_dir = self.root_dir / "jobs"
-        self.structure_dir = self.root_dir / "structure"
-        for path in (self.input_dir, self.jobs_dir, self.structure_dir):
-            path.mkdir(parents=True, exist_ok=True)
         self.max_workers = max(1, int(service_config.get("max_workers", 1)))
         self.max_upload_bytes = max(1, int(service_config.get("max_upload_mb", 100))) * 1024 * 1024
         self.api_key = str(service_config["api_key"]) if service_config.get("api_key") else None
@@ -92,111 +82,166 @@ class TableAgentService:
         queries: Iterable[str] = (),
         workbooks: Iterable[str | Path],
         job_id: str | None = None,
-        schema: bool = False,
-        metadata: bool = False,
+        embed: bool = False,
         sheets: Iterable[str] = (),
-        force: bool = False,
+        persist: bool = True,
     ) -> dict[str, Any]:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
         if not workbook_list:
             raise ValueError("At least one workbook is required")
-        normalized = self._normalize_workbooks(workbook_list)
-        include_schema, include_metadata = _resolve_artifacts(schema, metadata)
-        selected_sheets = _normalize_sheet_filters(sheets)
-        self._validate_sheet_filters(normalized, selected_sheets)
-
         run_id = safe_name(job_id or new_job_id())
         if run_id in {".", ".."}:
             raise ValueError("Invalid job id")
-        job_dir = (self.jobs_dir / run_id).resolve()
-        if not job_dir.is_relative_to(self.jobs_dir):
-            raise ValueError("Invalid job id")
-        job_dir.mkdir(parents=True, exist_ok=True)
+        selected_sheets = _normalize_sheet_filters(sheets)
 
-        table_path = ";".join(str(item["path"]) for item in normalized)
-        workbook_identities = self._workbook_identities(normalized)
-        base_sample = self._sample(
-            sample_id=f"{run_id}-structure",
-            question=query_list[0] if query_list else "Generate workbook structure",
-            table_path=table_path,
-            workbook_names=[item["name"] for item in normalized],
-            selected_sheets=selected_sheets,
-            workbook_identities=workbook_identities,
-        )
-        structures: list[dict[str, Any]] = []
-        answers: list[dict[str, Any]] = []
+        run_dir = self._run_dir(run_id)
+        if persist:
+            self.root_dir.mkdir(parents=True, exist_ok=True)
+            if run_dir.exists():
+                raise ValueError(f"Run directory already exists: {run_id}")
+            run_dir.mkdir(parents=False)
 
-        needs_structure = stage == "all" or (stage == "structure" and include_schema)
-        if needs_structure:
-            summary_client = self._answer_client() if include_schema else None
-            pipeline = self.pipeline_factory(
-                llm_client=summary_client,
-                layout_vlm_client=self._layout_client(),
-                config=self._pipeline_config("structure", job_dir),
-            )
-            records = pipeline.verify_samples([base_sample], force=force)
-            structures = self._structure_results(records, normalized, job_dir)
-            structures = self._complete_structure_results(structures, normalized, selected_sheets)
-            failed = [record for record in structures if record["status"] != "good"]
-            if failed:
-                raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
+        try:
+            with tempfile.TemporaryDirectory(prefix=f"table-agent-{run_id}-") as workspace_text:
+                workspace_dir = Path(workspace_text)
+                output_dir = run_dir if persist else workspace_dir / "output"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
+                self._validate_sheet_filters(normalized, selected_sheets)
 
-        if stage == "qa":
-            structures = self._cached_structure_results(normalized, job_dir, selected_sheets)
-            failed = [record for record in structures if record["status"] != "good"]
-            if failed:
-                raise RuntimeError(
-                    f"Missing or stale structure cache for {len(failed)} workbook sheet(s); run structure or all first"
-                )
-
-        if stage in {"qa", "all"}:
-            samples = [
-                self._sample(
-                    sample_id=f"{run_id}-query-{index}",
-                    question=query,
+                table_path = ";".join(str(item["path"]) for item in normalized)
+                workbook_identities = self._workbook_identities(normalized)
+                base_sample = self._sample(
+                    sample_id=f"{run_id}-structure",
+                    question=query_list[0] if query_list else "Generate workbook structure",
                     table_path=table_path,
                     workbook_names=[item["name"] for item in normalized],
                     selected_sheets=selected_sheets,
                     workbook_identities=workbook_identities,
                 )
-                for index, query in enumerate(query_list, start=1)
-            ]
-            pipeline = self.pipeline_factory(
-                llm_client=self._answer_client(),
-                layout_vlm_client=None,
-                config=self._pipeline_config("qa", job_dir),
+                structures: list[dict[str, Any]] = []
+                answers: list[dict[str, Any]] = []
+                source_dir = workspace_dir / "structure"
+
+                pipeline = self.pipeline_factory(
+                    llm_client=self._answer_client(),
+                    layout_vlm_client=self._layout_client(),
+                    config=self._pipeline_config("structure", output_dir, source_dir, embed=embed),
+                )
+                records = pipeline.verify_samples([base_sample], force=True)
+                structures = self._structure_results(
+                    records,
+                    normalized,
+                    output_dir,
+                    include_artifact_paths=persist,
+                )
+                structures = self._complete_structure_results(structures, normalized, selected_sheets)
+                failed = [record for record in structures if record["status"] != "good"]
+                if failed:
+                    raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
+
+                if stage in {"qa", "all"}:
+                    samples = [
+                        self._sample(
+                            sample_id=f"{run_id}-query-{index}",
+                            question=query,
+                            table_path=table_path,
+                            workbook_names=[item["name"] for item in normalized],
+                            selected_sheets=selected_sheets,
+                            workbook_identities=workbook_identities,
+                        )
+                        for index, query in enumerate(query_list, start=1)
+                    ]
+                    pipeline = self.pipeline_factory(
+                        llm_client=self._answer_client(),
+                        layout_vlm_client=None,
+                        config=self._pipeline_config("qa", output_dir, source_dir, embed=embed),
+                    )
+                    pipeline.prepare_samples(samples)
+                    for sample in samples:
+                        output = pipeline.run(sample)
+                        answers.append(self._answer_result(sample.question, output, normalized))
+
+                schema_artifacts, metadata_artifacts = self._build_workbook_artifacts(
+                    normalized,
+                    output_dir,
+                    embed=embed,
+                    selected_sheets=selected_sheets,
+                    include_artifact_paths=persist,
+                )
+
+                result = {
+                    "job_id": run_id,
+                    "stage": stage,
+                    "workbooks": [item["name"] for item in normalized],
+                    "structures": structures,
+                    "schema_artifacts": schema_artifacts,
+                    "metadata_artifacts": metadata_artifacts,
+                    "answers": answers,
+                    "artifacts": self._artifact_paths(output_dir) if persist else [],
+                }
+                if persist:
+                    (output_dir / "run.json").write_text(
+                        json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
+                        encoding="utf-8",
+                    )
+                    result["artifacts"] = self._artifact_paths(output_dir)
+                return result
+        except Exception:
+            if persist and run_dir.exists():
+                shutil.rmtree(run_dir)
+            raise
+
+    def delete_runs(
+        self,
+        run_ids: Iterable[str] = (),
+        *,
+        all_runs: bool = False,
+    ) -> dict[str, list[str]]:
+        selected = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()]
+        if all_runs and selected:
+            raise ValueError("Choose specific run IDs or --delete-all-jobs, not both")
+
+        if all_runs:
+            targets = (
+                sorted(path for path in self.root_dir.iterdir() if self._is_run_dir(path))
+                if self.root_dir.is_dir()
+                else []
             )
-            pipeline.prepare_samples(samples)
-            for sample in samples:
-                output = pipeline.run(sample)
-                answers.append(self._answer_result(sample.question, output, normalized))
+        else:
+            targets = [self._run_dir(run_id) for run_id in selected]
 
-        schema_artifacts, metadata_artifacts = self._build_workbook_artifacts(
-            normalized,
-            job_dir,
-            include_schema=include_schema,
-            include_metadata=include_metadata,
-            selected_sheets=selected_sheets,
-        )
+        deleted: list[str] = []
+        missing: list[str] = []
+        for target in targets:
+            if not target.exists():
+                missing.append(target.name)
+                continue
+            if not self._is_run_dir(target):
+                raise ValueError(f"Not a TableAgent run directory: {target.name}")
+            shutil.rmtree(target)
+            deleted.append(target.name)
+        return {"deleted": deleted, "missing": missing}
 
-        result = {
-            "job_id": run_id,
-            "stage": stage,
-            "workbooks": [item["name"] for item in normalized],
-            "structures": structures,
-            "schema_artifacts": schema_artifacts,
-            "metadata_artifacts": metadata_artifacts,
-            "answers": answers,
-            "artifacts": self._artifact_paths(job_dir),
-        }
-        (job_dir / "run.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
-            encoding="utf-8",
-        )
-        result["artifacts"] = self._artifact_paths(job_dir)
-        return result
+    def _run_dir(self, run_id: str) -> Path:
+        if run_id != safe_name(run_id) or run_id in {".", ".."}:
+            raise ValueError("Invalid job id")
+        path = (self.root_dir / run_id).resolve()
+        if path.parent != self.root_dir:
+            raise ValueError("Invalid job id")
+        return path
+
+    @staticmethod
+    def _is_run_dir(path: Path) -> bool:
+        if path.is_symlink() or not path.is_dir():
+            return False
+        try:
+            payload = json.loads((path / "run.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and str(payload.get("job_id", "")) == path.name
 
     def validate_local_workbook(self, value: str | Path) -> Path:
         if not self.allow_local_paths:
@@ -225,15 +270,23 @@ class TableAgentService:
             )
         return self._layout_vlm_client
 
-    def _pipeline_config(self, phase: Stage, job_dir: Path) -> dict[str, Any]:
+    def _pipeline_config(
+        self,
+        phase: Stage,
+        output_dir: Path,
+        source_dir: Path,
+        *,
+        embed: bool = False,
+    ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
             {
                 "phase": phase,
-                "artifact_dir": str(job_dir / "artifacts"),
-                "source_artifact_dir": str(self.structure_dir),
-                "structure_cache_dir": str(self.structure_dir / "cache"),
+                "artifact_dir": str(output_dir / "artifacts"),
+                "source_artifact_dir": str(source_dir),
+                "structure_cache_dir": str(source_dir / "cache"),
                 "cache_namespace": "service",
+                "embed_retrieval_cards": bool(embed),
             }
         )
         return agent_config
@@ -243,21 +296,14 @@ class TableAgentService:
         normalized: list[dict[str, Any]],
         job_dir: Path,
         *,
-        include_schema: bool,
-        include_metadata: bool,
+        embed: bool,
         selected_sheets: tuple[str, ...],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        schema_artifacts: list[dict[str, str]] = []
-        metadata_artifacts: list[dict[str, str]] = []
-        if not include_schema and not include_metadata:
-            return schema_artifacts, metadata_artifacts
+        include_artifact_paths: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        schema_artifacts: list[dict[str, Any]] = []
+        metadata_artifacts: list[dict[str, Any]] = []
 
         for item in normalized:
-            workbook_dir = workbook_artifact_dir(
-                self.structure_dir,
-                item["name"],
-                item["sha256"],
-            )
             job_workbook_dir = workbook_artifact_dir(
                 job_dir / "workbooks",
                 item["name"],
@@ -266,67 +312,62 @@ class TableAgentService:
             sheet_names = self._selected_sheet_names(item["path"], selected_sheets)
             structure_paths = []
             for sheet_name in sheet_names:
-                structure_path = self._find_structure_path(item, sheet_name)
-                if structure_path is None:
-                    exported = sheet_artifact_dir(job_workbook_dir, sheet_name) / "structure.yaml"
-                    if exported.is_file():
-                        structure_path = exported
-                if structure_path is None:
+                structure_path = sheet_artifact_dir(job_workbook_dir, sheet_name) / "structure.yaml"
+                if not structure_path.is_file():
                     continue
                 structure_paths.append((sheet_name, structure_path))
 
-            source_retrieval_records: list[dict[str, Any]] = []
             job_retrieval_records: list[dict[str, Any]] = []
             for sheet_name, structure_path in structure_paths:
-                source_retrieval_records.extend(
-                    write_sheet_retrieval_cards(structure_path.parent, Path(item["name"]), sheet_name)
-                )
                 job_sheet_dir = sheet_artifact_dir(job_workbook_dir, sheet_name)
-                if job_sheet_dir.is_dir():
-                    job_retrieval_records.extend(
-                        write_sheet_retrieval_cards(job_sheet_dir, Path(item["name"]), sheet_name)
+                job_retrieval_records.extend(
+                    write_sheet_retrieval_cards(
+                        job_sheet_dir,
+                        Path(item["name"]),
+                        sheet_name,
+                        include_embeddings=embed,
                     )
-            if source_retrieval_records:
-                write_workbook_retrieval_cards(workbook_dir, item["name"], source_retrieval_records)
+                )
             if job_retrieval_records:
-                write_workbook_retrieval_cards(job_workbook_dir, item["name"], job_retrieval_records)
-
-            schema_path = workbook_dir / "schema.yaml"
-            if include_schema:
-                missing = [name for name in sheet_names if not any(name == value[0] for value in structure_paths)]
-                if missing:
-                    raise RuntimeError(
-                        f"Missing valid structures for workbook '{item['name']}': {', '.join(missing)}"
-                    )
-                build_workbook_schema(
-                    structure_paths,
-                    schema_path,
-                    SummaryGenerator(self._answer_client()),
-                )
-                target = job_workbook_dir / "schema.yaml"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(schema_path, target)
-                schema_artifacts.append(
-                    {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
-                )
-
-            if include_metadata:
-                available_schema = schema_path if schema_path.is_file() else None
-                summarizer = SummaryGenerator(self._answer_client()) if available_schema is not None else None
-                metadata_path = workbook_dir / "metadata.json"
-                build_workbook_metadata(
-                    item["source_path"],
+                write_workbook_retrieval_cards(
+                    job_workbook_dir,
                     item["name"],
-                    metadata_path,
-                    schema_path=available_schema,
-                    summarizer=summarizer,
+                    job_retrieval_records,
+                    include_embeddings=embed,
                 )
-                target = job_workbook_dir / "metadata.json"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(metadata_path, target)
-                metadata_artifacts.append(
-                    {"workbook": item["name"], "artifact": target.relative_to(job_dir).as_posix()}
+
+            schema_path = job_workbook_dir / "schema.yaml"
+            missing = [name for name in sheet_names if not any(name == value[0] for value in structure_paths)]
+            if missing:
+                raise RuntimeError(
+                    f"Missing valid structures for workbook '{item['name']}': {', '.join(missing)}"
                 )
+            build_workbook_schema(
+                structure_paths,
+                schema_path,
+                SummaryGenerator(self._answer_client()),
+            )
+            schema_record: dict[str, Any] = {"workbook": item["name"]}
+            if include_artifact_paths:
+                schema_record["artifact"] = schema_path.relative_to(job_dir).as_posix()
+            else:
+                schema_record["schema"] = schema_path.read_text(encoding="utf-8")
+            schema_artifacts.append(schema_record)
+
+            metadata_path = job_workbook_dir / "metadata.json"
+            build_workbook_metadata(
+                item["source_path"],
+                item["name"],
+                metadata_path,
+                schema_path=schema_path,
+                summarizer=SummaryGenerator(self._answer_client()),
+            )
+            metadata_record: dict[str, Any] = {"workbook": item["name"]}
+            if include_artifact_paths:
+                metadata_record["artifact"] = metadata_path.relative_to(job_dir).as_posix()
+            else:
+                metadata_record["metadata"] = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_artifacts.append(metadata_record)
 
         return schema_artifacts, metadata_artifacts
 
@@ -357,29 +398,25 @@ class TableAgentService:
             },
         )
 
-    def _normalize_workbook(self, source: Path) -> dict[str, Any]:
+    def _normalize_workbook(self, source: Path, workspace_dir: Path) -> dict[str, Any]:
         self._validate_workbook(source)
         digest = _sha256(source)
-        destination = self.input_dir / f"{digest[:24]}.xlsx"
-        if not destination.is_file():
-            staging = self.input_dir / f".{digest[:24]}-{uuid.uuid4().hex}.xlsx"
-            try:
-                if source.suffix.lower() == ".xlsx":
-                    shutil.copy2(source, staging)
-                elif source.suffix.lower() == ".xls":
-                    sheets = pd.read_excel(source, sheet_name=None)
-                    with pd.ExcelWriter(staging, engine="openpyxl") as writer:
-                        for sheet_name, frame in sheets.items():
-                            frame.to_excel(writer, sheet_name=str(sheet_name)[:31], index=False)
-                else:
-                    workbook = openpyxl.load_workbook(source, data_only=False, keep_vba=False)
-                    try:
-                        workbook.save(staging)
-                    finally:
-                        workbook.close()
-                staging.replace(destination)
-            finally:
-                staging.unlink(missing_ok=True)
+        if source.suffix.lower() == ".xlsx":
+            destination = source
+        else:
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            destination = workspace_dir / f"{digest[:24]}.xlsx"
+            if source.suffix.lower() == ".xls":
+                sheets = pd.read_excel(source, sheet_name=None)
+                with pd.ExcelWriter(destination, engine="openpyxl") as writer:
+                    for sheet_name, frame in sheets.items():
+                        frame.to_excel(writer, sheet_name=str(sheet_name)[:31], index=False)
+            else:
+                workbook = openpyxl.load_workbook(source, data_only=False, keep_vba=False)
+                try:
+                    workbook.save(destination)
+                finally:
+                    workbook.close()
         return {
             "name": source.name,
             "path": destination,
@@ -387,14 +424,14 @@ class TableAgentService:
             "sha256": digest,
         }
 
-    def _normalize_workbooks(self, sources: list[Path]) -> list[dict[str, Any]]:
+    def _normalize_workbooks(self, sources: list[Path], workspace_dir: Path) -> list[dict[str, Any]]:
         normalized = []
-        seen_paths: set[Path] = set()
+        seen_hashes: set[str] = set()
         for source in sources:
-            item = self._normalize_workbook(source)
-            if item["path"] in seen_paths:
+            item = self._normalize_workbook(source, workspace_dir)
+            if item["sha256"] in seen_hashes:
                 continue
-            seen_paths.add(item["path"])
+            seen_hashes.add(item["sha256"])
             normalized.append(item)
         name_counts: dict[str, int] = {}
         for item in normalized:
@@ -451,34 +488,13 @@ class TableAgentService:
         if missing:
             raise ValueError("Requested sheet(s) not found: " + "; ".join(missing))
 
-    def _find_structure_path(self, item: dict[str, Any], sheet_name: str) -> Path | None:
-        nested = sheet_artifact_dir(
-            workbook_artifact_dir(self.structure_dir, item["name"], item["sha256"]),
-            sheet_name,
-        ) / "structure.yaml"
-        if nested.is_file():
-            return nested
-        legacy = legacy_sheet_dir(self.structure_dir, item["path"].name, sheet_name) / "structure.yaml"
-        if legacy.is_file():
-            return legacy
-        allowed = str(item["path"].resolve())
-        for directory in iter_sheet_artifact_dirs(self.structure_dir / "sources"):
-            try:
-                metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if (
-                str(Path(str(metadata.get("workbook_path", ""))).resolve()) == allowed
-                and str(metadata.get("sheet_name", "")) == sheet_name
-            ):
-                return directory / "structure.yaml"
-        return None
-
     def _structure_results(
         self,
         records: Iterable[Any],
         normalized: list[dict[str, Any]],
         job_dir: Path,
+        *,
+        include_artifact_paths: bool,
     ) -> list[dict[str, Any]]:
         results = []
         for record in records:
@@ -501,58 +517,18 @@ class TableAgentService:
                         record.sheet_name,
                     )
                     copy_artifact_tree(record.structure_path.parent, target_dir)
-                    artifact = (target_dir / "structure.yaml").relative_to(job_dir).as_posix()
+                    if include_artifact_paths:
+                        artifact = (target_dir / "structure.yaml").relative_to(job_dir).as_posix()
             results.append(
                 {
                     "workbook": workbook_name,
                     "sheet": record.sheet_name,
                     "status": record.status,
-                    "cache_hit": record.cache_hit,
                     "structure": structure_text,
-                    "artifact": artifact,
+                    "artifact": artifact if include_artifact_paths else None,
                 }
             )
         return results
-
-    def _cached_structure_results(
-        self,
-        normalized: list[dict[str, Any]],
-        job_dir: Path,
-        selected_sheets: tuple[str, ...],
-    ) -> list[dict[str, Any]]:
-        allowed = {str(item["path"].resolve()) for item in normalized}
-        records = []
-        source_root = self.structure_dir / "sources"
-        if source_root.is_dir():
-            for source_dir in iter_sheet_artifact_dirs(source_root):
-                metadata_path = source_dir / "metadata.json"
-                structure_path = source_dir / "structure.yaml"
-                try:
-                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    workbook_path = Path(str(metadata.get("workbook_path", ""))).resolve()
-                    structure_text = structure_path.read_text(encoding="utf-8")
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if str(workbook_path) not in allowed:
-                    continue
-                if selected_sheets and str(metadata.get("sheet_name", "")) not in selected_sheets:
-                    continue
-                records.append(
-                    SimpleNamespace(
-                        workbook_path=workbook_path,
-                        sheet_name=str(metadata.get("sheet_name", "")),
-                        structure_path=structure_path,
-                        status=(
-                            "good"
-                            if metadata.get("layout_workflow_version") == LAYOUT_WORKFLOW_VERSION
-                            and _is_valid_structure(structure_text)
-                            else "not_good"
-                        ),
-                        cache_hit=True,
-                    )
-                )
-        results = self._structure_results(records, normalized, job_dir)
-        return self._complete_structure_results(results, normalized, selected_sheets)
 
     @staticmethod
     def _complete_structure_results(
@@ -579,7 +555,6 @@ class TableAgentService:
                         "workbook": item["name"],
                         "sheet": sheet_name,
                         "status": "not_good",
-                        "cache_hit": False,
                         "structure": None,
                         "artifact": None,
                     }
@@ -624,12 +599,6 @@ def _validate_queries(queries: Iterable[str], *, required: bool) -> list[str]:
     if required and not result:
         raise ValueError("At least one non-empty query is required for qa and all stages")
     return result
-
-
-def _resolve_artifacts(schema: bool, metadata: bool) -> tuple[bool, bool]:
-    if not schema and not metadata:
-        return True, True
-    return bool(schema), bool(metadata)
 
 
 def _normalize_sheet_filters(values: Iterable[str]) -> tuple[str, ...]:

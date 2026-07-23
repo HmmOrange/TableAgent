@@ -25,6 +25,7 @@ def write_sheet_retrieval_cards(
     workbook_path: Path,
     sheet_name: str,
     *,
+    include_embeddings: bool = False,
     embedding_client: Any | None = None,
     embedding_model: str = DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL,
 ) -> list[dict[str, Any]]:
@@ -83,6 +84,7 @@ def write_sheet_retrieval_cards(
     _write_records(
         sheet_dir,
         records,
+        include_embeddings=include_embeddings,
         embedding_client=embedding_client,
         embedding_model=embedding_model,
     )
@@ -94,6 +96,7 @@ def write_workbook_retrieval_cards(
     workbook_name: str,
     sheet_records: Iterable[dict[str, Any]],
     *,
+    include_embeddings: bool = False,
     embedding_client: Any | None = None,
     embedding_model: str = DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL,
 ) -> list[dict[str, Any]]:
@@ -136,6 +139,7 @@ def write_workbook_retrieval_cards(
     _write_records(
         workbook_dir,
         all_records,
+        include_embeddings=include_embeddings,
         embedding_client=embedding_client,
         embedding_model=embedding_model,
     )
@@ -146,6 +150,7 @@ def _write_records(
     directory: Path,
     records: list[dict[str, Any]],
     *,
+    include_embeddings: bool,
     embedding_client: Any | None,
     embedding_model: str,
 ) -> None:
@@ -174,6 +179,9 @@ def _write_records(
         writer.writeheader()
         for record in records:
             writer.writerow({field: record.get(field, "") for field in writer.fieldnames})
+    if not include_embeddings:
+        pickle_path.unlink(missing_ok=True)
+        return
     pickle_path.write_bytes(
         pickle.dumps(
             _records_with_embeddings(
