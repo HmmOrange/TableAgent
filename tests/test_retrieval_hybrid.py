@@ -164,6 +164,412 @@ table1:
     assert len(candidates) == 3
     assert candidates[0].sheet_name == "NestedSheet"
 
+def test_perfect_retrieval_uses_prior_artifact_mapping_without_ranking(tmp_path, monkeypatch):
+    run_root = tmp_path / "siflex-table_agent-prior"
+    source_root = run_root / "artifacts" / "shared" / "sources"
+    source_dir = source_root / "oracle_Bao_cao_F2"
+    source_dir.mkdir(parents=True)
+    workbook_path = tmp_path / "source.xlsx"
+    workbook_path.touch()
+    (source_dir / "metadata.json").write_text(json.dumps({
+        "workbook_path": str(workbook_path),
+        "sheet_name": "Bao_cao_F2",
+    }), encoding="utf-8")
+    (source_dir / "structure.yaml").write_text(
+        "table1:\n  id: table1\n  name: Failure report\n  headers: []\n",
+        encoding="utf-8",
+    )
+    (source_dir / "sheet_text.txt").write_text("CF54-08 failure report", encoding="utf-8")
+    (source_dir / "table.png").touch()
+    evaluations = run_root / "evaluations"
+    evaluations.mkdir()
+    (evaluations / "report_1.json").write_text(json.dumps({
+        "results": [{
+            "sample_id": "cf54",
+            "question": "Describe CF54-08.",
+            "metadata": {
+                "artifact_dir": r"C:\\old\\run\\oracle_Bao_cao_F2",
+                "retrieval_info": {},
+            },
+        }],
+    }), encoding="utf-8")
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new-run"),
+        "source_artifact_dir": str(run_root / "artifacts" / "shared"),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    monkeypatch.setattr(
+        retriever,
+        "load_candidates",
+        lambda _sample: (_ for _ in ()).throw(AssertionError("ranked retrieval must not run")),
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="cf54",
+        table_id=workbook_path.name,
+        table_content="",
+        question="Describe CF54-08.",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    candidate = retriever.select_perfect(sample)
+
+    assert candidate.directory == source_dir
+    assert candidate.workbook_path == workbook_path.resolve()
+    assert candidate.sheet_name == "Bao_cao_F2"
+
+
+def test_perfect_retrieval_honors_benchmark_source_spec_before_heuristics(tmp_path):
+    run_root = tmp_path / "prepared"
+    source_root = run_root / "sources"
+    workbook_path = tmp_path / "inventory.xlsx"
+    workbook_path.touch()
+
+    for sheet_name in ("AUTO", "PRESS"):
+        source_dir = source_root / sheet_name
+        source_dir.mkdir(parents=True)
+        (source_dir / "metadata.json").write_text(json.dumps({
+            "workbook_path": str(workbook_path),
+            "sheet_name": sheet_name,
+        }), encoding="utf-8")
+        (source_dir / "structure.yaml").write_text(
+            f"table1:\n  id: table1\n  name: {sheet_name}\n  headers: []\n",
+            encoding="utf-8",
+        )
+        (source_dir / "sheet_text.txt").write_text(sheet_name, encoding="utf-8")
+        (source_dir / "table.png").touch()
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new-run"),
+        "source_artifact_dir": str(run_root),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="mapped-question",
+        table_id=workbook_path.name,
+        table_content="",
+        question="The wording strongly mentions PRESS but the oracle selects AUTO.",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={"perfect_source": {"workbook": workbook_path.name, "sheet": "AUTO"}},
+    )
+
+    candidate = retriever.select_perfect(sample)
+
+    assert candidate.sheet_name == "AUTO"
+    assert candidate.directory == source_root / "AUTO"
+
+
+def test_perfect_retrieval_prefers_explicitly_named_sheet_over_stale_mapping(tmp_path):
+    run_root = tmp_path / "siflex-table-agent-prior"
+    source_root = run_root / "artifacts" / "shared" / "sources"
+    workbook_path = tmp_path / "inventory.xlsx"
+    workbook_path.touch()
+
+    for sheet_name in ("AU", "PLASMA"):
+        source_dir = source_root / sheet_name
+        source_dir.mkdir(parents=True)
+        (source_dir / "metadata.json").write_text(json.dumps({
+            "workbook_path": str(workbook_path),
+            "sheet_name": sheet_name,
+        }), encoding="utf-8")
+        (source_dir / "structure.yaml").write_text(
+            f"table1:\n  id: table1\n  name: {sheet_name} inventory\n  sheet: {sheet_name}\n  headers: []\n",
+            encoding="utf-8",
+        )
+        (source_dir / "sheet_text.txt").write_text(f"{sheet_name} spare parts", encoding="utf-8")
+        (source_dir / "table.png").touch()
+
+    evaluations = run_root / "evaluations"
+    evaluations.mkdir()
+    (evaluations / "report_1.json").write_text(json.dumps({
+        "results": [{
+            "sample_id": "plasma-question",
+            "question": "What does Sheet PLASMA manage?",
+            "metadata": {"artifact_dir": r"C:\\old\\run\\AU"},
+        }],
+    }), encoding="utf-8")
+
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new-run"),
+        "source_artifact_dir": str(run_root / "artifacts" / "shared"),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="plasma-question",
+        table_id=workbook_path.name,
+        table_content="",
+        question="What does Sheet PLASMA manage?",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    candidate = retriever.select_perfect(sample)
+
+    assert candidate.sheet_name == "PLASMA"
+    assert candidate.directory == source_root / "PLASMA"
+
+
+def test_perfect_retrieval_routes_current_question_before_failed_mapping(tmp_path):
+    run_root = tmp_path / "siflex-table-agent-prior"
+    source_root = run_root / "artifacts" / "shared" / "sources"
+    workbook_path = tmp_path / "LV01_설비_REPORT 2026년 설비유지보수 계획 VER 1.0_KR_202603.26.xlsx"
+    workbook_path.touch()
+
+    sources = {
+        "plan": {
+            "sheet": "2026년 설비유지보수 계획",
+            "structure": """
+table1:
+  id: maintenance_plan_2026
+  name: 2026년 설비유지보수 계획
+  sheet: 2026년 설비유지보수 계획
+  headers:
+    - id: failure_type
+      label: 고장구분
+      orientation: column
+""",
+            "preview": "2026년 유지보수 계획 고장 유형 목록",
+        },
+        "statistics": {
+            "sheet": "Sheet3",
+            "structure": """
+table1:
+  id: maintenance_statistics
+  name: Maintenance Statistics
+  sheet: Sheet3
+  headers:
+    - id: failure_category
+      label: 고장 분류
+      orientation: column
+    - id: wet_equipment
+      label: WET 설비
+      orientation: column_group
+      sub_headers:
+        - id: wet_repair_count
+          label: 수리건수
+          orientation: column
+        - id: wet_share
+          label: 점유율
+          orientation: column
+    - id: dry_equipment
+      label: DRY 설비
+      orientation: column_group
+      sub_headers:
+        - id: dry_repair_count
+          label: 수리건수
+          orientation: column
+        - id: dry_share
+          label: 점유율
+          orientation: column
+""",
+            "preview": "WET DRY 고장 분류 수리건수 점유율 비교",
+        },
+    }
+    for source_name, payload in sources.items():
+        source_dir = source_root / source_name
+        source_dir.mkdir(parents=True)
+        (source_dir / "metadata.json").write_text(json.dumps({
+            "workbook_path": str(workbook_path),
+            "sheet_name": payload["sheet"],
+        }), encoding="utf-8")
+        (source_dir / "structure.yaml").write_text(payload["structure"], encoding="utf-8")
+        (source_dir / "sheet_text.txt").write_text(payload["preview"], encoding="utf-8")
+        (source_dir / "table.png").touch()
+
+    evaluations = run_root / "evaluations"
+    evaluations.mkdir()
+    question = "2026년 유지보수 계획에서 사용된 고장구분(고장 유형)의 전체 종류는?"
+    (evaluations / "report_1.json").write_text(json.dumps({
+        "results": [{
+            "sample_id": "maintenance-q2",
+            "question": question,
+            "pass": False,
+            "error": False,
+            "metadata": {
+                "artifact_dir": r"C:\\old\\run\\statistics",
+                "retrieval_info": {"table_id": "maintenance_statistics"},
+                "qa": {"success": True},
+            },
+        }],
+    }), encoding="utf-8")
+
+    retriever = SourceRetriever(TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new"),
+        "source_artifact_dir": str(run_root / "artifacts" / "shared"),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    }), FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="maintenance-q2",
+        table_id=workbook_path.name,
+        table_content="",
+        question=question,
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    candidate = retriever.select_perfect(sample)
+
+    assert candidate.sheet_name == "2026년 설비유지보수 계획"
+    assert candidate.table_id == ""
+    assert "maintenance_plan_2026" in candidate.structure_text
+    assert retriever._load_perfect_mapping()["maintenance-q2"]["source_dir"] == "statistics"
+
+    q4_sample = EvalSample(
+        index=1,
+        sample_id="maintenance-q4-without-record",
+        table_id=workbook_path.name,
+        table_content="",
+        question="WET 설비와 DRY 설비의 고장 분류별 수리건수와 점유율 비교표는?",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    with pytest.raises(RuntimeError, match="Perfect retrieval excludes sheet 'Sheet3'"):
+        retriever.select_perfect(q4_sample)
+
+
+def test_perfect_retrieval_keeps_full_sheet_when_table_scores_tie(tmp_path):
+    source_root = tmp_path / "prepared" / "sources"
+    source_dir = source_root / "aoi"
+    source_dir.mkdir(parents=True)
+    workbook_path = tmp_path / "aoi.xlsx"
+    workbook_path.touch()
+    (source_dir / "metadata.json").write_text(json.dumps({
+        "workbook_path": str(workbook_path),
+        "sheet_name": "AOI",
+    }), encoding="utf-8")
+    (source_dir / "structure.yaml").write_text("""
+table1:
+  id: standards
+  name: Inspection standards
+  sheet: AOI
+  headers:
+    - id: standard
+      label: Standard
+      orientation: column
+table2:
+  id: revision_history
+  name: Revision history
+  sheet: AOI
+  headers:
+    - id: revision
+      label: Revision
+      orientation: column
+""", encoding="utf-8")
+    (source_dir / "sheet_text.txt").write_text("sharedpreviewtoken", encoding="utf-8")
+    (source_dir / "table.png").touch()
+
+    retriever = SourceRetriever(TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new"),
+        "source_artifact_dir": str(tmp_path / "prepared"),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    }), FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="aoi-question",
+        table_id=workbook_path.name,
+        table_content="",
+        question="sharedpreviewtoken",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    candidate = retriever.select_perfect(sample)
+
+    assert candidate.sheet_name == "AOI"
+    assert candidate.table_id == ""
+    assert "standards" in candidate.structure_text
+    assert "revision_history" in candidate.structure_text
+
+
+def test_explicit_sheet_context_beats_incidental_equipment_word(tmp_path):
+    run_root = tmp_path / "prior"
+    source_root = run_root / "artifacts" / "shared" / "sources"
+    workbook_path = tmp_path / "inventory.xlsx"
+    workbook_path.touch()
+    for sheet_name in ("AUTO", "PRESS"):
+        source_dir = source_root / sheet_name
+        source_dir.mkdir(parents=True)
+        (source_dir / "metadata.json").write_text(json.dumps({
+            "workbook_path": str(workbook_path),
+            "sheet_name": sheet_name,
+        }), encoding="utf-8")
+        (source_dir / "structure.yaml").write_text(
+            f"table1:\n  id: table1\n  name: {sheet_name}\n  sheet: {sheet_name}\n  headers: []\n",
+            encoding="utf-8",
+        )
+        (source_dir / "sheet_text.txt").write_text(sheet_name, encoding="utf-8")
+        (source_dir / "table.png").touch()
+    evaluations = run_root / "evaluations"
+    evaluations.mkdir()
+    (evaluations / "report_1.json").write_text(json.dumps({
+        "results": [{
+            "sample_id": "auto",
+            "question": "Which parts does QUICKS Press use in room AUTO?",
+            "metadata": {"artifact_dir": r"C:\\old\\PRESS"},
+        }],
+    }), encoding="utf-8")
+    retriever = SourceRetriever(TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "new"),
+        "source_artifact_dir": str(run_root / "artifacts" / "shared"),
+        "phase": "qa",
+        "perfect_retrieval": True,
+    }), FakeLLM(), None, None)
+    sample = EvalSample(
+        index=0,
+        sample_id="auto",
+        table_id=workbook_path.name,
+        table_content="",
+        question="Trong danh sách phòng AUTO, thiết bị QUICKS Press dùng phụ tùng nào?",
+        answer=[],
+        sample_path="siflex",
+        table_path=str(workbook_path),
+        raw={},
+    )
+
+    assert retriever.select_perfect(sample).sheet_name == "AUTO"
+
+
+def test_explicit_sheet_context_accepts_close_sheet_alias():
+    assert SourceRetriever._sheet_reference_score("Trong sheet HP F1 tháng 02/2025", "HP 1") > 500
+
+
+def test_perfect_retrieval_excludes_sheet3_for_maintenance_workbook():
+    workbook = Path("LV01_설비_REPORT 2026년  설비유지보수 계획 VER 1.0_KR_202603.26.xlsx")
+
+    assert SourceRetriever.is_perfect_retrieval_excluded(workbook, "Sheet3")
+    assert SourceRetriever.is_perfect_retrieval_excluded(workbook, "Sheet 3")
+    assert SourceRetriever.is_perfect_retrieval_excluded(
+        workbook,
+        "Sheet3",
+        "2026년 유지보수 계획에서 사용된 고장구분(고장 유형)의 전체 종류는?",
+    )
+
 def test_hybrid_retrieval_with_mock_embedding(temp_sources_dir):
     config = TableAgentConfig.from_config({
         "artifact_dir": str(temp_sources_dir.parent),

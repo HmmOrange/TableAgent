@@ -4,7 +4,10 @@ import re
 import unicodedata
 from typing import Any, Callable, Iterable, List, Optional, Union
 
+import pandas as pd
+
 from TableAgent.QA.operators.base_operator import BaseOperator
+from TableAgent.QA.operators.structure_operator import StructureOperator
 from TableAgent.QA.operators.workbook_operator import WorkbookOperator
 from TableAgent.schema.range import AxisSelection, CellRange
 from TableAgent.utils import parse_a1_range, range_to_a1
@@ -29,11 +32,93 @@ class FilterOperator(BaseOperator):
         "operators.selection_intersection(sel1, sel2) -> AxisSelection",
         "operators.project_selection(selection, score_header.data_range) -> list[CellRange]",
         "operators.read_selection(selection, score_header.data_range) -> list[Any]",
+        "operators.group_header_mask(df, table_id, parent_header_id, equals=0, mode='any') -> pandas.Series",
     )
 
     def __init__(self, env: Any):
         super().__init__(env)
         self._workbook = WorkbookOperator(env)
+        self._structure = StructureOperator(env)
+
+    def group_header_mask(
+        self,
+        dataframe: pd.DataFrame,
+        table_id: str,
+        header_id: str,
+        *,
+        mode: str = "any",
+        missing_matches: bool = False,
+        equals: Any = None,
+        not_equals: Any = None,
+        in_values: Optional[Iterable[Any]] = None,
+        contains: Optional[str] = None,
+        startswith: Optional[str] = None,
+        endswith: Optional[str] = None,
+        regex: Optional[str] = None,
+        gt: Any = None,
+        gte: Any = None,
+        lt: Any = None,
+        lte: Any = None,
+        between: Optional[tuple[Any, Any]] = None,
+        predicate: Optional[Predicate] = None,
+        case_sensitive: bool = False,
+        ignore_accents: bool = False,
+    ) -> pd.Series:
+        """Apply one condition across every leaf column under a parent header."""
+        if not isinstance(dataframe, pd.DataFrame):
+            raise TypeError("group_header_mask requires a pandas DataFrame.")
+        mode = str(mode).strip().lower()
+        if mode not in {"any", "all"}:
+            raise ValueError("group_header_mask mode must be 'any' or 'all'.")
+
+        column_ids = self._structure.resolve_header_columns(table_id, header_id)
+        missing_columns = [column_id for column_id in column_ids if column_id not in dataframe.columns]
+        if missing_columns:
+            raise KeyError(
+                f"Resolved header columns are missing from the DataFrame: {missing_columns}. "
+                f"Available columns: {list(dataframe.columns)}"
+            )
+
+        conditions = {
+            "equals": equals,
+            "not_equals": not_equals,
+            "in_values": in_values,
+            "contains": contains,
+            "startswith": startswith,
+            "endswith": endswith,
+            "regex": regex,
+            "gt": gt,
+            "gte": gte,
+            "lt": lt,
+            "lte": lte,
+            "between": between,
+            "predicate": predicate,
+            "case_sensitive": case_sensitive,
+            "ignore_accents": ignore_accents,
+        }
+        if not any(
+            value is not None
+            for key, value in conditions.items()
+            if key not in {"case_sensitive", "ignore_accents"}
+        ):
+            raise ValueError("group_header_mask requires at least one value condition.")
+
+        def matches(value: Any) -> bool:
+            is_missing = value is None
+            if not is_missing:
+                try:
+                    is_missing = bool(pd.isna(value))
+                except (TypeError, ValueError):
+                    is_missing = False
+            if is_missing:
+                return bool(missing_matches)
+            return self._matches(value, **conditions)
+
+        masks = pd.DataFrame(
+            {column_id: dataframe[column_id].map(matches) for column_id in column_ids},
+            index=dataframe.index,
+        )
+        return masks.any(axis=1) if mode == "any" else masks.all(axis=1)
 
     def filter_values(
         self,
@@ -180,9 +265,9 @@ class FilterOperator(BaseOperator):
     ) -> bool:
         checks = []
         if equals is not None:
-            checks.append(self._text(value, case_sensitive, ignore_accents) == self._text(equals, case_sensitive, ignore_accents))
+            checks.append(self._equals(value, equals, case_sensitive, ignore_accents))
         if not_equals is not None:
-            checks.append(self._text(value, case_sensitive, ignore_accents) != self._text(not_equals, case_sensitive, ignore_accents))
+            checks.append(not self._equals(value, not_equals, case_sensitive, ignore_accents))
         if in_values is not None:
             normalized_values = {self._text(item, case_sensitive, ignore_accents) for item in in_values}
             checks.append(self._text(value, case_sensitive, ignore_accents) in normalized_values)
@@ -215,6 +300,19 @@ class FilterOperator(BaseOperator):
                 "contains, startswith, endswith, regex, numeric/date bounds, or predicate."
             )
         return all(checks)
+
+    def _equals(self, value: Any, expected: Any, case_sensitive: bool, ignore_accents: bool) -> bool:
+        try:
+            direct = value == expected
+            if isinstance(direct, bool) and direct:
+                return True
+        except Exception:
+            pass
+        return self._text(value, case_sensitive, ignore_accents) == self._text(
+            expected,
+            case_sensitive,
+            ignore_accents,
+        )
 
     def _text(self, value: Any, case_sensitive: bool, ignore_accents: bool) -> str:
         text = "" if value is None else str(value)

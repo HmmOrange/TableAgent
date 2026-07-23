@@ -17,8 +17,18 @@ class TableQAPlanner:
         self.llm_client = llm_client
         self.write_plan_action = WriteQAPlanAction(env, llm_client=llm_client)
 
-    def plan(self, question: str, table_id: Optional[str] = None) -> List[SubTask]:
-        if table_id is None:
-            table_id = self.env.default_table_id()
-        result = self.write_plan_action.run(PlanGenerationRequest(question=question, table_id=table_id))
+    def plan(
+        self,
+        question: str,
+        table_id: Optional[str] = None,
+        *,
+        failure_context: str | None = None,
+        previous_plan: list[dict[str, Any]] | None = None,
+    ) -> List[SubTask]:
+        result = self.write_plan_action.run(PlanGenerationRequest(
+            question=question,
+            table_id=table_id,
+            failure_context=failure_context,
+            previous_plan=previous_plan,
+        ))
         return result.subtasks

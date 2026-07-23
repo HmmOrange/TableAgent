@@ -42,6 +42,8 @@ class CodeExecutionResult:
 class PlanGenerationRequest:
     question: str
     table_id: Optional[str] = None
+    failure_context: Optional[str] = None
+    previous_plan: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass(frozen=True)

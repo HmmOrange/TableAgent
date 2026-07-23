@@ -5,6 +5,7 @@ import re
 from typing import Any, Optional
 
 from TableAgent.QA.actions.base_action import BaseReviewAction, ReviewRequest, ReviewResult
+from TableAgent.QA.language import answer_uses_required_language, required_answer_language
 from TableAgent.prompts.review import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT_TEMPLATE
 
 _HIDDEN_WORKSPACE_NAMES = {
@@ -17,6 +18,7 @@ _HIDDEN_WORKSPACE_NAMES = {
     "CellRange",
     "AxisSelection",
     "Header",
+    "namespace",
 }
 
 
@@ -71,10 +73,13 @@ class ReviewSubtaskAction(BaseReviewAction):
         self.llm_client = llm_client
 
     def run(self, request: ReviewRequest) -> ReviewResult:
-        if self.llm_client:
+        local_result = self._local_review(request)
+        if not local_result.accepted:
+            result = local_result
+        elif self.llm_client:
             result = self._llm_review(request)
         else:
-            result = self._local_review(request)
+            result = local_result
 
         self.env.logger.log_event("review_subtask", {
             "action": self.name,
@@ -100,6 +105,16 @@ class ReviewSubtaskAction(BaseReviewAction):
                 feedback="Execution succeeded, but `final_answer` was not set.",
                 score=0.0,
             )
+
+        if request.require_final_answer:
+            answer = str(self.env.execution_namespace.get("final_answer", ""))
+            language = required_answer_language(request.question)
+            if not answer_uses_required_language(answer, language, question=request.question):
+                return ReviewResult(
+                    accepted=False,
+                    feedback=f"`final_answer` must be written in {language}.",
+                    score=0.0,
+                )
 
         if request.subtask.layer == "table_inspect":
             selected = self.env.execution_namespace.get("selected_table_ids")
@@ -128,6 +143,7 @@ class ReviewSubtaskAction(BaseReviewAction):
     def _llm_review(self, request: ReviewRequest) -> ReviewResult:
         prompt = REVIEW_USER_PROMPT_TEMPLATE.format(
             question=request.question,
+            answer_language=required_answer_language(request.question),
             subtask_id=request.subtask.id,
             layer=request.subtask.layer,
             subtask_description=request.subtask.description,

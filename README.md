@@ -287,6 +287,55 @@ Cached per-sheet structures and the selected workbook artifacts are copied into 
 job directory. As with ingestion, omitting both output flags generates both
 `schema.yaml` and `metadata.json`.
 
+#### SiFlex benchmark integration
+
+The benchmark-facing pipeline can reuse prepared v5 structures without embedding or
+LLM reranking:
+
+```yaml
+table_agent:
+  phase: qa
+  source_artifact_dir: outputs/v5/prepared
+  perfect_retrieval: true
+  qa_max_replans: 5
+```
+
+Perfect retrieval resolves Windows-origin metadata paths by workbook filename, keeps
+the complete selected sheet structure for QA, and applies the `qa-siflex`
+18-question benchmark exclusions before execution. Prepared SiFlex QA also enables
+category review, deterministic common-information answers, sibling-sheet structure
+context, and final-answer review. See
+[`TableAgent/QA/PIPELINE.md`](TableAgent/QA/PIPELINE.md) for the full runtime flow.
+
+Run the complete local 18-question benchmark against the v5 prepared structures
+with the standalone runner. It uses the fixed perfect-retrieval workbook/sheet map,
+excludes the five benchmark cases, and applies the same SiFlex LLM judge as the
+`ise-table` evaluator:
+
+```bash
+uv run python -m TableAgent.benchmarks.siflex \
+  --config config.yaml \
+  --data-dir data/SiFlex \
+  --source-artifacts outputs/v5/prepared \
+  --output-dir outputs/siflex-perfect
+```
+
+The command prints `passed/18` and writes `report.json` and `summary.json` under
+the output directory. The configured answer and judge endpoints must be reachable;
+the local model ports normally require the VPN.
+
+To iterate on one failed question before rerunning all 18, pass an exact sample ID
+or a unique substring:
+
+```bash
+uv run python -m TableAgent.benchmarks.siflex \
+  --config config.yaml \
+  --data-dir data/SiFlex \
+  --source-artifacts outputs/v5/prepared \
+  --output-dir outputs/siflex-q3-fixed \
+  --sample-id 'Q3 – LIST'
+```
+
 #### Available flags
 
 | Flag | Description |

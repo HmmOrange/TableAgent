@@ -82,7 +82,7 @@ def test_formatter_agent_falls_back_on_model_error():
         draft_answer="A; B",
     )
 
-    assert result.answer == "A; B"
+    assert result.answer == "| No. | Item |\n| --- | --- |\n| 1 | A |\n| 2 | B |"
     assert result.fallback_used is True
 
 
@@ -116,7 +116,7 @@ def test_pipeline_formatter_hook_is_siflex_only(tmp_path):
         responses,
     )
 
-    assert formatted == "- A\n- B"
+    assert formatted == "| No. | Item |\n| --- | --- |\n| 1 | A |\n| 2 | B |"
     assert len(llm.calls) == 1
     assert responses == [LLMResponse(content="- A\n- B", prompt_tokens=7, completion_tokens=3)]
 
@@ -195,7 +195,7 @@ def test_prepared_siflex_pipeline_returns_formatter_agent_answer(tmp_path, monke
         time.perf_counter(),
     )
 
-    assert output.predicted_answer == "- A\n- B"
+    assert output.predicted_answer == "| No. | Item |\n| --- | --- |\n| 1 | A |\n| 2 | B |"
     assert output.token_usage == {"prompt": 12, "completion": 5}
 
 

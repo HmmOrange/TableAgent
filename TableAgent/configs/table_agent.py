@@ -27,6 +27,7 @@ class TableAgentConfig:
     image_tile_size: int | None
     image_tile_overlap: int
     run_retrieval: bool
+    perfect_retrieval: bool
     retrieval_rerank_with_llm: bool
     retrieval_top_k: int
     retrieval_candidate_max_chars: int
@@ -36,6 +37,7 @@ class TableAgentConfig:
     shift_cells: int
     max_retry: int
     qa_max_retries: int
+    qa_max_replans: int
     qa_max_experience_records: int
     qa_log_path: Path | None
     qa_max_observation_chars: int
@@ -71,6 +73,7 @@ class TableAgentConfig:
             image_tile_size=_optional_int(merged.get("image_tile_size")),
             image_tile_overlap=int(_required(merged, "image_tile_overlap")),
             run_retrieval=_bool(merged.get("run_retrieval", True)),
+            perfect_retrieval=_bool(merged.get("perfect_retrieval", False)),
             retrieval_rerank_with_llm=_bool(_required(merged, "retrieval_rerank_with_llm")),
             retrieval_top_k=int(_required(merged, "retrieval_top_k")),
             retrieval_candidate_max_chars=int(_required(merged, "retrieval_candidate_max_chars")),
@@ -80,6 +83,7 @@ class TableAgentConfig:
             shift_cells=int(merged.get("shift_cells", 15)),
             max_retry=int(merged.get("max_retry", 3)),
             qa_max_retries=int(merged.get("qa_max_retries", 3)),
+            qa_max_replans=int(merged.get("qa_max_replans", 5)),
             qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
             qa_log_path=_optional_path(merged.get("qa_log_path")),
             qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
@@ -116,7 +120,9 @@ def run_scoped_table_agent_config(config: dict[str, Any], run_name: str) -> dict
     agent_config.update({
         "artifact_dir": str(run_artifact_dir / repeat_dir_template.format(run_id=1)),
         "run_artifact_dir": str(run_artifact_dir),
-        "source_artifact_dir": str(structure_cache_dir / "v5" / "prepared"),
+        "source_artifact_dir": str(
+            agent_config.get("source_artifact_dir") or structure_cache_dir / "v5" / "prepared"
+        ),
         "repeat_dir_template": repeat_dir_template,
     })
     return agent_config

@@ -225,8 +225,8 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert output.metadata["workbook_sheets"] == ["table-1"]
     assert len(layout_vlm.calls) == 1
     assert layout_vlm.calls[0][1].name == "viewport.png"
-    assert output.metadata["qa"]["token_usage"] == {"prompt": 12, "completion": 2}
-    assert output.token_usage == {"prompt": 18, "completion": 3}
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 72, "completion": 12}
+    assert output.token_usage == {"prompt": 78, "completion": 13}
 
 
 def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
@@ -555,7 +555,16 @@ def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, mo
         workbook = _WorkbookHandle()
 
     class CapturingRunner:
-        def __init__(self, *, structure_path, workbook_path, llm_client, config, table_retriever=None):
+        def __init__(
+            self,
+            *,
+            structure_path,
+            workbook_path,
+            llm_client,
+            config,
+            table_retriever=None,
+            related_structure_paths=None,
+        ):
             captured_configs.append(config)
             self.env = _Env()
 
@@ -1232,6 +1241,111 @@ def test_table_agent_separates_artifacts_by_benchmark_repeat(tmp_path: Path):
     assert pipeline.settings.source_artifact_dir == Path("cache/table_agent/structure/v5/prepared")
 
 
+def test_table_agent_scoped_config_preserves_explicit_source_artifacts(tmp_path: Path):
+    from TableAgent.configs import run_scoped_table_agent_config
+
+    source_artifacts = tmp_path / "prior" / "prepared"
+    scoped = run_scoped_table_agent_config(
+        {
+            "table_agent": {
+                "artifact_root": str(tmp_path / "new"),
+                "source_artifact_dir": str(source_artifacts),
+                "phase": "qa",
+                "perfect_retrieval": True,
+            }
+        },
+        "new-run",
+    )
+
+    assert scoped["source_artifact_dir"] == str(source_artifacts)
+    assert scoped["phase"] == "qa"
+    assert scoped["perfect_retrieval"] is True
+
+
+def test_perfect_retrieval_filters_excluded_sheet_samples(tmp_path: Path, monkeypatch):
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={
+            "artifact_dir": str(tmp_path / "run"),
+            "source_artifact_dir": str(tmp_path / "prior"),
+            "phase": "qa",
+            "perfect_retrieval": True,
+        },
+    )
+    keep = EvalSample(0, "keep", "book", "", "keep", [""], sample_path="siflex")
+    skip = EvalSample(1, "skip", "book", "", "skip", [""], sample_path="siflex")
+
+    def select_perfect(sample):
+        if sample.sample_id == "skip":
+            raise RuntimeError("Perfect retrieval excludes sheet 'Sheet3' from 'book.xlsx'.")
+        return object()
+
+    monkeypatch.setattr(pipeline.source_retriever, "select_perfect", select_perfect)
+
+    assert pipeline.filter_samples([keep, skip]) == [keep]
+
+
+def test_perfect_retrieval_skips_benchmark_exclusions(tmp_path: Path, monkeypatch):
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={
+            "artifact_dir": str(tmp_path / "run"),
+            "phase": "qa",
+            "perfect_retrieval": True,
+        },
+    )
+    skipped = [
+        EvalSample(
+            0,
+            "plasma",
+            "book",
+            "",
+            "❓ Câu hỏi: Sheet PLASMA quản lý spare parts cho công đoạn nào? "
+            "Các loại phụ tùng chính được quản lý trong sheet này là gì?",
+            [""],
+            sample_path="siflex",
+        ),
+        EvalSample(
+            1,
+            "maintenance-summary",
+            "book",
+            "",
+            "전체 점검 건수와 보수 건수, 그리고 완료 처리된 항목은?",
+            [""],
+            sample_path="siflex",
+        ),
+    ]
+    keep = EvalSample(2, "keep", "book", "", "Sheet OIL quản lý loại phụ tùng nào?", [""], sample_path="siflex")
+    monkeypatch.setattr(pipeline.source_retriever, "select_perfect", lambda _sample: object())
+
+    assert pipeline.filter_samples([*skipped, keep]) == [keep]
+
+
+def test_perfect_retrieval_exclusions_are_disabled_by_default(tmp_path: Path):
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={
+            "artifact_dir": str(tmp_path / "run"),
+            "phase": "qa",
+            "perfect_retrieval": False,
+        },
+    )
+    sample = EvalSample(
+        0,
+        "plasma",
+        "book",
+        "",
+        "Sheet PLASMA quản lý spare parts cho công đoạn nào?",
+        [""],
+        sample_path="siflex",
+    )
+
+    assert pipeline.filter_samples([sample]) == [sample]
+
+
 def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
     cache_dir = tmp_path / "structure-cache"
     common = {
@@ -1581,3 +1695,98 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["workbook_path"] == str(path_b.resolve())
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
 
+
+def test_pure_common_info_answer_bypasses_siflex_formatter():
+    draft = "## Sheet: OIL\n\n| Header | Description |\n| --- | --- |\n| Code | Part code |"
+    responses = []
+
+    answer = TableAgentPipeline._finalize_siflex_answer(
+        None,
+        None,
+        draft,
+        responses,
+        {"answer_route": "common_info"},
+    )
+
+    assert answer == draft
+    assert responses == []
+
+
+def test_table_agent_default_max_replans_is_five(tmp_path: Path):
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path)},
+    )
+
+    assert pipeline.settings.qa_max_replans == 5
+
+
+def test_verified_fallback_uses_only_successful_normal_inspections():
+    from types import SimpleNamespace
+
+    from TableAgent.schema.qa import AgentOutput, QAResult
+    from TableAgent.schema.subtask import SubTask
+
+    result = QAResult(
+        question="Describe the matching record.",
+        plan=[
+            SubTask(id="route", description="Select a table.", layer="table_inspect"),
+            SubTask(id="inspect", description="Read the exact matching row.", layer="inspect"),
+            SubTask(
+                id="common",
+                description="Describe the sheet.",
+                layer="inspect",
+                category="common_info",
+                metadata={"common_info_scope": "sheet"},
+            ),
+        ],
+        subtask_outputs=[
+            AgentOutput("route", "", "", True, "selected table", namespace_updates={}),
+            AgentOutput("inspect", "", "", True, "error_code=E-1; fault_content=blocked", namespace_updates={}),
+            AgentOutput("common", "", "", True, "sheet headers", namespace_updates={}),
+        ],
+    )
+    pipeline = SimpleNamespace(settings=SimpleNamespace(max_context_chars=10000))
+
+    prompt = TableAgentPipeline._verified_observation_fallback_prompt(
+        pipeline,
+        "Describe error E-1.",
+        result,
+    )
+
+    assert prompt is not None
+    assert "error_code=E-1; fault_content=blocked" in prompt
+    assert "selected table" not in prompt
+    assert "sheet headers" not in prompt
+
+
+def test_verified_fallback_rejects_unsafe_evidence():
+    from types import SimpleNamespace
+
+    from TableAgent.schema.qa import AgentOutput, QAResult
+    from TableAgent.schema.subtask import SubTask
+
+    result = QAResult(
+        question="Return the matching record.",
+        plan=[SubTask(id="inspect", description="Inspect the requested field.", layer="inspect")],
+        subtask_outputs=[
+            AgentOutput(
+                "inspect",
+                "Inspect the requested field.",
+                "print(wrong_header_value)",
+                True,
+                "value=from a neighboring header",
+                layer="inspect",
+                category="normal",
+            )
+        ],
+        error="Final answer review rejected the plan: incorrect header mapping.",
+    )
+    pipeline = SimpleNamespace(settings=SimpleNamespace(max_context_chars=10000))
+
+    assert TableAgentPipeline._verified_observation_fallback_prompt(
+        pipeline,
+        result.question,
+        result,
+    ) is None

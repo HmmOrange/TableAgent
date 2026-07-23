@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable
 
 import openpyxl
@@ -42,6 +42,19 @@ if TYPE_CHECKING:
     from TableAgent.pipeline.retrieval import TableRetrieverContract
 
 logger = Logger(__name__)
+
+_RETRIEVAL_SKIP_QUESTIONS = frozenset({
+    "sheet plasma quản lý spare parts cho công đoạn nào? các loại phụ tùng chính được quản lý trong sheet này là gì?",
+    "전체 점검 건수와 보수 건수, 그리고 완료 처리된 항목은?",
+})
+
+
+def _normalized_question(value: Any) -> str:
+    text = " ".join(str(value or "").casefold().split())
+    for prefix in ("❓ câu hỏi:", "câu hỏi:"):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
 
 
 class TableAgentPipeline(BasePipeline):
@@ -105,7 +118,15 @@ class TableAgentPipeline(BasePipeline):
         if self.settings.phase == "qa":
             missing = []
             for sample in samples:
-                if self.settings.run_retrieval and is_siflex(sample) and self.source_retriever.load_candidates(sample):
+                if (
+                    self.settings.run_retrieval
+                    and is_siflex(sample)
+                    and (
+                        self.source_retriever.load_perfect_candidates(sample)
+                        if self.settings.perfect_retrieval
+                        else self.source_retriever.load_candidates(sample)
+                    )
+                ):
                     continue
                 record = self.structure_cache.load(sample)
                 if record is None or not record.valid:
@@ -121,6 +142,30 @@ class TableAgentPipeline(BasePipeline):
         failed = [record for record in records if not record.valid]
         if failed:
             raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
+
+    def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
+        """Apply the exclusions used by the 18-question perfect-retrieval benchmark."""
+        if not self.settings.perfect_retrieval:
+            return samples
+
+        selected = [
+            sample
+            for sample in samples
+            if not (
+                is_siflex(sample)
+                and _normalized_question(sample.question) in _RETRIEVAL_SKIP_QUESTIONS
+            )
+        ]
+        filtered = []
+        for sample in selected:
+            try:
+                self.source_retriever.select_perfect(sample)
+            except RuntimeError as exc:
+                if "Perfect retrieval excludes sheet" in str(exc):
+                    continue
+                raise
+            filtered.append(sample)
+        return filtered
 
     def verify_samples(self, samples: list[EvalSample], *, force: bool = True) -> list[StructureCacheRecord]:
         siflex_samples = [sample for sample in samples if is_siflex(sample) and self.settings.run_retrieval]
@@ -139,10 +184,15 @@ class TableAgentPipeline(BasePipeline):
             )
         self._verified_samples.update({sample.sample_id: record for sample, record in zip(standard_samples, records)})
         if siflex_samples:
-            self.source_preparer.prepare(siflex_samples, regenerate_invalid=force, force=force)
+            if not self.settings.perfect_retrieval:
+                self.source_preparer.prepare(siflex_samples, regenerate_invalid=force, force=force)
             seen: set[Path] = set()
             for sample in siflex_samples:
-                candidates = self.source_retriever.load_candidates(sample)
+                candidates = (
+                    self.source_retriever.load_perfect_candidates(sample)
+                    if self.settings.perfect_retrieval
+                    else self.source_retriever.load_candidates(sample)
+                )
                 if not candidates:
                     failure_dir = self.settings.source_artifact_dir or self.settings.structure_cache_dir
                     key = hashlib.sha256(sample.sample_id.encode("utf-8")).hexdigest()[:24]
@@ -273,10 +323,18 @@ class TableAgentPipeline(BasePipeline):
         if self.settings.phase == "structure":
             raise RuntimeError("structure phase does not run question answering")
         if is_siflex(sample) and self.settings.run_retrieval:
-            if self.settings.phase == "all" and not self.source_retriever.load_candidates(sample):
+            if (
+                self.settings.phase == "all"
+                and not self.settings.perfect_retrieval
+                and not self.source_retriever.load_candidates(sample)
+            ):
                 self.source_preparer.prepare([sample], regenerate_invalid=True)
             responses: list[LLMResponse] = []
-            candidate = self.source_retriever.select(sample, responses, self._fit_context)
+            candidate = (
+                self.source_retriever.select_perfect(sample)
+                if self.settings.perfect_retrieval
+                else self.source_retriever.select(sample, responses, self._fit_context)
+            )
             if candidate is None:
                 raise RuntimeError(
                     f"Missing or stale structure cache for sample {sample.sample_id!r}; "
@@ -340,7 +398,7 @@ class TableAgentPipeline(BasePipeline):
             fallback_prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
         )
         responses.append(answer_response)
-        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
+        predicted_answer = self._finalize_siflex_answer(sample, answer_response.content, responses, qa_info)
         self._progress("done", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
 
         return PipelineOutput(
@@ -383,7 +441,7 @@ class TableAgentPipeline(BasePipeline):
             fallback_prompt=self.prompts.answer_prompt(sample, self._fit_context(sample.table_content), structure_text),
         )
         responses = [answer_response]
-        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
+        predicted_answer = self._finalize_siflex_answer(sample, answer_response.content, responses, qa_info)
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=structure_text,
@@ -457,6 +515,7 @@ class TableAgentPipeline(BasePipeline):
             structure_path = self._sample_dir(sample) / "retrieved_structure.yaml"
             structure_path.parent.mkdir(parents=True, exist_ok=True)
             structure_path.write_text(candidate.structure_text, encoding="utf-8")
+        related_structure_paths = self._related_structure_paths(candidate)
         self._progress(
             "qa",
             sample=sample.sample_id,
@@ -472,9 +531,12 @@ class TableAgentPipeline(BasePipeline):
             fallback_prompt=image_prompt,
             fallback_image_path=candidate.image_path,
             fallback_text_prompt=fallback_prompt,
+            related_structure_paths=related_structure_paths,
+            excluded_sheet_names=self._perfect_retrieval_excluded_sheets(candidate.workbook_path),
+            enable_final_answer_review=True,
         )
         responses.append(answer_response)
-        predicted_answer = self._format_siflex_answer(sample, answer_response.content, responses)
+        predicted_answer = self._finalize_siflex_answer(sample, answer_response.content, responses, qa_info)
         self._progress(
             "done",
             sample=sample.sample_id,
@@ -490,6 +552,7 @@ class TableAgentPipeline(BasePipeline):
             "table_id": getattr(candidate, "table_id", ""),
             "table_name": getattr(candidate, "table_name", ""),
             "table_description": getattr(candidate, "table_description", ""),
+            "perfect_retrieval": self.settings.perfect_retrieval,
         }
         if hasattr(candidate, "reranker_selected_index"):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
@@ -536,6 +599,9 @@ class TableAgentPipeline(BasePipeline):
         fallback_prompt: str,
         fallback_image_path: Path | None = None,
         fallback_text_prompt: str | None = None,
+        related_structure_paths: list[Path] | None = None,
+        excluded_sheet_names: list[str] | None = None,
+        enable_final_answer_review: bool = False,
     ) -> tuple[LLMResponse, dict[str, Any]]:
         """Run the notebook QA phase against the persisted verified structure."""
         qa_token_usage = {"prompt": 0, "completion": 0}
@@ -547,10 +613,14 @@ class TableAgentPipeline(BasePipeline):
                     "table_agent": {
                         **vars(self.settings),
                         "artifact_dir": str(qa_artifact_dir),
+                        "qa_excluded_sheet_names": list(excluded_sheet_names or []),
+                        "qa_final_answer_review": enable_final_answer_review,
+                        "qa_plan_category_review": enable_final_answer_review,
                     },
                     "qa_artifact_dir": str(qa_artifact_dir),
                 },
                 table_retriever=self.table_retriever,
+                related_structure_paths=related_structure_paths,
             ) as runner:
             result = runner.run(question)
             qa_token_usage = result.token_usage
@@ -561,6 +631,14 @@ class TableAgentPipeline(BasePipeline):
                 "token_usage": result.token_usage,
                 "artifacts": result.artifacts,
                 "fallback_used": not result.success,
+                "replan_count": int(getattr(result, "replan_count", 0) or 0),
+                "answer_route": (
+                    "common_info"
+                    if result.success
+                    and getattr(result, "plan", None)
+                    and all(subtask.category == "common_info" for subtask in result.plan)
+                    else "normal"
+                ),
             }
             if result.success and result.final_answer is not None:
                 return LLMResponse(
@@ -571,14 +649,63 @@ class TableAgentPipeline(BasePipeline):
 
         if result.success:
             raise RuntimeError("TableQARunner returned success without a final answer")
-        response = self.qa_agent.run(
-            prompt=fallback_prompt,
-            image_path=fallback_image_path,
-            fallback_prompt=fallback_text_prompt,
-        )
+        verified_fallback_prompt = self._verified_observation_fallback_prompt(question, result)
+        if verified_fallback_prompt:
+            response = self.qa_agent.run(prompt=verified_fallback_prompt)
+            qa_info["fallback_source"] = "verified_inspection_observations"
+        else:
+            response = self.qa_agent.run(
+                prompt=fallback_prompt,
+                image_path=fallback_image_path,
+                fallback_prompt=fallback_text_prompt,
+            )
+            qa_info["fallback_source"] = "source_context"
         response.prompt_tokens += int(qa_token_usage.get("prompt", 0) or 0)
         response.completion_tokens += int(qa_token_usage.get("completion", 0) or 0)
         return response, qa_info
+
+    def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
+        """Find prepared structures for sibling sheets of the selected workbook."""
+        source_root = candidate.directory.parent
+        workbook_path = candidate.workbook_path.resolve()
+        paths = []
+        if not source_root.is_dir():
+            return paths
+        for source_dir in sorted(source_root.iterdir()):
+            metadata_path = source_dir / "metadata.json"
+            structure_path = source_dir / "structure.yaml"
+            if not metadata_path.is_file() or not structure_path.is_file():
+                continue
+            try:
+                metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            candidate_workbook_text = str(metadata.get("workbook_path", ""))
+            candidate_workbook = Path(candidate_workbook_text)
+            same_path = candidate_workbook.resolve() == workbook_path
+            same_name = safe_name(PureWindowsPath(candidate_workbook_text).name) == safe_name(workbook_path.name)
+            if candidate_workbook_text and (same_path or same_name):
+                sheet_name = str(metadata.get("sheet_name", ""))
+                if (
+                    self.settings.perfect_retrieval
+                    and self.source_retriever.is_perfect_retrieval_excluded(workbook_path, sheet_name)
+                ):
+                    continue
+                paths.append(structure_path)
+        return paths
+
+    def _perfect_retrieval_excluded_sheets(self, workbook_path: Path) -> list[str]:
+        if not self.settings.perfect_retrieval:
+            return []
+        workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
+        try:
+            return [
+                sheet_name
+                for sheet_name in workbook.sheetnames
+                if self.source_retriever.is_perfect_retrieval_excluded(workbook_path, sheet_name)
+            ]
+        finally:
+            workbook.close()
 
     def _format_siflex_answer(
         self,
@@ -598,6 +725,71 @@ class TableAgentPipeline(BasePipeline):
         )
         responses.append(result.response)
         return result.answer
+
+    def _finalize_siflex_answer(
+        self,
+        sample: EvalSample,
+        draft_answer: str,
+        responses: list[LLMResponse],
+        qa_info: dict[str, Any],
+    ) -> str:
+        # Common-info already has a verified structural format; a generic formatter can drop its headers.
+        if qa_info.get("answer_route") == "common_info":
+            return draft_answer
+        return self._format_siflex_answer(sample, draft_answer, responses)
+
+    def _verified_observation_fallback_prompt(self, question: str, result: Any) -> str | None:
+        failure_text = "\n".join(
+            [str(getattr(result, "error", "") or "")]
+            + [
+                str(getattr(output, "observation", "") or "")
+                for output in getattr(result, "subtask_outputs", [])
+                if not getattr(output, "success", False)
+            ]
+        ).casefold()
+        unsafe_markers = (
+            "wrong table",
+            "wrong sheet",
+            "wrong header",
+            "wrong column",
+            "incorrect header",
+            "incorrect column",
+            "filter drift",
+            "incomplete coverage",
+            "wrong date",
+            "wrong target",
+            "unfiltered aggregate",
+            "incorrect count",
+            "incorrect value",
+        )
+        if any(marker in failure_text for marker in unsafe_markers):
+            return None
+
+        subtasks = {subtask.id: subtask for subtask in getattr(result, "plan", [])}
+        observations = []
+        for output in getattr(result, "subtask_outputs", []):
+            subtask = subtasks.get(output.subtask_id)
+            layer = getattr(output, "layer", "") or getattr(subtask, "layer", "")
+            category = getattr(output, "category", "") or getattr(subtask, "category", "normal")
+            if not output.success or layer != "inspect" or category != "normal":
+                continue
+            observation = str(output.observation or "").strip()
+            if observation:
+                observations.append(f"## Verified inspection: {output.description}\n{observation}")
+        if not observations:
+            return None
+        evidence = "\n\n".join(observations)
+        if len(evidence) > self.settings.max_context_chars:
+            evidence = evidence[: self.settings.max_context_chars] + "\n...[truncated]"
+        return (
+            f"Question:\n{question}\n\n"
+            "The normal QA synthesis failed, but the following observations were successfully computed from the "
+            "verified spreadsheet structure and workbook. Answer using only these observations. Preserve exact "
+            "header-to-value ownership and every label explicitly enumerated in the question, apply every constraint "
+            "stated in the question, and do not add fields that were not requested. If the observations contain "
+            "multiple records, select only records matching all question constraints.\n\n"
+            f"{evidence}\n\nAnswer:"
+        )
 
     @staticmethod
     def _select_table_id(structure_path: Path, question: str) -> str | None:

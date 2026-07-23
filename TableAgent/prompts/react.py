@@ -33,6 +33,35 @@ Observation policy:
 - The notebook returns compact observations. If an output says it was truncated, run a narrower follow-up cell instead of asking for the entire output.
 - Store useful intermediate variables with clear names so later cells and the synthesis agent can reuse them.
 - If you need more detail, run targeted code that prints only the relevant rows, columns, or aggregate.
+- Resolve requested columns from verified header IDs/labels and inspect `DataFrame.columns` before selecting them. Do not
+  assume a field is at a fixed physical position such as `iloc[:, 3]`; positional access is acceptable only after the
+  current worksheet headers have been inspected and the position-to-header mapping has been verified.
+- Preserve the complete scope of the question in every filter: selected table/sheet, equipment or process identity,
+  requested item labels, dates, statuses, and all other conditions. Store or print a compact validation containing the
+  matched row count and identifying key values so later synthesis and review can detect filter drift.
+- Reuse a useful subset produced by a prior successful cell when possible. If you must filter the raw table again,
+  explicitly carry forward every accepted condition and compare the resulting row count or identifying keys.
+- Treat each verified header as the authoritative meaning of the values in its column or range. Preserve header-to-value
+  ownership when selecting and naming fields. Never use text from a different header merely because it sounds like the
+  requested concept; inspect and return the value under the requested header first.
+- `read_table_as_dataframe(..., has_headers=True)` returns one logical column per verified header, combining distinct
+  values when that header spans several physical worksheet columns. Use the complete logical value; do not select only
+  the first physical component.
+- When a requested field is a parent/group header with `sub_headers`, inspect every relevant child header before
+  filtering or aggregating. Never use the first child as a proxy for the group. For an "any" condition, combine child
+  conditions with OR; for an "all" condition, use AND, and report which child columns were covered. Prefer
+  `operators.resolve_header_columns(table_id, parent_header_id)` and
+  `operators.group_header_mask(table_df, table_id, parent_header_id, ..., mode="any"|"all")` so the condition cannot
+  drift to an unrelated header group. Treat a month/year in the sheet or report title as context unless the question
+  explicitly asks for monthly tracking values.
+- When the question names or enumerates target records/items, match the complete normalized labels before using broad
+  substring matching. Do not substitute a different item merely because it shares a generic token with the target.
+- If the verified table is collapsed into one coarse field, omits the named target sheet's master columns, or does not
+  contain the exact named target, inspect the named worksheet directly with `operators.sheet_dimensions(...)` and
+  `operators.read_sheet_as_dataframe(...)`. Preserve physical column ownership; do not split newline-packed rows and
+  guess field positions when the original worksheet cells can be read directly.
+- Preserve every distinct requested field value found for a matched item. Deduplicate repeated identical rows, but do
+  not discard additional criteria or details belonging to the same item.
 
 Output contract:
 - Your entire assistant message must be exactly one JSON object or exactly one ```json fenced JSON object.
@@ -77,5 +106,8 @@ Previous Code:
 Error message / Stdout:
 {error_message}
 
-Please inspect the error carefully and revise your code to fix it. Keep in mind the available operators and libraries. If previous output was too large or truncated, inspect a smaller slice or variable summary.
+Please inspect the error carefully and revise your code to fix it. Preserve all previously verified table, sheet, item,
+date, equipment, and status constraints. Resolve columns by verified IDs/labels rather than unverified positions, and
+print a compact matched-row/key validation. If previous output was too large or truncated, inspect a smaller slice or
+variable summary.
 """

@@ -15,9 +15,11 @@ from TableAgent.prompts.react import (
     REVISION_USER_PROMPT_TEMPLATE,
 )
 from TableAgent.prompts.synthesis import (
+    SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE,
     SYNTHESIS_SYSTEM_PROMPT,
     SYNTHESIS_USER_PROMPT_TEMPLATE,
 )
+from TableAgent.QA.language import required_answer_language
 
 CODE_JSON_REPAIR_SYSTEM_PROMPT = """You are a strict JSON code-generation formatter.
 Your only job is to produce one valid JSON object for the spreadsheet notebook agent.
@@ -131,6 +133,25 @@ def get_operator_catalog(env: Any) -> str:
     return "No operator catalog is available."
 
 
+def get_dependency_variable_summary(env: Any, subtask: Any) -> str:
+    metadata = getattr(subtask, "metadata", None)
+    if not isinstance(metadata, dict):
+        return "No accepted inspection variables were recorded."
+    raw_names = metadata.get("dependency_variables", [])
+    names = [str(name) for name in raw_names if str(name)] if isinstance(raw_names, list) else []
+    if not names:
+        return "No accepted inspection variables were recorded."
+
+    lines = []
+    for name in names:
+        try:
+            summary = env.preview_variable(name, rows=5, max_chars=500)
+        except Exception as exc:
+            summary = f"<unavailable: {exc}>"
+        lines.append(f"- {name}: {summary}")
+    return "\n".join(lines)
+
+
 def parse_model_output(content: str) -> Tuple[str, str, str]:
     json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
     payload = json_match.group(1) if json_match else content.strip()
@@ -182,7 +203,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
-                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np"}
+                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
                 ]
                 prior_outcomes = get_prior_outcomes(self.env)
                 formatted_experience = self.env.experience_pool.format()
@@ -239,7 +260,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
-                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np"}
+                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
                 ]
 
                 prior_outcomes = get_prior_outcomes(self.env)
@@ -279,15 +300,36 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             available_vars = list(self.env.notebook.namespace.keys())
             available_vars = [
                 v for v in available_vars
-                if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np"}
+                if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
             ]
             prior_outcomes = get_prior_outcomes(self.env)
+            inspection_variables = get_dependency_variable_summary(self.env, request.subtask)
 
-            prompt = SYNTHESIS_USER_PROMPT_TEMPLATE.format(
-                question=request.question,
-                available_variables=", ".join(available_vars) if available_vars else "None",
-                prior_outcomes=prior_outcomes,
-            )
+            if request.round_num == 1:
+                prompt = SYNTHESIS_USER_PROMPT_TEMPLATE.format(
+                    question=request.question,
+                    answer_language=required_answer_language(request.question),
+                    available_variables=", ".join(available_vars) if available_vars else "None",
+                    inspection_variables=inspection_variables,
+                    prior_outcomes=prior_outcomes,
+                )
+            else:
+                last_cell = self.env.notebook.cells[-1] if self.env.notebook.cells else None
+                failed_code = last_cell.code if last_cell else ""
+                error_msg = (
+                    self.env.notebook.observation_for_cell(last_cell).format()
+                    if last_cell
+                    else "Unknown synthesis error"
+                )
+                prompt = SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE.format(
+                    question=request.question,
+                    answer_language=required_answer_language(request.question),
+                    available_variables=", ".join(available_vars) if available_vars else "None",
+                    inspection_variables=inspection_variables,
+                    failed_code=failed_code,
+                    error_message=error_msg,
+                    experience=self.env.experience_pool.format(),
+                )
             system_prompt = SYNTHESIS_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
         else:
             raise ValueError(f"Unknown subtask layer: {request.layer}")

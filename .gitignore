@@ -18,3 +18,5 @@ config.yaml
 
 .vscode
 .codegraph
+
+benchmark

@@ -22,6 +22,7 @@ from TableAgent.QA import TableQARunner
 from tests.mock_policy import MockActionPolicy
 from TableAgent.QA.agents import TableQAPlanner, TableQAAgent
 from TableAgent.QA.actions.write_plan import parse_planner_output
+from TableAgent.QA.language import answer_uses_required_language, required_answer_language
 
 # Setup paths
 STRUCTURE_PATH = "sample/structure.yaml"
@@ -49,6 +50,22 @@ def _two_step_plan_json() -> str:
             },
         ],
     })
+
+
+def test_required_answer_language_ignores_wrappers_and_glosses():
+    question = (
+        "❓ Câu hỏi: 이 파일의 전체 시트 구성과 각 시트의 시트명(Tên sheet), "
+        "역할 및 내용(Vai trò & Nội dung), 특이사항(Ghi chú)은?"
+    )
+
+    assert required_answer_language(question) == "Korean"
+    assert required_answer_language("Hãy mô tả thông tin chung của sheet OIL.") == "Vietnamese"
+    assert required_answer_language("What is the average score?") == "English"
+    assert not answer_uses_required_language(
+        "## Sheet: 설비 계획\n- Description: Equipment maintenance schedule.",
+        "Korean",
+    )
+    assert answer_uses_required_language("설비 유지보수 계획을 설명합니다.", "Korean")
 
 def test_a1_conversions():
     # column name to number
@@ -910,3 +927,139 @@ def test_operator_modules_have_runnable_smoke_entrypoints():
         )
         assert result.returncode == 0, f"{module} failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         assert result.stdout.strip()
+
+
+def test_group_header_mask_resolves_leaf_columns():
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    try:
+        dataframe = env.operators.read_table_as_dataframe("table1", has_headers=True)
+
+        child_ids = env.operators.resolve_header_columns("table1", "name")
+        mask = env.operators.group_header_mask(
+            dataframe,
+            "table1",
+            "name",
+            equals="Minh",
+            mode="any",
+        )
+
+        assert child_ids == ["first_name", "middle_name", "last_name"]
+        assert dataframe.loc[mask, "no"].tolist() == [1, 3, 5, 8]
+    finally:
+        env.workbook.close()
+
+
+def test_planner_extracts_trailing_json_and_common_info_category():
+    trailing = parse_planner_output(
+        "I would inspect the workbook first.\n"
+        '[{"id":"inspect","layer":"inspect","depends_on":[],"description":"Read data"},'
+        '{"id":"finish","layer":"synthesis","depends_on":["inspect"],"description":"Answer"}]'
+    )
+    common_info = parse_planner_output(_llm_json({
+        "subtasks": [
+            {
+                "id": "inspect_sheet_info",
+                "layer": "inspect",
+                "category": "common_info",
+                "depends_on": [],
+                "description": "Describe the OIL sheet structure.",
+                "metadata": {
+                    "common_info_scope": "sheet",
+                    "target_names": ["OIL"],
+                },
+            },
+            {
+                "id": "synthesize_common_info",
+                "layer": "synthesis",
+                "category": "common_info",
+                "depends_on": ["inspect_sheet_info"],
+                "description": "Return only the common-information summary.",
+            },
+        ],
+    }))
+
+    assert [subtask.id for subtask in trailing] == ["inspect", "finish"]
+    assert [subtask.category for subtask in common_info] == ["common_info", "common_info"]
+    assert common_info[0].metadata["common_info_scope"] == "sheet"
+
+
+def test_planner_requires_explicit_common_info_scope():
+    with pytest.raises(ValueError, match="metadata.common_info_scope"):
+        parse_planner_output(_llm_json({
+            "subtasks": [{
+                "id": "inspect_common_info",
+                "layer": "inspect",
+                "category": "common_info",
+                "depends_on": [],
+                "description": "Describe the workbook structure.",
+            }],
+        }))
+
+
+def test_runner_serializes_full_dataframe_final_answer():
+    import pandas as pd
+
+    from TableAgent.schema.subtask import SubTask
+
+    runner = TableQARunner(STRUCTURE_PATH, WORKBOOK_PATH, policy=MockActionPolicy())
+    try:
+        rows = 68
+        runner.env.execution_namespace["final_answer"] = pd.DataFrame({
+            "STT": range(1, rows + 1),
+            "item": [f"part-{index}" for index in range(1, rows + 1)],
+        })
+        synthesis = SubTask(id="synthesize_answer", description="Return all rows.", layer="synthesis")
+
+        answer = runner._final_answer([synthesis], [synthesis])
+
+        assert answer is not None
+        assert "part-68" in answer
+        assert "..." not in answer
+        assert len(answer.splitlines()) == rows + 2
+    finally:
+        runner.close()
+
+
+def test_common_info_plan_uses_deterministic_route(tmp_path: Path):
+    plan = _llm_json({
+        "subtasks": [
+            {
+                "id": "inspect_table_info",
+                "layer": "inspect",
+                "category": "common_info",
+                "depends_on": [],
+                "description": "Describe the verified table.",
+                "metadata": {
+                    "common_info_scope": "table",
+                    "target_names": ["table1"],
+                },
+            },
+            {
+                "id": "synthesize_table_info",
+                "layer": "synthesis",
+                "category": "common_info",
+                "depends_on": ["inspect_table_info"],
+                "description": "Return the verified table summary.",
+            },
+        ],
+    })
+    localized = "## Table: People Nested Headers\n- Description: Verified people table."
+    llm = FakeLLM({
+        "Table Structure": plan,
+        "Verified common-information answer:": localized,
+    })
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=llm,
+        config={"qa_artifact_dir": str(tmp_path / "qa")},
+    )
+    try:
+        result = runner.run("Describe the People Nested Headers table.")
+
+        assert result.success
+        assert result.final_answer == localized
+        assert all(subtask.category == "common_info" for subtask in result.plan)
+        assert all(output.category == "common_info" for output in result.subtask_outputs)
+    finally:
+        runner.close()

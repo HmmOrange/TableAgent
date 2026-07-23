@@ -46,6 +46,7 @@ table_agent:
   image_tile_size: null
   image_tile_overlap: 256
   run_retrieval: true
+  perfect_retrieval: false
   retrieval_rerank_with_llm: true
   retrieval_top_k: 5
   retrieval_candidate_max_chars: 4000
@@ -55,6 +56,7 @@ table_agent:
   shift_cells: 45
   max_retry: 3
   qa_max_retries: 3
+  qa_max_replans: 5
   qa_max_experience_records: 5
   qa_log_path: null
   qa_max_observation_chars: 2000

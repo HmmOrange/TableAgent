@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Dict, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Tuple, Optional
 from pathlib import Path
 import openpyxl
 import pandas as pd
@@ -26,6 +26,7 @@ class QAEnvironment:
         max_error_chars: int = 2000,
         max_value_repr_chars: int = 800,
         table_retriever: TableRetrieverContract | None = None,
+        related_structure_paths: Iterable[str | Path] | None = None,
     ):
         from TableAgent.QA.operators.table_operator import TableOperators
 
@@ -36,6 +37,7 @@ class QAEnvironment:
         # Load tables structures
         self.structures = load_table_structures(structure_path)
         self.relations = load_formula_relations(structure_path)
+        self.related_structures = self._load_related_structures(related_structure_paths)
         
         # Load workbook (data_only=True reads evaluated values of formulas)
         self.workbook = openpyxl.load_workbook(workbook_path, data_only=True)
@@ -79,6 +81,28 @@ class QAEnvironment:
         
         # Keep execution_namespace property pointing to the notebook's namespace for backward compatibility
         self.execution_namespace = self.notebook.namespace
+
+    def _load_related_structures(
+        self,
+        related_structure_paths: Iterable[str | Path] | None,
+    ) -> list[dict[str, Any]]:
+        primary_path = Path(self.structure_path).resolve()
+        related = []
+        for value in related_structure_paths or []:
+            path = Path(value)
+            if not path.is_file() or path.resolve() == primary_path:
+                continue
+            try:
+                structures = load_table_structures(str(path))
+            except Exception:
+                continue
+            for table_id, structure in structures.items():
+                related.append({
+                    "structure_path": str(path),
+                    "table_id": table_id,
+                    "structure": structure,
+                })
+        return related
 
     def default_table_id(self) -> str:
         """Returns the first structure key or raises a clear error if none exist."""
