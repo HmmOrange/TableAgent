@@ -4,10 +4,10 @@ This document describes the current question-answering implementation under
 `TableAgent/QA/`. The QA phase consumes a workbook plus a persisted, verified
 `structure.yaml`; it does not discover table layout itself.
 
-In the service deployment, those structures and the workbook `schema.yaml` are
-generated during document ingestion, embedded as retrieval cards, and stored in
-Qdrant. Query-time vector retrieval can provide several matching table/sheet
-artifacts. TableAgent runs QA against that bundle without invoking the layout VLM.
+In the service deployment, verified structures and workbook schemas are generated
+during document ingestion and indexed as retrieval cards. Query-time retrieval
+selects sheet/table artifacts and extracts their corresponding `structure.yaml`
+before calling the unchanged QA pipeline, without invoking the layout VLM.
 
 The main orchestrator is [`TableQARunner`](runner.py). In benchmark runs it is called
 by [`TableAgentPipeline._run_verified_qa()`](../pipeline/table_agent_pipeline.py), which
@@ -296,13 +296,14 @@ plan and failure state.
 
 `TableAgentService.run_indexed_qa()` is the production query-time entry point for
 ingested spreadsheets. It receives the original workbook plus vector-retrieved records
-containing `structure_yaml`, `schema_yaml`, retrieval cards, and workbook metadata.
+containing the selected sheet's `structure_yaml`, retrieval cards, and workbook metadata.
 
 - Multiple table/sheet candidates from one workbook are passed as a primary verified
   structure plus related prepared-sheet structures.
 - Candidate groups from multiple workbooks are answered independently, then synthesized
   from the verified per-workbook answers.
-- The indexed workbook schema is included in planning context.
+- The core planner receives the same inputs as the `v0.4.0` QA pipeline; workbook
+  schema text is not added to its prompt.
 - Layout extraction and retrieval-card generation are not run during this path.
 
 ## 9. Pipeline-level fallback

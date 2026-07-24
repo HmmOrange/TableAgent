@@ -224,9 +224,6 @@ class WriteQAPlanAction(BasePlanAction):
         related_summary = _related_structure_summary(self.env)
         if related_summary:
             struct_summary = f"{struct_summary}\n\nRelated prepared-sheet structures:\n{related_summary}"
-        indexed_schema_text = str(getattr(self.env, "indexed_schema_text", "") or "").strip()
-        if indexed_schema_text:
-            struct_summary = f"{struct_summary}\n\nIndexed workbook schema:\n{indexed_schema_text}"
         prompt = PLANNER_USER_PROMPT_TEMPLATE.format(
             question=request.question,
             workbook_sheets=", ".join(self.env.workbook.sheetnames),

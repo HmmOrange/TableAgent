@@ -278,27 +278,17 @@ class TableAgentService:
                 seen_sheets: set[str] = set()
                 group_dir = source_dir / f"group-{group_index}"
                 for candidate in candidates:
-                    candidate_structures = candidate.get("structure_yamls")
-                    if isinstance(candidate_structures, dict):
-                        structure_items = list(candidate_structures.items())
-                    else:
-                        structure_items = []
-                    structure_items.append(
-                        (
-                            candidate.get("sheet") or candidate.get("sheet_name") or "",
-                            candidate.get("structure_yaml") or "",
-                        )
-                    )
-                    for raw_sheet_name, raw_structure_text in structure_items:
-                        sheet_name = str(raw_sheet_name or "").strip()
-                        structure_text = str(raw_structure_text or "").strip()
-                        if not structure_text or not sheet_name or sheet_name in seen_sheets:
-                            continue
-                        seen_sheets.add(sheet_name)
-                        structure_path = group_dir / f"{len(structures) + 1:03d}-{safe_name(sheet_name)}.yaml"
-                        structure_path.parent.mkdir(parents=True, exist_ok=True)
-                        structure_path.write_text(structure_text + "\n", encoding="utf-8")
-                        structures.append((sheet_name, structure_path))
+                    sheet_name = str(
+                        candidate.get("sheet") or candidate.get("sheet_name") or ""
+                    ).strip()
+                    structure_text = str(candidate.get("structure_yaml") or "").strip()
+                    if not structure_text or not sheet_name or sheet_name in seen_sheets:
+                        continue
+                    seen_sheets.add(sheet_name)
+                    structure_path = group_dir / f"{len(structures) + 1:03d}-{safe_name(sheet_name)}.yaml"
+                    structure_path.parent.mkdir(parents=True, exist_ok=True)
+                    structure_path.write_text(structure_text + "\n", encoding="utf-8")
+                    structures.append((sheet_name, structure_path))
 
                 if not structures:
                     continue
@@ -308,20 +298,11 @@ class TableAgentService:
                     for candidate in candidates
                     if str(candidate.get("retrieval_card") or "").strip()
                 )
-                schema_text = next(
-                    (
-                        str(candidate.get("schema_yaml") or "").strip()
-                        for candidate in candidates
-                        if str(candidate.get("schema_yaml") or "").strip()
-                    ),
-                    "",
-                )
                 fallback_prompt = (
                     "Answer the spreadsheet question using only the indexed, verified TableAgent context. "
                     "Do not invent values that are absent from the context.\n\n"
                     f"Question: {normalized_query}\n\n"
-                    f"Retrieved cards:\n{cards}\n\n"
-                    f"Workbook schema:\n{schema_text}"
+                    f"Retrieved cards:\n{cards}"
                 )
                 answer_response, qa_info = pipeline._run_verified_qa(
                     question=normalized_query,
@@ -331,7 +312,6 @@ class TableAgentService:
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
                     related_structure_paths=[path for _, path in structures[1:]],
-                    indexed_schema_text=schema_text,
                     enable_final_answer_review=True,
                 )
                 total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
@@ -603,24 +583,13 @@ class TableAgentService:
             )
             schema_text = schema_path.read_text(encoding="utf-8")
             workbook_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            structure_by_sheet = {
-                sheet_name: structure_path.read_text(encoding="utf-8")
-                for sheet_name, structure_path in structure_paths
-            }
             for record in workbook_retrieval_records:
-                sheet_name = str(record.get("sheet") or "")
                 retrieval_records.append(
                     {
                         **record,
                         "artifact_version": 1,
                         "document_name": item["name"],
                         "workbook_sha256": item["sha256"],
-                        "structure_yaml": structure_by_sheet.get(sheet_name, ""),
-                        "structure_yamls": (
-                            structure_by_sheet
-                            if record.get("retrieval_level") == "workbook"
-                            else {}
-                        ),
                         "schema_yaml": schema_text,
                         "workbook_metadata": workbook_metadata,
                     }

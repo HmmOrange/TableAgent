@@ -630,7 +630,6 @@ class TableAgentPipeline(BasePipeline):
         fallback_image_path: Path | None = None,
         fallback_text_prompt: str | None = None,
         related_structure_paths: list[Path] | None = None,
-        indexed_schema_text: str | None = None,
         excluded_sheet_names: list[str] | None = None,
         enable_final_answer_review: bool = False,
     ) -> tuple[LLMResponse, dict[str, Any]]:
@@ -652,7 +651,6 @@ class TableAgentPipeline(BasePipeline):
                 },
                 table_retriever=self.table_retriever,
                 related_structure_paths=related_structure_paths,
-                indexed_schema_text=indexed_schema_text,
             ) as runner:
             result = runner.run(question)
             qa_token_usage = result.token_usage
