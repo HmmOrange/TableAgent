@@ -441,6 +441,21 @@ class TableAgentService:
                 str(item["name"]): Path(item["path"])
                 for item in normalized
             }
+            eligible_artifacts = [
+                artifact
+                for artifact in artifact_list
+                if str(
+                    artifact.get("upload_name")
+                    or artifact.get("document_name")
+                    or artifact.get("workbook")
+                    or ""
+                ).strip()
+                in workbook_paths
+                and str(
+                    artifact.get("sheet") or artifact.get("sheet_name") or ""
+                ).strip()
+                and str(artifact.get("structure_yaml") or "").strip()
+            ]
             pipeline = self.pipeline_factory(
                 llm_client=self._answer_client(),
                 layout_vlm_client=None,
@@ -455,7 +470,7 @@ class TableAgentService:
             responses = []
             candidate = pipeline.source_retriever.select_indexed(
                 question=normalized_query,
-                artifacts=artifact_list,
+                artifacts=eligible_artifacts,
                 workbook_paths=workbook_paths,
                 responses=responses,
                 fit_context=pipeline._fit_context,
@@ -468,7 +483,7 @@ class TableAgentService:
             selected_workbook = candidate.workbook_path.name
             selected_artifacts = [
                 artifact
-                for artifact in artifact_list
+                for artifact in eligible_artifacts
                 if str(
                     artifact.get("upload_name")
                     or artifact.get("document_name")
@@ -556,8 +571,18 @@ class TableAgentService:
             retrieval_payload = {
                 "mode": "table_agent_hybrid",
                 "query_type": retrieval_trace.get("query_type", "data"),
-                "candidate_count": len(selected_artifacts),
-                "workbook_count": 1,
+                "candidate_count": len(eligible_artifacts),
+                "workbook_count": len(
+                    {
+                        str(
+                            item.get("upload_name")
+                            or item.get("document_name")
+                            or item.get("workbook")
+                            or ""
+                        ).strip()
+                        for item in eligible_artifacts
+                    }
+                ),
                 "document_id": next(
                     (
                         str(item.get("document_id") or "")

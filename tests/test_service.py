@@ -235,6 +235,10 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
 def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path, monkeypatch):
     sales = _workbook(tmp_path / "sales.xlsx")
     maintenance = _workbook(tmp_path / "maintenance.xlsx")
+    maintenance_book = openpyxl.load_workbook(maintenance)
+    maintenance_book.active["B1"] = "maintenance"
+    maintenance_book.save(maintenance)
+    maintenance_book.close()
     config = load_config("config.example.yaml")
     config["service"]["root_dir"] = str(tmp_path / "service")
     config["table_agent"]["retrieval_rerank_with_llm"] = False
@@ -290,6 +294,8 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert answer["retrieval"]["mode"] == "table_agent_hybrid"
     assert answer["retrieval"]["document_id"] == "doc-sales"
     assert answer["retrieval"]["embedding_used"] is True
+    assert answer["retrieval"]["candidate_count"] == 2
+    assert answer["retrieval"]["workbook_count"] == 2
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 
 
