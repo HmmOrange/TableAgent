@@ -1,6 +1,6 @@
 [project]
 name = "table-agent"
-version = "0.1.0"
+version = "0.4.0"
 description = "Image-assisted table structure extraction and question-answering pipeline"
 readme = "README.md"
 requires-python = ">=3.13"

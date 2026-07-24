@@ -176,7 +176,7 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
     )
 
     assert image_path.is_file()
-    assert calls["command"][0] == "C:\\LibreOffice\\program\\soffice.exe"
+    assert calls["command"][0] == str(Path("C:/LibreOffice/program/soffice.exe"))
     assert calls["print_area"] == "'Sheet1'!$B$2:$D$5"
     assert calls["headings"] is True
     assert calls["grid_lines"] is True
