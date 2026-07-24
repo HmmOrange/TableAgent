@@ -416,6 +416,98 @@ class TableAgentService:
                 "artifacts": [],
             }
 
+    def select_indexed_artifact(
+        self,
+        *,
+        query: str,
+        artifacts: Iterable[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Select an indexed artifact before the caller downloads any workbook."""
+        normalized_query = str(query).strip()
+        if not normalized_query:
+            raise ValueError("A non-empty query is required for indexed retrieval")
+        artifact_list = [dict(item) for item in artifacts if isinstance(item, dict)]
+        if not artifact_list:
+            raise ValueError("Indexed retrieval requires at least one artifact")
+
+        workbook_names = list(
+            dict.fromkeys(
+                str(
+                    artifact.get("upload_name")
+                    or artifact.get("document_name")
+                    or artifact.get("workbook")
+                    or ""
+                ).strip()
+                for artifact in artifact_list
+            )
+        )
+        workbook_paths = {
+            name: Path(name)
+            for name in workbook_names
+            if name
+        }
+        eligible_artifacts = [
+            artifact
+            for artifact in artifact_list
+            if str(
+                artifact.get("upload_name")
+                or artifact.get("document_name")
+                or artifact.get("workbook")
+                or ""
+            ).strip()
+            in workbook_paths
+            and str(
+                artifact.get("sheet") or artifact.get("sheet_name") or ""
+            ).strip()
+            and str(artifact.get("structure_yaml") or "").strip()
+        ]
+        if not eligible_artifacts:
+            raise ValueError("Indexed artifacts did not contain usable structures")
+
+        with tempfile.TemporaryDirectory(prefix="table-agent-select-") as workspace_text:
+            workspace_dir = Path(workspace_text)
+            pipeline = self.pipeline_factory(
+                llm_client=self._answer_client(),
+                layout_vlm_client=None,
+                config=self._pipeline_config(
+                    "qa",
+                    workspace_dir / "output",
+                    workspace_dir / "indexed",
+                    embed=False,
+                ),
+            )
+            responses = []
+            candidate = pipeline.source_retriever.select_indexed(
+                question=normalized_query,
+                artifacts=eligible_artifacts,
+                workbook_paths=workbook_paths,
+                responses=responses,
+                fit_context=pipeline._fit_context,
+            )
+        if candidate is None:
+            raise RuntimeError("TableAgent hybrid retrieval found no usable candidate")
+
+        selected_artifact = next(
+            (
+                artifact
+                for artifact in eligible_artifacts
+                if str(artifact.get("id") or "") == candidate.artifact_id
+            ),
+            None,
+        )
+        if selected_artifact is None:
+            raise RuntimeError("Selected TableAgent artifact is missing from the candidate set")
+        return {
+            "selected_artifact_id": candidate.artifact_id,
+            "document_id": str(selected_artifact.get("document_id") or ""),
+            "workbook": candidate.workbook_path.name,
+            "sheet": candidate.sheet_name,
+            "retrieval": self._indexed_retrieval_payload(
+                candidate,
+                eligible_artifacts,
+            ),
+        }
+
     def _run_indexed_qa_hybrid(
         self,
         *,
@@ -567,45 +659,10 @@ class TableAgentService:
             )
             public_qa_info = dict(qa_info)
             public_qa_info.pop("artifacts", None)
-            retrieval_trace = candidate.retrieval_trace[-1] if candidate.retrieval_trace else {}
-            retrieval_payload = {
-                "mode": "table_agent_hybrid",
-                "query_type": retrieval_trace.get("query_type", "data"),
-                "candidate_count": len(eligible_artifacts),
-                "workbook_count": len(
-                    {
-                        str(
-                            item.get("upload_name")
-                            or item.get("document_name")
-                            or item.get("workbook")
-                            or ""
-                        ).strip()
-                        for item in eligible_artifacts
-                    }
-                ),
-                "document_id": next(
-                    (
-                        str(item.get("document_id") or "")
-                        for item in selected_artifacts
-                        if item.get("document_id")
-                    ),
-                    "",
-                ),
-                "workbook": selected_workbook,
-                "sheet": candidate.sheet_name,
-                "table_id": candidate.table_id,
-                "table_name": candidate.table_name,
-                "selected_artifact_id": candidate.artifact_id,
-                "embedding_used": candidate.embedding_used,
-                "audit": [
-                    {
-                        **row,
-                        "selected": row.get("artifact_id") == candidate.artifact_id,
-                    }
-                    for row in candidate.retrieval_audit
-                ],
-                "reranker": retrieval_trace,
-            }
+            retrieval_payload = self._indexed_retrieval_payload(
+                candidate,
+                eligible_artifacts,
+            )
             prompt_tokens = sum(
                 int(getattr(response, "prompt_tokens", 0) or 0)
                 for response in responses
@@ -639,6 +696,52 @@ class TableAgentService:
                 ],
                 "artifacts": [],
             }
+
+    @staticmethod
+    def _indexed_retrieval_payload(
+        candidate: Any,
+        eligible_artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        retrieval_trace = candidate.retrieval_trace[-1] if candidate.retrieval_trace else {}
+        selected_artifact = next(
+            (
+                item
+                for item in eligible_artifacts
+                if str(item.get("id") or "") == candidate.artifact_id
+            ),
+            {},
+        )
+        return {
+            "mode": "table_agent_hybrid",
+            "query_type": retrieval_trace.get("query_type", "data"),
+            "candidate_count": len(eligible_artifacts),
+            "workbook_count": len(
+                {
+                    str(
+                        item.get("upload_name")
+                        or item.get("document_name")
+                        or item.get("workbook")
+                        or ""
+                    ).strip()
+                    for item in eligible_artifacts
+                }
+            ),
+            "document_id": str(selected_artifact.get("document_id") or ""),
+            "workbook": candidate.workbook_path.name,
+            "sheet": candidate.sheet_name,
+            "table_id": candidate.table_id,
+            "table_name": candidate.table_name,
+            "selected_artifact_id": candidate.artifact_id,
+            "embedding_used": candidate.embedding_used,
+            "audit": [
+                {
+                    **row,
+                    "selected": row.get("artifact_id") == candidate.artifact_id,
+                }
+                for row in candidate.retrieval_audit
+            ],
+            "reranker": retrieval_trace,
+        }
 
     def delete_runs(
         self,

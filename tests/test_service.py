@@ -259,6 +259,34 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
         layout_vlm_client=object(),
     )
 
+    selection = service.select_indexed_artifact(
+        query="regional revenue score",
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+        ],
+    )
+    assert selection["document_id"] == "doc-sales"
+    assert selection["retrieval"]["candidate_count"] == 2
+
     result = service.run_indexed_qa(
         query="regional revenue score",
         workbooks=[sales, maintenance],

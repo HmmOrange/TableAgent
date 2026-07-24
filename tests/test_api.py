@@ -54,6 +54,15 @@ class FakeService:
         )
         return {"answers": [{"query": query, "answer": "indexed"}], "artifacts": []}
 
+    def select_indexed_artifact(self, *, query, artifacts):
+        return {
+            "selected_artifact_id": artifacts[0]["id"],
+            "document_id": artifacts[0].get("document_id", ""),
+            "workbook": artifacts[0].get("upload_name", ""),
+            "sheet": artifacts[0].get("sheet", ""),
+            "retrieval": {"mode": "table_agent_hybrid"},
+        }
+
     @staticmethod
     def _validate_workbook(path: Path):
         if path.suffix.lower() != ".xlsx":
@@ -105,6 +114,29 @@ def test_server_side_paths_are_forbidden_by_default(tmp_path: Path):
         )
 
     assert response.status_code == 403
+
+
+def test_indexed_retrieval_select_endpoint(tmp_path: Path):
+    app = create_app(FakeService(tmp_path / "service"))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/retrieval/select",
+            json={
+                "query": "revenue",
+                "artifacts": [
+                    {
+                        "id": "sales:summary",
+                        "document_id": "doc-sales",
+                        "upload_name": "sales.xlsx",
+                        "sheet": "Summary",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["document_id"] == "doc-sales"
+    assert response.json()["retrieval"]["mode"] == "table_agent_hybrid"
 
 
 def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):

@@ -52,6 +52,11 @@ class UploadJobRequest(BaseModel):
         return self
 
 
+class IndexedRetrievalRequest(BaseModel):
+    query: str = Field(min_length=1)
+    artifacts: list[dict[str, Any]] = Field(min_length=1)
+
+
 def create_app(
     service: TableAgentService | None = None,
     *,
@@ -150,6 +155,7 @@ def create_app(
                     saved.append(target)
             except (OSError, ValueError) as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
             finally:
                 for upload in files:
                     await upload.close()
@@ -176,6 +182,19 @@ def create_app(
             except (RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    @app.post("/v1/retrieval/select")
+    def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:
+        try:
+            return resolved_service.select_indexed_artifact(
+                query=request.query,
+                artifacts=request.artifacts,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
     return app
 
 
@@ -199,4 +218,9 @@ def _require_queries(stage: Stage, queries: list[str]) -> None:
         raise ValueError("At least one non-empty query is required for qa and all stages")
 
 
-__all__ = ["PathJobRequest", "UploadJobRequest", "create_app"]
+__all__ = [
+    "IndexedRetrievalRequest",
+    "PathJobRequest",
+    "UploadJobRequest",
+    "create_app",
+]
