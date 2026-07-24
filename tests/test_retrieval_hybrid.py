@@ -610,6 +610,63 @@ def test_hybrid_retrieval_with_mock_embedding(temp_sources_dir):
     # "equipment" is in c1_dir structure/text, so Sheet1 should rank first
     assert candidates[0].sheet_name == "Sheet1"
 
+
+def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_top_k": 3,
+        "retrieval_candidate_max_chars": 1000,
+        "retrieval_embedding_provider": "mock",
+        "retrieval_lexical_weight": 0.5,
+        "retrieval_embedding_weight": 0.5,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    sales_path = tmp_path / "sales.xlsx"
+    maintenance_path = tmp_path / "maintenance.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="regional revenue score",
+        workbook_paths={
+            "sales.xlsx": sales_path,
+            "maintenance.xlsx": maintenance_path,
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "upload_name": "sales.xlsx",
+                "document_id": "doc-sales",
+                "sheet": "Summary",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Summary\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "upload_name": "maintenance.xlsx",
+                "document_id": "doc-maintenance",
+                "sheet": "Plan",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.artifact_id == "sales:summary"
+    assert candidate.workbook_path == sales_path
+    assert candidate.embedding_used is True
+    assert [row["artifact_id"] for row in candidate.retrieval_audit] == [
+        "sales:summary",
+        "maintenance:plan",
+    ]
+
 def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
     config = TableAgentConfig.from_config({
         "artifact_dir": str(temp_sources_dir.parent),

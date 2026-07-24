@@ -97,6 +97,79 @@ class SourceRetriever:
         self._progress("retrieval", sample=sample.sample_id, candidate=candidate)
         return candidate
 
+    def select_indexed(
+        self,
+        *,
+        question: str,
+        artifacts: list[dict[str, Any]],
+        workbook_paths: dict[str, Path],
+        responses: list[LLMResponse],
+        fit_context,
+    ) -> SourceCandidate | None:
+        """Select one ingestion-time artifact with the standard hybrid retriever."""
+        data_candidates: list[SourceCandidate] = []
+        metadata_candidates: list[SourceCandidate] = []
+        for artifact in artifacts:
+            workbook_name = str(
+                artifact.get("upload_name")
+                or artifact.get("document_name")
+                or artifact.get("workbook")
+                or ""
+            ).strip()
+            workbook_path = workbook_paths.get(workbook_name)
+            sheet_name = str(
+                artifact.get("sheet") or artifact.get("sheet_name") or ""
+            ).strip()
+            structure_text = str(artifact.get("structure_yaml") or "").strip()
+            retrieval_card = str(artifact.get("retrieval_card") or "").strip()
+            if workbook_path is None or not sheet_name or not structure_text:
+                continue
+            retrieval_type = str(artifact.get("retrieval_type") or "data").strip()
+            candidate = self._source_candidate(
+                source_dir=workbook_path.parent,
+                workbook_path=workbook_path,
+                sheet_name=sheet_name,
+                image_path=workbook_path,
+                html_path=None,
+                structure_text=structure_text,
+                sheet_text=retrieval_card,
+                retrieval_card=retrieval_card,
+                query=question,
+                table_id=str(artifact.get("table_id") or ""),
+                table_name=str(artifact.get("table_name") or ""),
+                table_description=str(artifact.get("table_description") or ""),
+                retrieval_type=retrieval_type,
+                retrieval_level=str(artifact.get("retrieval_level") or "table"),
+                artifact_id=str(artifact.get("id") or ""),
+            )
+            if retrieval_type == "metadata":
+                metadata_candidates.append(candidate)
+            else:
+                data_candidates.append(candidate)
+
+        query_type = self._resolve_query_type(question, responses)
+        candidates = self._rank_candidates(
+            self._candidates_for_query_type(
+                query_type,
+                data_candidates,
+                metadata_candidates,
+            ),
+            question,
+        )
+        if not candidates and query_type != "data":
+            candidates = self._rank_candidates(data_candidates, question)
+        if not candidates:
+            return None
+        if not self.settings.retrieval_rerank_with_llm or len(candidates) == 1 or self.llm is None:
+            return candidates[0]
+        return self._select_from_batches(
+            question,
+            candidates,
+            responses,
+            fit_context,
+            query_type=query_type,
+        )
+
     def select_perfect(self, sample: EvalSample) -> SourceCandidate:
         """Select the best prepared source deterministically, without embeddings or LLM reranking."""
         configured_candidate = self._configured_perfect_candidate(sample)
@@ -942,6 +1015,7 @@ class SourceRetriever:
 
     def _audit_row(self, candidate: SourceCandidate, rank: int) -> dict[str, Any]:
         return {
+            "artifact_id": candidate.artifact_id,
             "rank": rank,
             "retrieval_type": candidate.retrieval_type,
             "retrieval_level": candidate.retrieval_level,
@@ -981,6 +1055,7 @@ class SourceRetriever:
         table_description: str = "",
         retrieval_type: str = "data",
         retrieval_level: str = "table",
+        artifact_id: str = "",
     ) -> SourceCandidate:
         lexical_score = _lexical_overlap_score(query, retrieval_card)
         entity_score, matched_terms, missing_terms = self._entity_match(query, retrieval_card)
@@ -1005,6 +1080,7 @@ class SourceRetriever:
             missing_terms=missing_terms,
             retrieval_type=retrieval_type,
             retrieval_level=retrieval_level,
+            artifact_id=artifact_id,
         )
 
     def _entity_match(self, query: str, retrieval_card: str) -> tuple[float, tuple[str, ...], tuple[str, ...]]:

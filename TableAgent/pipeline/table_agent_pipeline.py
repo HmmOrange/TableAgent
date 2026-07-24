@@ -11,6 +11,7 @@ from TableAgent.prompts.answer import ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT_T
 from TableAgent.prompts.reranker import RERANKER_SYSTEM_PROMPT, RERANKER_USER_PROMPT_TEMPLATE
 
 from TableAgent.configs import TableAgentConfig
+from TableAgent.configs.models_config import available_models
 from TableAgent.llm import BaseLLM, LLMResponse
 from TableAgent.pipeline.base import BasePipeline, PipelineOutput
 from TableAgent.QA.agents.answer_agent import QAAgent
@@ -31,6 +32,7 @@ from TableAgent.pipeline.common import (
 )
 from TableAgent.pipeline.prompting import PromptBuilder
 from TableAgent.pipeline.retrieval import SourceRetriever
+from TableAgent.pipeline.retrieval.embeddings import OpenAICompatibleEmbeddingClient
 from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.source_preparer import SourcePreparer
 from TableAgent.structure.layout.workflow import TableLayoutWorkflow
@@ -71,6 +73,7 @@ class TableAgentPipeline(BasePipeline):
         layout_vlm_client: BaseLLM | None,
         config: dict[str, Any] | None = None,
         table_retriever: TableRetrieverContract | None = None,
+        embedding_client: Any | None = None,
     ):
         self.llm = llm_client
         self.layout_vlm = layout_vlm_client
@@ -103,7 +106,23 @@ class TableAgentPipeline(BasePipeline):
             self._analyze_source_sheet,
             progress_callback=self._progress,
         )
-        self.source_retriever = SourceRetriever(self.settings, self.llm, self, self.prompts)
+        configured_models = available_models(config or {})
+        if (
+            embedding_client is None
+            and self.settings.retrieval_embedding_provider not in {None, "mock"}
+            and self.settings.retrieval_embedding_provider in configured_models
+        ):
+            embedding_client = OpenAICompatibleEmbeddingClient.from_config(
+                config or {},
+                self.settings.retrieval_embedding_provider,
+            )
+        self.source_retriever = SourceRetriever(
+            self.settings,
+            self.llm,
+            self,
+            self.prompts,
+            embedding_client=embedding_client,
+        )
         self.siflex_formatter = SiflexAnswerFormatterAgent(self.llm) if self.llm is not None else None
         self.structure_cache = StructureCache(
             self.settings,

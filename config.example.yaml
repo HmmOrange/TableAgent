@@ -13,6 +13,12 @@ models:
     temperature: 0.0
     max_tokens: null
     timeout_seconds: 180
+  retrieval_embedding_model:
+    provider: "openai_compatible"
+    base_url: "${TABLE_AGENT_EMBEDDING_BASE_URL:-http://localhost:8001/v1}"
+    model: "${TABLE_AGENT_EMBEDDING_MODEL:-your-embedding-model}"
+    api_key: "${TABLE_AGENT_EMBEDDING_API_KEY:-EMPTY}"
+    timeout_seconds: "${TABLE_AGENT_EMBEDDING_TIMEOUT_SECONDS:-120}"
 
 vlm_models:
   layout_model:
@@ -62,7 +68,7 @@ table_agent:
   qa_max_observation_chars: 2000
   qa_max_error_chars: 2000
   qa_max_value_repr_chars: 800
-  retrieval_embedding_provider: null
+  retrieval_embedding_provider: "retrieval_embedding_model"
   retrieval_lexical_weight: 0.5
   retrieval_embedding_weight: 0.5
 

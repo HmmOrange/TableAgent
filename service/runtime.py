@@ -231,6 +231,14 @@ class TableAgentService:
         if not artifact_list:
             raise ValueError("Indexed QA requires at least one retrieval artifact")
 
+        if self.pipeline_factory is TableAgentPipeline:
+            return self._run_indexed_qa_hybrid(
+                normalized_query=normalized_query,
+                workbook_list=workbook_list,
+                artifact_list=artifact_list,
+                qa_max_replans=qa_max_replans,
+            )
+
         run_id = new_job_id()
         with tempfile.TemporaryDirectory(prefix=f"table-agent-indexed-{safe_name(run_id)}-") as workspace_text:
             workspace_dir = Path(workspace_text)
@@ -408,6 +416,205 @@ class TableAgentService:
                 "artifacts": [],
             }
 
+    def _run_indexed_qa_hybrid(
+        self,
+        *,
+        normalized_query: str,
+        workbook_list: list[Path],
+        artifact_list: list[dict[str, Any]],
+        qa_max_replans: int | None,
+    ) -> dict[str, Any]:
+        """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
+        run_id = new_job_id()
+        with tempfile.TemporaryDirectory(
+            prefix=f"table-agent-indexed-{safe_name(run_id)}-"
+        ) as workspace_text:
+            workspace_dir = Path(workspace_text)
+            output_dir = workspace_dir / "output"
+            source_dir = workspace_dir / "indexed"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            normalized = self._normalize_workbooks(
+                workbook_list,
+                workspace_dir / "normalized",
+            )
+            workbook_paths = {
+                str(item["name"]): Path(item["path"])
+                for item in normalized
+            }
+            pipeline = self.pipeline_factory(
+                llm_client=self._answer_client(),
+                layout_vlm_client=None,
+                config=self._pipeline_config(
+                    "qa",
+                    output_dir,
+                    source_dir,
+                    embed=False,
+                    qa_max_replans=qa_max_replans,
+                ),
+            )
+            responses = []
+            candidate = pipeline.source_retriever.select_indexed(
+                question=normalized_query,
+                artifacts=artifact_list,
+                workbook_paths=workbook_paths,
+                responses=responses,
+                fit_context=pipeline._fit_context,
+            )
+            if candidate is None:
+                raise RuntimeError(
+                    "Indexed artifacts did not contain any usable verified structures"
+                )
+
+            selected_workbook = candidate.workbook_path.name
+            selected_artifacts = [
+                artifact
+                for artifact in artifact_list
+                if str(
+                    artifact.get("upload_name")
+                    or artifact.get("document_name")
+                    or artifact.get("workbook")
+                    or ""
+                ).strip()
+                == selected_workbook
+            ]
+            ordered_artifacts: list[dict[str, Any]] = []
+            seen_sheets: set[str] = set()
+            for artifact in [
+                next(
+                    (
+                        item
+                        for item in selected_artifacts
+                        if str(item.get("id") or "") == candidate.artifact_id
+                    ),
+                    None,
+                ),
+                *selected_artifacts,
+            ]:
+                if not isinstance(artifact, dict):
+                    continue
+                sheet_name = str(
+                    artifact.get("sheet") or artifact.get("sheet_name") or ""
+                ).strip()
+                if not sheet_name or sheet_name in seen_sheets:
+                    continue
+                structure_text = str(artifact.get("structure_yaml") or "").strip()
+                if not structure_text:
+                    continue
+                seen_sheets.add(sheet_name)
+                ordered_artifacts.append(artifact)
+
+            if not ordered_artifacts:
+                raise RuntimeError(
+                    "Indexed artifacts did not contain any usable verified structures"
+                )
+
+            structures: list[tuple[str, Path]] = []
+            for index, artifact in enumerate(ordered_artifacts, start=1):
+                sheet_name = str(
+                    artifact.get("sheet") or artifact.get("sheet_name") or ""
+                ).strip()
+                structure_path = (
+                    source_dir
+                    / f"{index:03d}-{safe_name(sheet_name)}.yaml"
+                )
+                structure_path.parent.mkdir(parents=True, exist_ok=True)
+                structure_path.write_text(
+                    str(artifact.get("structure_yaml") or "").strip() + "\n",
+                    encoding="utf-8",
+                )
+                structures.append((sheet_name, structure_path))
+
+            selected_card = str(
+                next(
+                    (
+                        item.get("retrieval_card")
+                        for item in selected_artifacts
+                        if str(item.get("id") or "") == candidate.artifact_id
+                    ),
+                    "",
+                )
+            ).strip()
+            fallback_prompt = (
+                "Answer the spreadsheet question using only the indexed, verified "
+                "TableAgent context. Do not invent values absent from the context.\n\n"
+                f"Question: {normalized_query}\n\n"
+                f"Selected retrieval card:\n{selected_card}"
+            )
+            answer_response, qa_info = pipeline._run_verified_qa(
+                question=normalized_query,
+                structure_path=structures[0][1],
+                workbook_path=candidate.workbook_path,
+                qa_artifact_dir=output_dir / "qa",
+                fallback_prompt=fallback_prompt,
+                fallback_text_prompt=fallback_prompt,
+                related_structure_paths=[path for _, path in structures[1:]],
+                enable_final_answer_review=True,
+            )
+            public_qa_info = dict(qa_info)
+            public_qa_info.pop("artifacts", None)
+            retrieval_trace = candidate.retrieval_trace[-1] if candidate.retrieval_trace else {}
+            retrieval_payload = {
+                "mode": "table_agent_hybrid",
+                "query_type": retrieval_trace.get("query_type", "data"),
+                "candidate_count": len(selected_artifacts),
+                "workbook_count": 1,
+                "document_id": next(
+                    (
+                        str(item.get("document_id") or "")
+                        for item in selected_artifacts
+                        if item.get("document_id")
+                    ),
+                    "",
+                ),
+                "workbook": selected_workbook,
+                "sheet": candidate.sheet_name,
+                "table_id": candidate.table_id,
+                "table_name": candidate.table_name,
+                "selected_artifact_id": candidate.artifact_id,
+                "embedding_used": candidate.embedding_used,
+                "audit": [
+                    {
+                        **row,
+                        "selected": row.get("artifact_id") == candidate.artifact_id,
+                    }
+                    for row in candidate.retrieval_audit
+                ],
+                "reranker": retrieval_trace,
+            }
+            prompt_tokens = sum(
+                int(getattr(response, "prompt_tokens", 0) or 0)
+                for response in responses
+            ) + int(getattr(answer_response, "prompt_tokens", 0) or 0)
+            completion_tokens = sum(
+                int(getattr(response, "completion_tokens", 0) or 0)
+                for response in responses
+            ) + int(getattr(answer_response, "completion_tokens", 0) or 0)
+            return {
+                "job_id": run_id,
+                "stage": "qa",
+                "workbooks": [selected_workbook],
+                "structures": [],
+                "schema_artifacts": [],
+                "metadata_artifacts": [],
+                "retrieval_records": [],
+                "answers": [
+                    {
+                        "query": normalized_query,
+                        "answer": answer_response.content,
+                        "workbook": selected_workbook,
+                        "workbooks": [selected_workbook],
+                        "sheets": [candidate.sheet_name],
+                        "retrieval": retrieval_payload,
+                        "qa": public_qa_info,
+                        "token_usage": {
+                            "prompt": prompt_tokens,
+                            "completion": completion_tokens,
+                        },
+                    }
+                ],
+                "artifacts": [],
+            }
+
     def delete_runs(
         self,
         run_ids: Iterable[str] = (),
@@ -504,6 +711,9 @@ class TableAgentService:
                 "embed_retrieval_cards": bool(embed),
             }
         )
+        for key in ("models", "vlm_models", "llm_providers", "embedding"):
+            if key in self.config:
+                agent_config[key] = self.config[key]
         if qa_max_replans is not None:
             agent_config["qa_max_replans"] = qa_max_replans
         return agent_config

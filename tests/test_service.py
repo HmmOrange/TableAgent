@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import openpyxl
 import yaml
 
+from TableAgent.configs import load_config
+from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.llm import LLMResponse
 from service.runtime import TableAgentService
@@ -228,6 +230,67 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
     assert "indexed_schema_text" not in FakeIndexedPipeline.calls[0]
     assert result["answers"][0]["answer"] == "indexed answer"
     assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
+
+
+def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path, monkeypatch):
+    sales = _workbook(tmp_path / "sales.xlsx")
+    maintenance = _workbook(tmp_path / "maintenance.xlsx")
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = False
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    qa_calls = []
+
+    def run_verified_qa(_pipeline, **kwargs):
+        qa_calls.append(kwargs)
+        return (
+            LLMResponse(content="Sales answer", prompt_tokens=3, completion_tokens=2),
+            {"success": True, "fallback_used": False, "replan_count": 0},
+        )
+
+    monkeypatch.setattr(TableAgentPipeline, "_run_verified_qa", run_verified_qa)
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    result = service.run_indexed_qa(
+        query="regional revenue score",
+        workbooks=[sales, maintenance],
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+        ],
+    )
+
+    answer = result["answers"][0]
+    assert len(qa_calls) == 1
+    assert qa_calls[0]["workbook_path"].name == "sales.xlsx"
+    assert answer["workbook"] == "sales.xlsx"
+    assert answer["workbooks"] == ["sales.xlsx"]
+    assert answer["retrieval"]["mode"] == "table_agent_hybrid"
+    assert answer["retrieval"]["document_id"] == "doc-sales"
+    assert answer["retrieval"]["embedding_used"] is True
+    assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 
 
 def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):

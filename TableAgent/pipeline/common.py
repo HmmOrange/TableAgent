@@ -35,6 +35,7 @@ class SourceCandidate:
     retrieval_level: str = "table"
     retrieval_trace: tuple[dict[str, Any], ...] = ()
     retrieval_audit: tuple[dict[str, Any], ...] = ()
+    artifact_id: str = ""
 
 
 def safe_name(value: str) -> str:
