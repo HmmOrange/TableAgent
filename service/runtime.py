@@ -84,10 +84,13 @@ class TableAgentService:
         job_id: str | None = None,
         embed: bool = False,
         sheets: Iterable[str] = (),
+        qa_max_replans: int | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
+        if qa_max_replans is not None and qa_max_replans < 0:
+            raise ValueError("qa_max_replans must be greater than or equal to 0")
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
         if not workbook_list:
             raise ValueError("At least one workbook is required")
@@ -128,7 +131,12 @@ class TableAgentService:
                 pipeline = self.pipeline_factory(
                     llm_client=self._answer_client(),
                     layout_vlm_client=self._layout_client(),
-                    config=self._pipeline_config("structure", output_dir, source_dir, embed=embed),
+                    config=self._pipeline_config(
+                        "structure",
+                        output_dir,
+                        source_dir,
+                        embed=embed,
+                    ),
                 )
                 records = pipeline.verify_samples([base_sample], force=True)
                 structures = self._structure_results(
@@ -157,7 +165,13 @@ class TableAgentService:
                     pipeline = self.pipeline_factory(
                         llm_client=self._answer_client(),
                         layout_vlm_client=None,
-                        config=self._pipeline_config("qa", output_dir, source_dir, embed=embed),
+                        config=self._pipeline_config(
+                            "qa",
+                            output_dir,
+                            source_dir,
+                            embed=embed,
+                            qa_max_replans=qa_max_replans,
+                        ),
                     )
                     pipeline.prepare_samples(samples)
                     for sample in samples:
@@ -277,6 +291,7 @@ class TableAgentService:
         source_dir: Path,
         *,
         embed: bool = False,
+        qa_max_replans: int | None = None,
     ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
@@ -289,6 +304,8 @@ class TableAgentService:
                 "embed_retrieval_cards": bool(embed),
             }
         )
+        if qa_max_replans is not None:
+            agent_config["qa_max_replans"] = qa_max_replans
         return agent_config
 
     def _build_workbook_artifacts(

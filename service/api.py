@@ -24,6 +24,7 @@ class PathJobRequest(BaseModel):
     workbooks: list[str] = Field(min_length=1)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
+    qa_max_replans: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "PathJobRequest":
@@ -38,6 +39,7 @@ class UploadJobRequest(BaseModel):
     queries: list[str] = Field(default_factory=list)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
+    qa_max_replans: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
@@ -103,6 +105,7 @@ def create_app(
                 workbooks=workbooks,
                 embed=request.embed,
                 sheets=request.sheets,
+                qa_max_replans=request.qa_max_replans,
                 persist=False,
             )
         except (RuntimeError, ValueError) as exc:
@@ -154,6 +157,7 @@ def create_app(
                     workbooks=saved,
                     embed=request.embed,
                     sheets=request.sheets,
+                    qa_max_replans=request.qa_max_replans,
                     persist=False,
                 )
             except (RuntimeError, ValueError) as exc:

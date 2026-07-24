@@ -184,6 +184,46 @@ def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     assert result["answers"][0]["answer"] == "answer: question"
 
 
+def test_qa_stage_accepts_per_run_max_replans_override(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {"qa_max_replans": 5},
+        },
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    service.run(
+        stage="qa",
+        workbooks=[source],
+        queries=["question"],
+        qa_max_replans=2,
+    )
+
+    assert FakePipeline.instances[1].config["qa_max_replans"] == 2
+
+
+def test_service_rejects_negative_qa_max_replans(tmp_path: Path):
+    service = TableAgentService({"service": {"root_dir": str(tmp_path / "service")}})
+    source = _workbook(tmp_path / "book.xlsx")
+
+    try:
+        service.run(
+            stage="qa",
+            workbooks=[source],
+            queries=["question"],
+            qa_max_replans=-1,
+        )
+    except ValueError as exc:
+        assert "qa_max_replans" in str(exc)
+    else:
+        raise AssertionError("Expected a negative qa_max_replans validation error")
+
+
 def test_service_always_regenerates_structure_in_a_fresh_workspace(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")

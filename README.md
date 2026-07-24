@@ -360,11 +360,14 @@ Submit a workbook and receive the end-to-end result directly:
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
   -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"embed":true,"sheets":["Summary,Detail"]}' \
+  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"embed":true,"sheets":["Summary,Detail"],"qa_max_replans":3}' \
   -F "files=@sample/QA_sample.xlsx"
 ```
 
-Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
+Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed`, `sheets`, and
+an optional non-negative `qa_max_replans`. The request value overrides
+`table_agent.qa_max_replans` for that job; omitting it uses the configured value,
+which defaults to `5`.
 Ingestion always generates workbook schema and metadata artifacts. Sheet list
 entries may contain comma-separated names.
 
