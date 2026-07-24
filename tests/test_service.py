@@ -84,6 +84,26 @@ class FakeSummaryClient:
         return LLMResponse(content=f'{{"description": "{description}"}}')
 
 
+class FakeIndexedPipeline:
+    instances = []
+
+    def __init__(self, llm_client, layout_vlm_client, config):
+        self.llm_client = llm_client
+        self.layout_vlm_client = layout_vlm_client
+        self.config = config
+        self.qa_agent = SimpleNamespace(
+            run=lambda prompt: LLMResponse(content="combined indexed answer", prompt_tokens=2, completion_tokens=1)
+        )
+        type(self).instances.append(self)
+
+    def _run_verified_qa(self, **kwargs):
+        assert Path(kwargs["structure_path"]).is_file()
+        return (
+            LLMResponse(content="indexed answer", prompt_tokens=3, completion_tokens=2),
+            {"success": True, "fallback_used": False, "replan_count": 0},
+        )
+
+
 def _workbook(path: Path) -> Path:
     workbook = openpyxl.Workbook()
     workbook.active["A1"] = "value"
@@ -163,6 +183,52 @@ def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
     assert len(FakePipeline.instances) == 1
     assert result["schema_artifacts"][0]["artifact"] == "workbooks/book.xlsx/schema.yaml"
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
+    assert result["retrieval_records"]
+    assert result["retrieval_records"][0]["schema_yaml"]
+    workbook_record = next(
+        record
+        for record in result["retrieval_records"]
+        if record["retrieval_level"] == "workbook"
+    )
+    assert workbook_record["structure_yamls"]
+
+
+def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    result = service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        qa_max_replans=2,
+        artifacts=[
+            {
+                "id": "book:metadata",
+                "upload_name": "book.xlsx",
+                "document_name": "book.xlsx",
+                "score": 0.9,
+                "sheet": "",
+                "retrieval_level": "workbook",
+                "retrieval_card": "Workbook: book.xlsx\nSheets: Sheet",
+                "structure_yamls": {
+                    "Sheet": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n"
+                },
+                "schema_yaml": "Sheet: {}\n",
+            }
+        ],
+    )
+
+    assert len(FakeIndexedPipeline.instances) == 1
+    assert FakeIndexedPipeline.instances[0].layout_vlm_client is None
+    assert FakeIndexedPipeline.instances[0].config["qa_max_replans"] == 2
+    assert result["answers"][0]["answer"] == "indexed answer"
+    assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
 
 
 def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):

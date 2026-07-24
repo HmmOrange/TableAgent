@@ -40,10 +40,15 @@ class UploadJobRequest(BaseModel):
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
     qa_max_replans: int | None = Field(default=None, ge=0)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
         _require_queries(self.stage, self.queries)
+        if self.stage == "qa" and self.artifacts:
+            queries = [str(query).strip() for query in self.queries if str(query).strip()]
+            if len(queries) != 1:
+                raise ValueError("Indexed QA requires exactly one non-empty query")
         return self
 
 
@@ -150,6 +155,14 @@ def create_app(
                     await upload.close()
 
             try:
+                if request.stage == "qa" and request.artifacts:
+                    return await asyncio.to_thread(
+                        resolved_service.run_indexed_qa,
+                        query=request.queries[0],
+                        workbooks=saved,
+                        artifacts=request.artifacts,
+                        qa_max_replans=request.qa_max_replans,
+                    )
                 return await asyncio.to_thread(
                     resolved_service.run,
                     stage=request.stage,

@@ -15,6 +15,7 @@ class FakeService:
         self.api_key = None
         self.calls = []
         self.accept_local_paths = False
+        self.indexed_calls = []
 
     def run(self, *, stage, queries, workbooks, embed, sheets, qa_max_replans, persist):
         self.calls.append(
@@ -41,6 +42,17 @@ class FakeService:
         if not self.accept_local_paths:
             raise PermissionError("Server-side workbook paths are disabled; upload the workbook instead")
         return Path(value)
+
+    def run_indexed_qa(self, *, query, workbooks, artifacts, qa_max_replans):
+        self.indexed_calls.append(
+            {
+                "query": query,
+                "workbooks": [str(path) for path in workbooks],
+                "artifacts": artifacts,
+                "qa_max_replans": qa_max_replans,
+            }
+        )
+        return {"answers": [{"query": query, "answer": "indexed"}], "artifacts": []}
 
     @staticmethod
     def _validate_workbook(path: Path):
@@ -93,6 +105,46 @@ def test_server_side_paths_are_forbidden_by_default(tmp_path: Path):
         )
 
     assert response.status_code == 403
+
+
+def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
+    service = FakeService(tmp_path / "service")
+    app = create_app(service)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/jobs/upload",
+            data={
+                "payload": (
+                    '{"stage":"qa","queries":["question"],"qa_max_replans":2,"artifacts":'
+                    '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
+                )
+            },
+            files={"files": ("book.xlsx", b"workbook-bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answers"][0]["answer"] == "indexed"
+    assert not service.calls
+    assert service.indexed_calls[0]["query"] == "question"
+    assert service.indexed_calls[0]["qa_max_replans"] == 2
+
+
+def test_indexed_upload_job_rejects_multiple_queries(tmp_path: Path):
+    app = create_app(FakeService(tmp_path / "service"))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/jobs/upload",
+            data={
+                "payload": (
+                    '{"stage":"qa","queries":["one","two"],"artifacts":'
+                    '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
+                )
+            },
+            files={"files": ("book.xlsx", b"workbook-bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+
+    assert response.status_code == 400
+    assert "exactly one" in response.json()["detail"]
 
 
 def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):

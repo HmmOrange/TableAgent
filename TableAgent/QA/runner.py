@@ -65,6 +65,7 @@ class TableQARunner:
         max_retries: int = 3,
         table_retriever: TableRetrieverContract | None = None,
         related_structure_paths: Optional[list[str | Path]] = None,
+        indexed_schema_text: str | None = None,
     ):
         raw_config = config or {}
         self.settings = raw_config.get("table_agent", raw_config) if isinstance(raw_config, dict) else {}
@@ -118,6 +119,7 @@ class TableQARunner:
             for name in self.settings.get("qa_excluded_sheet_names", [])
             if str(name).strip()
         }
+        self.env.indexed_schema_text = str(indexed_schema_text or "").strip()
         self.env.enable_plan_category_review = self.env_plan_category_review
         
         self.env.logger.log_event("config_loaded", {

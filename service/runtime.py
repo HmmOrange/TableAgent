@@ -178,7 +178,7 @@ class TableAgentService:
                         output = pipeline.run(sample)
                         answers.append(self._answer_result(sample.question, output, normalized))
 
-                schema_artifacts, metadata_artifacts = self._build_workbook_artifacts(
+                schema_artifacts, metadata_artifacts, retrieval_records = self._build_workbook_artifacts(
                     normalized,
                     output_dir,
                     embed=embed,
@@ -193,6 +193,7 @@ class TableAgentService:
                     "structures": structures,
                     "schema_artifacts": schema_artifacts,
                     "metadata_artifacts": metadata_artifacts,
+                    "retrieval_records": retrieval_records,
                     "answers": answers,
                     "artifacts": self._artifact_paths(output_dir) if persist else [],
                 }
@@ -207,6 +208,225 @@ class TableAgentService:
             if persist and run_dir.exists():
                 shutil.rmtree(run_dir)
             raise
+
+    def run_indexed_qa(
+        self,
+        *,
+        query: str,
+        workbooks: Iterable[str | Path],
+        artifacts: Iterable[dict[str, Any]],
+        qa_max_replans: int | None = None,
+    ) -> dict[str, Any]:
+        """Answer from ingestion-time verified structures without running layout extraction."""
+        normalized_query = str(query).strip()
+        if not normalized_query:
+            raise ValueError("At least one non-empty query is required for indexed QA")
+        if qa_max_replans is not None and qa_max_replans < 0:
+            raise ValueError("qa_max_replans must be greater than or equal to 0")
+        workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
+        if not workbook_list:
+            raise ValueError("At least one workbook is required")
+
+        artifact_list = [dict(item) for item in artifacts if isinstance(item, dict)]
+        if not artifact_list:
+            raise ValueError("Indexed QA requires at least one retrieval artifact")
+
+        run_id = new_job_id()
+        with tempfile.TemporaryDirectory(prefix=f"table-agent-indexed-{safe_name(run_id)}-") as workspace_text:
+            workspace_dir = Path(workspace_text)
+            output_dir = workspace_dir / "output"
+            source_dir = workspace_dir / "indexed"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
+            by_name = {str(item["name"]): item for item in normalized}
+
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for artifact in sorted(
+                artifact_list,
+                key=lambda item: float(item.get("score") or 0.0),
+                reverse=True,
+            ):
+                workbook_name = str(
+                    artifact.get("upload_name")
+                    or artifact.get("document_name")
+                    or artifact.get("workbook")
+                    or ""
+                )
+                if workbook_name in by_name:
+                    grouped.setdefault(workbook_name, []).append(artifact)
+
+            if not grouped:
+                raise ValueError("Indexed artifacts do not match any uploaded workbook")
+
+            pipeline = self.pipeline_factory(
+                llm_client=self._answer_client(),
+                layout_vlm_client=None,
+                config=self._pipeline_config(
+                    "qa",
+                    output_dir,
+                    source_dir,
+                    embed=False,
+                    qa_max_replans=qa_max_replans,
+                ),
+            )
+            group_answers: list[dict[str, Any]] = []
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+
+            for group_index, (workbook_name, candidates) in enumerate(grouped.items(), start=1):
+                structures: list[tuple[str, Path]] = []
+                seen_sheets: set[str] = set()
+                group_dir = source_dir / f"group-{group_index}"
+                for candidate in candidates:
+                    candidate_structures = candidate.get("structure_yamls")
+                    if isinstance(candidate_structures, dict):
+                        structure_items = list(candidate_structures.items())
+                    else:
+                        structure_items = []
+                    structure_items.append(
+                        (
+                            candidate.get("sheet") or candidate.get("sheet_name") or "",
+                            candidate.get("structure_yaml") or "",
+                        )
+                    )
+                    for raw_sheet_name, raw_structure_text in structure_items:
+                        sheet_name = str(raw_sheet_name or "").strip()
+                        structure_text = str(raw_structure_text or "").strip()
+                        if not structure_text or not sheet_name or sheet_name in seen_sheets:
+                            continue
+                        seen_sheets.add(sheet_name)
+                        structure_path = group_dir / f"{len(structures) + 1:03d}-{safe_name(sheet_name)}.yaml"
+                        structure_path.parent.mkdir(parents=True, exist_ok=True)
+                        structure_path.write_text(structure_text + "\n", encoding="utf-8")
+                        structures.append((sheet_name, structure_path))
+
+                if not structures:
+                    continue
+
+                cards = "\n\n".join(
+                    str(candidate.get("retrieval_card") or "").strip()
+                    for candidate in candidates
+                    if str(candidate.get("retrieval_card") or "").strip()
+                )
+                schema_text = next(
+                    (
+                        str(candidate.get("schema_yaml") or "").strip()
+                        for candidate in candidates
+                        if str(candidate.get("schema_yaml") or "").strip()
+                    ),
+                    "",
+                )
+                fallback_prompt = (
+                    "Answer the spreadsheet question using only the indexed, verified TableAgent context. "
+                    "Do not invent values that are absent from the context.\n\n"
+                    f"Question: {normalized_query}\n\n"
+                    f"Retrieved cards:\n{cards}\n\n"
+                    f"Workbook schema:\n{schema_text}"
+                )
+                answer_response, qa_info = pipeline._run_verified_qa(
+                    question=normalized_query,
+                    structure_path=structures[0][1],
+                    workbook_path=Path(by_name[workbook_name]["path"]),
+                    qa_artifact_dir=output_dir / "qa" / f"group-{group_index}",
+                    fallback_prompt=fallback_prompt,
+                    fallback_text_prompt=fallback_prompt,
+                    related_structure_paths=[path for _, path in structures[1:]],
+                    indexed_schema_text=schema_text,
+                    enable_final_answer_review=True,
+                )
+                total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
+                total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
+                public_qa_info = dict(qa_info)
+                public_qa_info.pop("artifacts", None)
+                group_answers.append(
+                    {
+                        "workbook": workbook_name,
+                        "sheets": [sheet for sheet, _ in structures],
+                        "answer": answer_response.content,
+                        "qa": public_qa_info,
+                        "candidates": [
+                            {
+                                "id": candidate.get("id"),
+                                "score": float(candidate.get("score") or 0.0),
+                                "sheet": candidate.get("sheet") or candidate.get("sheet_name"),
+                                "table_id": candidate.get("table_id") or "",
+                                "retrieval_type": candidate.get("retrieval_type") or "data",
+                                "retrieval_level": candidate.get("retrieval_level") or "table",
+                            }
+                            for candidate in candidates
+                        ],
+                    }
+                )
+
+            if not group_answers:
+                raise RuntimeError("Indexed artifacts did not contain any usable verified structures")
+
+            if len(group_answers) == 1:
+                final_answer = str(group_answers[0]["answer"])
+            else:
+                evidence = "\n\n".join(
+                    f"Workbook: {item['workbook']}\nSheets: {', '.join(item['sheets'])}\nAnswer: {item['answer']}"
+                    for item in group_answers
+                )
+                synthesis_prompt = (
+                    "Combine the independently verified workbook answers into one direct answer to the user. "
+                    "Preserve disagreements and workbook attribution, and do not add facts not present in the evidence.\n\n"
+                    f"Question: {normalized_query}\n\nEvidence:\n{evidence}"
+                )
+                synthesis_response = pipeline.qa_agent.run(prompt=synthesis_prompt)
+                final_answer = synthesis_response.content
+                total_prompt_tokens += int(getattr(synthesis_response, "prompt_tokens", 0) or 0)
+                total_completion_tokens += int(getattr(synthesis_response, "completion_tokens", 0) or 0)
+
+            selected_workbooks = [str(item["workbook"]) for item in group_answers]
+            selected_sheets = list(
+                dict.fromkeys(
+                    sheet
+                    for item in group_answers
+                    for sheet in item["sheets"]
+                )
+            )
+            return {
+                "job_id": run_id,
+                "stage": "qa",
+                "workbooks": selected_workbooks,
+                "structures": [],
+                "schema_artifacts": [],
+                "metadata_artifacts": [],
+                "retrieval_records": [],
+                "answers": [
+                    {
+                        "query": normalized_query,
+                        "answer": final_answer,
+                        "workbook": selected_workbooks[0] if len(selected_workbooks) == 1 else "",
+                        "workbooks": selected_workbooks,
+                        "sheets": selected_sheets,
+                        "retrieval": {
+                            "mode": "indexed_vector_multi_candidate",
+                            "candidate_count": sum(len(item["candidates"]) for item in group_answers),
+                            "workbook_count": len(group_answers),
+                            "groups": [
+                                {"workbook": item["workbook"], "candidates": item["candidates"]}
+                                for item in group_answers
+                            ],
+                        },
+                        "qa": {
+                            "success": True,
+                            "fallback_used": any(item["qa"].get("fallback_used") for item in group_answers),
+                            "replan_count": sum(int(item["qa"].get("replan_count", 0) or 0) for item in group_answers),
+                            "per_workbook": [
+                                {"workbook": item["workbook"], **item["qa"]}
+                                for item in group_answers
+                            ],
+                        },
+                        "token_usage": {
+                            "prompt": total_prompt_tokens,
+                            "completion": total_completion_tokens,
+                        },
+                    }
+                ],
+                "artifacts": [],
+            }
 
     def delete_runs(
         self,
@@ -316,9 +536,10 @@ class TableAgentService:
         embed: bool,
         selected_sheets: tuple[str, ...],
         include_artifact_paths: bool,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         schema_artifacts: list[dict[str, Any]] = []
         metadata_artifacts: list[dict[str, Any]] = []
+        retrieval_records: list[dict[str, Any]] = []
 
         for item in normalized:
             job_workbook_dir = workbook_artifact_dir(
@@ -345,8 +566,9 @@ class TableAgentService:
                         include_embeddings=embed,
                     )
                 )
+            workbook_retrieval_records: list[dict[str, Any]] = []
             if job_retrieval_records:
-                write_workbook_retrieval_cards(
+                workbook_retrieval_records = write_workbook_retrieval_cards(
                     job_workbook_dir,
                     item["name"],
                     job_retrieval_records,
@@ -379,14 +601,38 @@ class TableAgentService:
                 schema_path=schema_path,
                 summarizer=SummaryGenerator(self._answer_client()),
             )
+            schema_text = schema_path.read_text(encoding="utf-8")
+            workbook_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            structure_by_sheet = {
+                sheet_name: structure_path.read_text(encoding="utf-8")
+                for sheet_name, structure_path in structure_paths
+            }
+            for record in workbook_retrieval_records:
+                sheet_name = str(record.get("sheet") or "")
+                retrieval_records.append(
+                    {
+                        **record,
+                        "artifact_version": 1,
+                        "document_name": item["name"],
+                        "workbook_sha256": item["sha256"],
+                        "structure_yaml": structure_by_sheet.get(sheet_name, ""),
+                        "structure_yamls": (
+                            structure_by_sheet
+                            if record.get("retrieval_level") == "workbook"
+                            else {}
+                        ),
+                        "schema_yaml": schema_text,
+                        "workbook_metadata": workbook_metadata,
+                    }
+                )
             metadata_record: dict[str, Any] = {"workbook": item["name"]}
             if include_artifact_paths:
                 metadata_record["artifact"] = metadata_path.relative_to(job_dir).as_posix()
             else:
-                metadata_record["metadata"] = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata_record["metadata"] = workbook_metadata
             metadata_artifacts.append(metadata_record)
 
-        return schema_artifacts, metadata_artifacts
+        return schema_artifacts, metadata_artifacts, retrieval_records
 
     @staticmethod
     def _sample(

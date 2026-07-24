@@ -4,6 +4,11 @@ This document describes the current question-answering implementation under
 `TableAgent/QA/`. The QA phase consumes a workbook plus a persisted, verified
 `structure.yaml`; it does not discover table layout itself.
 
+In the service deployment, those structures and the workbook `schema.yaml` are
+generated during document ingestion, embedded as retrieval cards, and stored in
+Qdrant. Query-time vector retrieval can provide several matching table/sheet
+artifacts. TableAgent runs QA against that bundle without invoking the layout VLM.
+
 The main orchestrator is [`TableQARunner`](runner.py). In benchmark runs it is called
 by [`TableAgentPipeline._run_verified_qa()`](../pipeline/table_agent_pipeline.py), which
 also owns the fallback path used when notebook QA cannot produce an accepted answer.
@@ -282,11 +287,25 @@ final-review rejection share the `qa_max_replans` budget. Replanning receives:
 - the current failure message;
 - compact observations from the most recent subtask outputs.
 
-Before each plan attempt, only `final_answer` is removed. The notebook, experience pool,
-and other variables remain available. If the replan budget is exhausted, the runner
-returns the last plan and failure state.
+Before each complete plan attempt, the notebook namespace is restored to the baseline
+created at runner startup. Retries within one plan attempt continue to share notebook
+state and experience. If the replan budget is exhausted, the runner returns the last
+plan and failure state.
 
-## 8. Pipeline-level fallback
+## 8. Indexed service path
+
+`TableAgentService.run_indexed_qa()` is the production query-time entry point for
+ingested spreadsheets. It receives the original workbook plus vector-retrieved records
+containing `structure_yaml`, `schema_yaml`, retrieval cards, and workbook metadata.
+
+- Multiple table/sheet candidates from one workbook are passed as a primary verified
+  structure plus related prepared-sheet structures.
+- Candidate groups from multiple workbooks are answered independently, then synthesized
+  from the verified per-workbook answers.
+- The indexed workbook schema is included in planning context.
+- Layout extraction and retrieval-card generation are not run during this path.
+
+## 9. Pipeline-level fallback
 
 Fallback is implemented outside `TableAgent/QA/` in
 [`TableAgentPipeline._run_verified_qa()`](../pipeline/table_agent_pipeline.py).
@@ -301,7 +320,7 @@ If `TableQARunner` fails:
 The returned pipeline metadata records `fallback_used`, `fallback_source`, QA token
 usage, error information, replan count, answer route, and QA artifact paths.
 
-## 9. Artifacts and logging
+## 10. Artifacts and logging
 
 Every runner call creates a timestamped question directory under `qa_artifact_dir` or,
 by default, `logs/qa_runs/`:
@@ -321,7 +340,7 @@ by default, `logs/qa_runs/`:
 the runner is active. Event logging includes prompts and model responses, execution
 previews, reviews, replans, final status, and artifact locations.
 
-## 10. Configuration
+## 11. Configuration
 
 | Setting                     |        Default | Meaning                                                          |
 | --------------------------- | -------------: | ---------------------------------------------------------------- |
@@ -339,7 +358,7 @@ previews, reviews, replans, final status, and artifact locations.
 | `qa_excluded_sheet_names`   |           `[]` | Sheets omitted from common-info workbook/sheet summaries.        |
 | `table_id`                  |          unset | Preselect and preload one table instead of beginning unselected. |
 
-## 11. Direct usage
+## 12. Direct usage
 
 ```python
 from TableAgent.QA.runner import TableQARunner
