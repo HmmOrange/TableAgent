@@ -43,18 +43,28 @@ class FakeService:
             raise PermissionError("Server-side workbook paths are disabled; upload the workbook instead")
         return Path(value)
 
-    def run_indexed_qa(self, *, query, workbooks, artifacts, qa_max_replans):
+    def run_indexed_qa(
+        self,
+        *,
+        query,
+        workbooks,
+        artifacts,
+        qa_max_replans,
+        qa_enable_final_review,
+    ):
         self.indexed_calls.append(
             {
                 "query": query,
                 "workbooks": [str(path) for path in workbooks],
                 "artifacts": artifacts,
                 "qa_max_replans": qa_max_replans,
+                "qa_enable_final_review": qa_enable_final_review,
             }
         )
         return {"answers": [{"query": query, "answer": "indexed"}], "artifacts": []}
 
-    def select_indexed_artifact(self, *, query, artifacts):
+    def select_indexed_artifact(self, *, query, artifacts, mode):
+        self.selection_mode = mode
         return {
             "selected_artifact_id": artifacts[0]["id"],
             "document_id": artifacts[0].get("document_id", ""),
@@ -131,12 +141,14 @@ def test_indexed_retrieval_select_endpoint(tmp_path: Path):
                         "sheet": "Summary",
                     }
                 ],
+                "mode": "instant",
             },
         )
 
     assert response.status_code == 200
     assert response.json()["document_id"] == "doc-sales"
     assert response.json()["retrieval"]["mode"] == "table_agent_hybrid"
+    assert app.state.service.selection_mode == "instant"
 
 
 def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
@@ -147,7 +159,8 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
             "/v1/jobs/upload",
             data={
                 "payload": (
-                    '{"stage":"qa","queries":["question"],"qa_max_replans":2,"artifacts":'
+                    '{"stage":"qa","queries":["question"],"qa_max_replans":2,'
+                    '"qa_enable_final_review":false,"artifacts":'
                     '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
                 )
             },
@@ -159,6 +172,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
     assert not service.calls
     assert service.indexed_calls[0]["query"] == "question"
     assert service.indexed_calls[0]["qa_max_replans"] == 2
+    assert service.indexed_calls[0]["qa_enable_final_review"] is False
 
 
 def test_indexed_upload_job_rejects_multiple_queries(tmp_path: Path):

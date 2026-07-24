@@ -216,6 +216,7 @@ class TableAgentService:
         workbooks: Iterable[str | Path],
         artifacts: Iterable[dict[str, Any]],
         qa_max_replans: int | None = None,
+        qa_enable_final_review: bool | None = None,
     ) -> dict[str, Any]:
         """Answer from ingestion-time verified structures without running layout extraction."""
         normalized_query = str(query).strip()
@@ -237,6 +238,7 @@ class TableAgentService:
                 workbook_list=workbook_list,
                 artifact_list=artifact_list,
                 qa_max_replans=qa_max_replans,
+                qa_enable_final_review=qa_enable_final_review,
             )
 
         run_id = new_job_id()
@@ -320,7 +322,11 @@ class TableAgentService:
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
                     related_structure_paths=[path for _, path in structures[1:]],
-                    enable_final_answer_review=True,
+                    enable_final_answer_review=(
+                        True
+                        if qa_enable_final_review is None
+                        else qa_enable_final_review
+                    ),
                 )
                 total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
                 total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
@@ -421,6 +427,7 @@ class TableAgentService:
         *,
         query: str,
         artifacts: Iterable[dict[str, Any]],
+        mode: str = "thinking",
     ) -> dict[str, Any]:
         """Select an indexed artifact before the caller downloads any workbook."""
         normalized_query = str(query).strip()
@@ -429,6 +436,8 @@ class TableAgentService:
         artifact_list = [dict(item) for item in artifacts if isinstance(item, dict)]
         if not artifact_list:
             raise ValueError("Indexed retrieval requires at least one artifact")
+        if mode not in {"instant", "thinking"}:
+            raise ValueError("Indexed retrieval mode must be instant or thinking")
 
         workbook_names = list(
             dict.fromkeys(
@@ -474,6 +483,7 @@ class TableAgentService:
                     workspace_dir / "output",
                     workspace_dir / "indexed",
                     embed=False,
+                    retrieval_rerank_with_llm=(mode == "thinking"),
                 ),
             )
             responses = []
@@ -515,6 +525,7 @@ class TableAgentService:
         workbook_list: list[Path],
         artifact_list: list[dict[str, Any]],
         qa_max_replans: int | None,
+        qa_enable_final_review: bool | None,
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
@@ -655,7 +666,11 @@ class TableAgentService:
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
                 related_structure_paths=[path for _, path in structures[1:]],
-                enable_final_answer_review=True,
+                enable_final_answer_review=(
+                    True
+                    if qa_enable_final_review is None
+                    else qa_enable_final_review
+                ),
             )
             public_qa_info = dict(qa_info)
             public_qa_info.pop("artifacts", None)
@@ -827,6 +842,7 @@ class TableAgentService:
         *,
         embed: bool = False,
         qa_max_replans: int | None = None,
+        retrieval_rerank_with_llm: bool | None = None,
     ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
@@ -844,6 +860,8 @@ class TableAgentService:
                 agent_config[key] = self.config[key]
         if qa_max_replans is not None:
             agent_config["qa_max_replans"] = qa_max_replans
+        if retrieval_rerank_with_llm is not None:
+            agent_config["retrieval_rerank_with_llm"] = retrieval_rerank_with_llm
         return agent_config
 
     def _build_workbook_artifacts(

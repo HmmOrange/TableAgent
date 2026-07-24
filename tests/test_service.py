@@ -261,6 +261,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
 
     selection = service.select_indexed_artifact(
         query="regional revenue score",
+        mode="instant",
         artifacts=[
             {
                 "id": "sales:summary",
@@ -290,6 +291,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     result = service.run_indexed_qa(
         query="regional revenue score",
         workbooks=[sales, maintenance],
+        qa_enable_final_review=False,
         artifacts=[
             {
                 "id": "sales:summary",
@@ -317,6 +319,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     answer = result["answers"][0]
     assert len(qa_calls) == 1
     assert qa_calls[0]["workbook_path"].name == "sales.xlsx"
+    assert qa_calls[0]["enable_final_answer_review"] is False
     assert answer["workbook"] == "sales.xlsx"
     assert answer["workbooks"] == ["sales.xlsx"]
     assert answer["retrieval"]["mode"] == "table_agent_hybrid"
