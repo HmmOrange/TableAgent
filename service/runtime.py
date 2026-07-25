@@ -482,7 +482,7 @@ class TableAgentService:
         with tempfile.TemporaryDirectory(prefix="table-agent-select-") as workspace_text:
             workspace_dir = Path(workspace_text)
             pipeline = self.pipeline_factory(
-                llm_client=self._answer_client(),
+                llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
                     "qa",
@@ -852,17 +852,15 @@ class TableAgentService:
 
     def _answer_client_for_mode(self, mode: str) -> Any:
         client = self._answer_client()
-        if mode != "instant":
-            return client
-        instant_client = copy(client)
+        mode_client = copy(client)
         if not hasattr(client, "extra_body"):
-            return instant_client
+            return mode_client
         extra_body = dict(getattr(client, "extra_body", {}) or {})
         template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
         template_kwargs["enable_thinking"] = False
         extra_body["chat_template_kwargs"] = template_kwargs
-        instant_client.extra_body = extra_body
-        return instant_client
+        mode_client.extra_body = extra_body
+        return mode_client
 
     def _layout_client(self) -> Any:
         if self._layout_vlm_client is None:

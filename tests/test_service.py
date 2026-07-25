@@ -278,7 +278,7 @@ def test_instant_indexed_qa_disables_thinking_and_uses_instant_limits(tmp_path: 
     assert pipeline.config["generation_max_tokens"] == 2048
 
 
-def test_thinking_indexed_qa_preserves_default_client_and_limits(tmp_path: Path):
+def test_thinking_indexed_qa_disables_reasoning_and_preserves_limits(tmp_path: Path):
     FakeIndexedPipeline.instances = []
     FakeIndexedPipeline.calls = []
     source = _workbook(tmp_path / "book.xlsx")
@@ -315,7 +315,9 @@ def test_thinking_indexed_qa_preserves_default_client_and_limits(tmp_path: Path)
     )
 
     pipeline = FakeIndexedPipeline.instances[0]
-    assert pipeline.llm_client is answer_client
+    assert pipeline.llm_client is not answer_client
+    assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
+    assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
     assert pipeline.config["qa_max_retries"] == 3
     assert pipeline.config["generation_max_tokens"] == 8192
 
