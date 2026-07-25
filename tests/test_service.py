@@ -234,6 +234,10 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
 
 def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path, monkeypatch):
     sales = _workbook(tmp_path / "sales.xlsx")
+    sales_book = openpyxl.load_workbook(sales)
+    sales_book.create_sheet("Archive")
+    sales_book.save(sales)
+    sales_book.close()
     maintenance = _workbook(tmp_path / "maintenance.xlsx")
     maintenance_book = openpyxl.load_workbook(maintenance)
     maintenance_book.active["B1"] = "maintenance"
@@ -246,7 +250,14 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     qa_calls = []
 
     def run_verified_qa(_pipeline, **kwargs):
-        qa_calls.append(kwargs)
+        qa_calls.append(
+            {
+                **kwargs,
+                "structure_text": kwargs["structure_path"].read_text(
+                    encoding="utf-8"
+                ),
+            }
+        )
         return (
             LLMResponse(content="Sales answer", prompt_tokens=3, completion_tokens=2),
             {"success": True, "fallback_used": False, "replan_count": 0},
@@ -283,10 +294,20 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
                 "retrieval_card": "Equipment maintenance schedule and spare parts",
                 "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
             },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+            },
         ],
     )
     assert selection["document_id"] == "doc-sales"
-    assert selection["retrieval"]["candidate_count"] == 2
+    assert selection["retrieval"]["candidate_count"] == 3
 
     result = service.run_indexed_qa(
         query="regional revenue score",
@@ -313,19 +334,33 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
                 "retrieval_card": "Equipment maintenance schedule and spare parts",
                 "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
             },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+            },
         ],
     )
 
     answer = result["answers"][0]
     assert len(qa_calls) == 1
     assert qa_calls[0]["workbook_path"].name == "sales.xlsx"
+    assert qa_calls[0]["structure_text"] == (
+        "table1:\n  sheet: Sheet\n  headers: []\n"
+    )
+    assert qa_calls[0]["related_structure_paths"] == []
     assert qa_calls[0]["enable_final_answer_review"] is False
     assert answer["workbook"] == "sales.xlsx"
     assert answer["workbooks"] == ["sales.xlsx"]
     assert answer["retrieval"]["mode"] == "table_agent_hybrid"
     assert answer["retrieval"]["document_id"] == "doc-sales"
     assert answer["retrieval"]["embedding_used"] is True
-    assert answer["retrieval"]["candidate_count"] == 2
+    assert answer["retrieval"]["candidate_count"] == 3
     assert answer["retrieval"]["workbook_count"] == 2
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 

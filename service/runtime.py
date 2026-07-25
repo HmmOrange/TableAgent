@@ -637,74 +637,38 @@ class TableAgentService:
                 )
 
             selected_workbook = candidate.workbook_path.name
-            selected_artifacts = [
-                artifact
-                for artifact in eligible_artifacts
-                if str(
-                    artifact.get("upload_name")
-                    or artifact.get("document_name")
-                    or artifact.get("workbook")
-                    or ""
-                ).strip()
-                == selected_workbook
-            ]
-            ordered_artifacts: list[dict[str, Any]] = []
-            seen_sheets: set[str] = set()
-            for artifact in [
-                next(
-                    (
-                        item
-                        for item in selected_artifacts
-                        if str(item.get("id") or "") == candidate.artifact_id
-                    ),
-                    None,
+            selected_artifact = next(
+                (
+                    artifact
+                    for artifact in eligible_artifacts
+                    if str(artifact.get("id") or "") == candidate.artifact_id
+                    and str(
+                        artifact.get("upload_name")
+                        or artifact.get("document_name")
+                        or artifact.get("workbook")
+                        or ""
+                    ).strip()
+                    == selected_workbook
+                    and str(
+                        artifact.get("sheet") or artifact.get("sheet_name") or ""
+                    ).strip()
+                    == candidate.sheet_name
                 ),
-                *selected_artifacts,
-            ]:
-                if not isinstance(artifact, dict):
-                    continue
-                sheet_name = str(
-                    artifact.get("sheet") or artifact.get("sheet_name") or ""
-                ).strip()
-                if not sheet_name or sheet_name in seen_sheets:
-                    continue
-                structure_text = str(artifact.get("structure_yaml") or "").strip()
-                if not structure_text:
-                    continue
-                seen_sheets.add(sheet_name)
-                ordered_artifacts.append(artifact)
-
-            if not ordered_artifacts:
+                None,
+            )
+            if selected_artifact is None:
                 raise RuntimeError(
-                    "Indexed artifacts did not contain any usable verified structures"
+                    "The selected indexed sheet artifact is missing from the QA request"
                 )
 
-            structures: list[tuple[str, Path]] = []
-            for index, artifact in enumerate(ordered_artifacts, start=1):
-                sheet_name = str(
-                    artifact.get("sheet") or artifact.get("sheet_name") or ""
-                ).strip()
-                structure_path = (
-                    source_dir
-                    / f"{index:03d}-{safe_name(sheet_name)}.yaml"
-                )
-                structure_path.parent.mkdir(parents=True, exist_ok=True)
-                structure_path.write_text(
-                    str(artifact.get("structure_yaml") or "").strip() + "\n",
-                    encoding="utf-8",
-                )
-                structures.append((sheet_name, structure_path))
+            structure_path = source_dir / f"001-{safe_name(candidate.sheet_name)}.yaml"
+            structure_path.parent.mkdir(parents=True, exist_ok=True)
+            structure_path.write_text(
+                str(selected_artifact.get("structure_yaml") or "").strip() + "\n",
+                encoding="utf-8",
+            )
 
-            selected_card = str(
-                next(
-                    (
-                        item.get("retrieval_card")
-                        for item in selected_artifacts
-                        if str(item.get("id") or "") == candidate.artifact_id
-                    ),
-                    "",
-                )
-            ).strip()
+            selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
             fallback_prompt = (
                 "Answer the spreadsheet question using only the indexed, verified "
                 "TableAgent context. Do not invent values absent from the context.\n\n"
@@ -713,12 +677,12 @@ class TableAgentService:
             )
             answer_response, qa_info = pipeline._run_verified_qa(
                 question=normalized_query,
-                structure_path=structures[0][1],
+                structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=output_dir / "qa",
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=[path for _, path in structures[1:]],
+                related_structure_paths=[],
                 enable_final_answer_review=(
                     True
                     if qa_enable_final_review is None
