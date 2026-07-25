@@ -638,6 +638,70 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 
 
+def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, monkeypatch):
+    sales = _workbook(tmp_path / "sales.xlsx")
+    maintenance = _workbook(tmp_path / "maintenance.xlsx")
+    maintenance_book = openpyxl.load_workbook(maintenance)
+    maintenance_book.active["B1"] = "maintenance"
+    maintenance_book.save(maintenance)
+    maintenance_book.close()
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = False
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    qa_workbooks = []
+
+    def run_verified_qa(_pipeline, **kwargs):
+        workbook_name = kwargs["workbook_path"].name
+        qa_workbooks.append(workbook_name)
+        return (
+            LLMResponse(
+                content=f"Evidence from {workbook_name}",
+                prompt_tokens=3,
+                completion_tokens=2,
+            ),
+            {"success": True, "fallback_used": False, "replan_count": 0},
+        )
+
+    monkeypatch.setattr(TableAgentPipeline, "_run_verified_qa", run_verified_qa)
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    result = service.run_indexed_qa(
+        query="compare revenue with maintenance",
+        workbooks=[sales, maintenance],
+        retrieval_top_k=2,
+        qa_enable_final_review=False,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Revenue and sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Maintenance schedule and costs",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+        ],
+    )
+
+    answer = result["answers"][0]
+    assert set(qa_workbooks) == {"sales.xlsx", "maintenance.xlsx"}
+    assert set(answer["workbooks"]) == {"sales.xlsx", "maintenance.xlsx"}
+    assert answer["retrieval"]["mode"] == "table_agent_hybrid_top_k"
+    assert answer["retrieval"]["top_k_requested"] == 2
+    assert len(answer["retrieval"]["groups"]) == 2
+    assert answer["answer"]
+
+
 def test_indexed_qa_falls_back_when_selected_artifact_has_no_structure(tmp_path: Path):
     source = _workbook(tmp_path / "book.xlsx")
     config = load_config("config.example.yaml")

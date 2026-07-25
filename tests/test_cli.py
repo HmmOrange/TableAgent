@@ -78,6 +78,8 @@ def test_cli_parser_accepts_repeatable_artifact_files():
             "Compare regions",
             "--expected-output",
             "Return a markdown table",
+            "--retrieval-top-k",
+            "3",
             "--artifacts",
             "run.json",
             "--artifacts",
@@ -256,6 +258,8 @@ def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeyp
             "Compare regions",
             "--expected-output",
             "Return a markdown table",
+            "--retrieval-top-k",
+            "3",
             "--artifacts",
             str(artifact_path),
         ]
@@ -265,6 +269,7 @@ def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeyp
     assert captured["query"] == "What is the answer?"
     assert captured["answer_instruction"] == "Compare regions"
     assert captured["expected_output"] == "Return a markdown table"
+    assert captured["retrieval_top_k"] == 3
     assert captured["workbooks"] == ["book.xlsx"]
     assert captured["artifacts"][0]["id"] == "book:Summary:table1"
     assert json.loads(capsys.readouterr().out) == {"stage": "qa", "answer": "indexed"}

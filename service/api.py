@@ -45,6 +45,7 @@ class UploadJobRequest(BaseModel):
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     answer_instruction: str | None = None
     expected_output: str | None = None
+    retrieval_top_k: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
@@ -178,6 +179,7 @@ def create_app(
                         artifacts=request.artifacts,
                         answer_instruction=request.answer_instruction,
                         expected_output=request.expected_output,
+                        retrieval_top_k=request.retrieval_top_k,
                         qa_max_replans=request.qa_max_replans,
                         qa_enable_final_review=request.qa_enable_final_review,
                         mode=request.mode,

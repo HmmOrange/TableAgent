@@ -67,6 +67,7 @@ class FakeService:
         artifacts,
         answer_instruction,
         expected_output,
+        retrieval_top_k,
         qa_max_replans,
         qa_enable_final_review,
         mode,
@@ -78,6 +79,7 @@ class FakeService:
                 "artifacts": artifacts,
                 "answer_instruction": answer_instruction,
                 "expected_output": expected_output,
+                "retrieval_top_k": retrieval_top_k,
                 "qa_max_replans": qa_max_replans,
                 "qa_enable_final_review": qa_enable_final_review,
                 "mode": mode,
@@ -186,6 +188,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
                     '"mode":"instant",'
                     '"answer_instruction":"Compare regions",'
                     '"expected_output":"Return a markdown table",'
+                    '"retrieval_top_k":3,'
                     '"qa_enable_final_review":false,"artifacts":'
                     '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
                 )
@@ -199,6 +202,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
     assert service.indexed_calls[0]["query"] == "question"
     assert service.indexed_calls[0]["answer_instruction"] == "Compare regions"
     assert service.indexed_calls[0]["expected_output"] == "Return a markdown table"
+    assert service.indexed_calls[0]["retrieval_top_k"] == 3
     assert service.indexed_calls[0]["qa_max_replans"] == 2
     assert service.indexed_calls[0]["qa_enable_final_review"] is False
     assert service.indexed_calls[0]["mode"] == "instant"

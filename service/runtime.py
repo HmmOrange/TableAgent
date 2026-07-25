@@ -294,6 +294,7 @@ class TableAgentService:
         artifacts: Iterable[dict[str, Any]],
         answer_instruction: str | None = None,
         expected_output: str | None = None,
+        retrieval_top_k: int = 1,
         qa_max_replans: int | None = None,
         qa_enable_final_review: bool | None = None,
         mode: str = "thinking",
@@ -306,6 +307,8 @@ class TableAgentService:
         normalized_instruction = str(answer_instruction or "").strip()
         normalized_expected_output = str(expected_output or "").strip()
         qa_question = _indexed_qa_question(normalized_query, normalized_instruction)
+        if retrieval_top_k < 1:
+            raise ValueError("retrieval_top_k must be greater than or equal to 1")
         if qa_max_replans is not None and qa_max_replans < 0:
             raise ValueError("qa_max_replans must be greater than or equal to 0")
         if mode not in {"instant", "thinking"}:
@@ -324,6 +327,7 @@ class TableAgentService:
                 normalized_query=normalized_query,
                 answer_instruction=normalized_instruction,
                 expected_output=normalized_expected_output,
+                retrieval_top_k=retrieval_top_k,
                 workbook_list=workbook_list,
                 artifact_list=artifact_list,
                 qa_max_replans=qa_max_replans,
@@ -677,6 +681,7 @@ class TableAgentService:
         normalized_query: str,
         answer_instruction: str,
         expected_output: str,
+        retrieval_top_k: int,
         workbook_list: list[Path],
         artifact_list: list[dict[str, Any]],
         qa_max_replans: int | None,
@@ -734,141 +739,241 @@ class TableAgentService:
                 ),
             )
             responses = []
-            candidate = pipeline.source_retriever.select_indexed(
-                question=normalized_query,
-                artifacts=eligible_artifacts,
-                workbook_paths=workbook_paths,
-                responses=responses,
-                fit_context=pipeline._fit_context,
-            )
-            if candidate is None:
+            remaining_artifacts = list(eligible_artifacts)
+            selected_candidates = []
+            selected_workbooks: set[str] = set()
+            for _ in range(min(retrieval_top_k, len(workbook_paths))):
+                candidate = pipeline.source_retriever.select_indexed(
+                    question=normalized_query,
+                    artifacts=remaining_artifacts,
+                    workbook_paths=workbook_paths,
+                    responses=responses,
+                    fit_context=pipeline._fit_context,
+                )
+                if candidate is None:
+                    break
+                selected_workbook = candidate.workbook_path.name
+                if selected_workbook in selected_workbooks:
+                    break
+                selected_candidates.append(candidate)
+                selected_workbooks.add(selected_workbook)
+                remaining_artifacts = [
+                    artifact
+                    for artifact in remaining_artifacts
+                    if str(
+                        artifact.get("upload_name")
+                        or artifact.get("document_name")
+                        or artifact.get("workbook")
+                        or ""
+                    ).strip()
+                    != selected_workbook
+                ]
+
+            if not selected_candidates:
                 raise RuntimeError(
                     "Indexed artifacts did not contain any usable verified structures"
                 )
 
-            selected_workbook = candidate.workbook_path.name
-            selected_artifact = next(
-                (
+            group_answers: list[dict[str, Any]] = []
+            total_prompt_tokens = sum(
+                int(getattr(response, "prompt_tokens", 0) or 0)
+                for response in responses
+            )
+            total_completion_tokens = sum(
+                int(getattr(response, "completion_tokens", 0) or 0)
+                for response in responses
+            )
+            for group_index, candidate in enumerate(selected_candidates, start=1):
+                selected_workbook = candidate.workbook_path.name
+                selected_artifact = next(
+                    (
+                        artifact
+                        for artifact in eligible_artifacts
+                        if str(artifact.get("id") or "") == candidate.artifact_id
+                        and str(
+                            artifact.get("upload_name")
+                            or artifact.get("document_name")
+                            or artifact.get("workbook")
+                            or ""
+                        ).strip()
+                        == selected_workbook
+                        and str(
+                            artifact.get("sheet") or artifact.get("sheet_name") or ""
+                        ).strip()
+                        == candidate.sheet_name
+                    ),
+                    None,
+                )
+                if selected_artifact is None:
+                    raise RuntimeError(
+                        "The selected indexed sheet artifact is missing from the QA request"
+                    )
+
+                selected_workbook_artifacts = [
                     artifact
                     for artifact in eligible_artifacts
-                    if str(artifact.get("id") or "") == candidate.artifact_id
-                    and str(
+                    if str(
                         artifact.get("upload_name")
                         or artifact.get("document_name")
                         or artifact.get("workbook")
                         or ""
                     ).strip()
                     == selected_workbook
-                    and str(
+                ]
+                primary_structure = str(
+                    selected_artifact.get("structure_yaml") or ""
+                ).strip()
+                if not primary_structure:
+                    primary_structure = next(
+                        (
+                            str(artifact.get("structure_yaml") or "").strip()
+                            for artifact in selected_workbook_artifacts
+                            if str(
+                                artifact.get("sheet")
+                                or artifact.get("sheet_name")
+                                or ""
+                            ).strip()
+                            == candidate.sheet_name
+                            and str(artifact.get("structure_yaml") or "").strip()
+                        ),
+                        "",
+                    )
+
+                group_dir = source_dir / f"workbook-{group_index}"
+                structure_path = group_dir / f"001-{safe_name(candidate.sheet_name)}.yaml"
+                if primary_structure:
+                    structure_path.parent.mkdir(parents=True, exist_ok=True)
+                    structure_path.write_text(primary_structure + "\n", encoding="utf-8")
+
+                related_structure_paths: list[Path] = []
+                related_sheet_names: list[str] = []
+                seen_related_sheets = {candidate.sheet_name}
+                for artifact in selected_workbook_artifacts:
+                    sheet_name = str(
                         artifact.get("sheet") or artifact.get("sheet_name") or ""
                     ).strip()
-                    == candidate.sheet_name
-                ),
-                None,
-            )
-            if selected_artifact is None:
-                raise RuntimeError(
-                    "The selected indexed sheet artifact is missing from the QA request"
-                )
+                    structure_text = str(artifact.get("structure_yaml") or "").strip()
+                    if (
+                        not sheet_name
+                        or not structure_text
+                        or sheet_name in seen_related_sheets
+                    ):
+                        continue
+                    seen_related_sheets.add(sheet_name)
+                    related_path = group_dir / (
+                        f"{len(related_structure_paths) + 2:03d}-{safe_name(sheet_name)}.yaml"
+                    )
+                    related_path.parent.mkdir(parents=True, exist_ok=True)
+                    related_path.write_text(structure_text + "\n", encoding="utf-8")
+                    related_structure_paths.append(related_path)
+                    related_sheet_names.append(sheet_name)
 
-            selected_workbook_artifacts = [
-                artifact
-                for artifact in eligible_artifacts
-                if str(
-                    artifact.get("upload_name")
-                    or artifact.get("document_name")
-                    or artifact.get("workbook")
-                    or ""
-                ).strip()
-                == selected_workbook
-            ]
-            primary_structure = str(
-                selected_artifact.get("structure_yaml") or ""
-            ).strip()
-            if not primary_structure:
-                primary_structure = next(
-                    (
-                        str(artifact.get("structure_yaml") or "").strip()
-                        for artifact in selected_workbook_artifacts
-                        if str(
-                            artifact.get("sheet")
-                            or artifact.get("sheet_name")
-                            or ""
-                        ).strip()
-                        == candidate.sheet_name
-                        and str(artifact.get("structure_yaml") or "").strip()
+                selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
+                fallback_prompt = (
+                    "Answer the spreadsheet question using only the indexed, verified "
+                    "TableAgent context. Do not invent values absent from the context.\n\n"
+                    f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}\n\n"
+                    f"Selected retrieval card:\n{selected_card}"
+                )
+                answer_response, qa_info = pipeline._run_verified_qa(
+                    question=qa_question,
+                    structure_path=structure_path,
+                    workbook_path=candidate.workbook_path,
+                    qa_artifact_dir=output_dir / "qa" / f"workbook-{group_index}",
+                    fallback_prompt=fallback_prompt,
+                    fallback_text_prompt=fallback_prompt,
+                    related_structure_paths=related_structure_paths,
+                    expected_output=expected_output,
+                    enable_final_answer_review=(
+                        True
+                        if qa_enable_final_review is None
+                        else qa_enable_final_review
                     ),
-                    "",
+                )
+                public_qa_info = dict(qa_info)
+                public_qa_info.pop("artifacts", None)
+                retrieval_payload = self._indexed_retrieval_payload(
+                    candidate,
+                    eligible_artifacts,
+                )
+                total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
+                total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
+                group_answers.append(
+                    {
+                        "workbook": selected_workbook,
+                        "sheets": [candidate.sheet_name, *related_sheet_names],
+                        "answer": answer_response.content,
+                        "qa": public_qa_info,
+                        "retrieval": retrieval_payload,
+                        "candidates": [
+                            {
+                                "id": candidate.artifact_id,
+                                "score": float(candidate.score or 0.0),
+                                "sheet": candidate.sheet_name,
+                                "table_id": candidate.table_id or "",
+                                "retrieval_type": candidate.retrieval_type or "data",
+                                "retrieval_level": candidate.retrieval_level or "table",
+                            }
+                        ],
+                    }
                 )
 
-            structure_path = source_dir / f"001-{safe_name(candidate.sheet_name)}.yaml"
-            if primary_structure:
-                structure_path.parent.mkdir(parents=True, exist_ok=True)
-                structure_path.write_text(primary_structure + "\n", encoding="utf-8")
-
-            related_structure_paths: list[Path] = []
-            related_sheet_names: list[str] = []
-            seen_related_sheets = {candidate.sheet_name}
-            for artifact in selected_workbook_artifacts:
-                sheet_name = str(
-                    artifact.get("sheet") or artifact.get("sheet_name") or ""
-                ).strip()
-                structure_text = str(artifact.get("structure_yaml") or "").strip()
-                if (
-                    not sheet_name
-                    or not structure_text
-                    or sheet_name in seen_related_sheets
-                ):
-                    continue
-                seen_related_sheets.add(sheet_name)
-                related_path = source_dir / (
-                    f"{len(related_structure_paths) + 2:03d}-{safe_name(sheet_name)}.yaml"
+            if len(group_answers) == 1:
+                final_answer = str(group_answers[0]["answer"])
+            else:
+                evidence = "\n\n".join(
+                    f"Workbook: {item['workbook']}\n"
+                    f"Sheets: {', '.join(item['sheets'])}\n"
+                    f"Answer: {item['answer']}"
+                    for item in group_answers
                 )
-                related_path.parent.mkdir(parents=True, exist_ok=True)
-                related_path.write_text(structure_text + "\n", encoding="utf-8")
-                related_structure_paths.append(related_path)
-                related_sheet_names.append(sheet_name)
+                synthesis_prompt = (
+                    "Combine the independently verified answers from the selected workbooks into one answer. "
+                    "Use evidence from all workbooks when the question requires a cross-workbook comparison or calculation. "
+                    "Preserve workbook attribution and do not add unsupported facts.\n\n"
+                    f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}"
+                    f"\n\nEvidence:\n{evidence}"
+                )
+                synthesis_response = pipeline.qa_agent.run(prompt=synthesis_prompt)
+                final_answer = synthesis_response.content
+                total_prompt_tokens += int(getattr(synthesis_response, "prompt_tokens", 0) or 0)
+                total_completion_tokens += int(getattr(synthesis_response, "completion_tokens", 0) or 0)
 
-            selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
-            fallback_prompt = (
-                "Answer the spreadsheet question using only the indexed, verified "
-                "TableAgent context. Do not invent values absent from the context.\n\n"
-                f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}\n\n"
-                f"Selected retrieval card:\n{selected_card}"
+            selected_workbook_names = [str(item["workbook"]) for item in group_answers]
+            selected_sheet_names = list(
+                dict.fromkeys(
+                    sheet
+                    for item in group_answers
+                    for sheet in item["sheets"]
+                )
             )
-            answer_response, qa_info = pipeline._run_verified_qa(
-                question=qa_question,
-                structure_path=structure_path,
-                workbook_path=candidate.workbook_path,
-                qa_artifact_dir=output_dir / "qa",
-                fallback_prompt=fallback_prompt,
-                fallback_text_prompt=fallback_prompt,
-                related_structure_paths=related_structure_paths,
-                expected_output=expected_output,
-                enable_final_answer_review=(
-                    True
-                    if qa_enable_final_review is None
-                    else qa_enable_final_review
-                ),
-            )
-            public_qa_info = dict(qa_info)
-            public_qa_info.pop("artifacts", None)
-            retrieval_payload = self._indexed_retrieval_payload(
-                candidate,
-                eligible_artifacts,
-            )
-            prompt_tokens = sum(
-                int(getattr(response, "prompt_tokens", 0) or 0)
-                for response in responses
-            ) + int(getattr(answer_response, "prompt_tokens", 0) or 0)
-            completion_tokens = sum(
-                int(getattr(response, "completion_tokens", 0) or 0)
-                for response in responses
-            ) + int(getattr(answer_response, "completion_tokens", 0) or 0)
+            retrieval_groups = [
+                {
+                    "workbook": item["workbook"],
+                    "sheets": item["sheets"],
+                    "candidates": item["candidates"],
+                    "retrieval": item["retrieval"],
+                }
+                for item in group_answers
+            ]
+            if len(group_answers) == 1:
+                retrieval_payload = {
+                    **group_answers[0]["retrieval"],
+                    "top_k_requested": retrieval_top_k,
+                }
+            else:
+                retrieval_payload = {
+                    "mode": "table_agent_hybrid_top_k",
+                    "top_k_requested": retrieval_top_k,
+                    "selected_workbooks": selected_workbook_names,
+                    "workbook_count": len(selected_workbook_names),
+                    "candidate_count": len(eligible_artifacts),
+                    "groups": retrieval_groups,
+                }
             return {
                 "job_id": run_id,
                 "stage": "qa",
-                "workbooks": [selected_workbook],
+                "workbooks": selected_workbook_names,
                 "structures": [],
                 "schema_artifacts": [],
                 "metadata_artifacts": [],
@@ -878,15 +983,34 @@ class TableAgentService:
                         "query": normalized_query,
                         "answer_instruction": answer_instruction,
                         "expected_output": expected_output,
-                        "answer": answer_response.content,
-                        "workbook": selected_workbook,
-                        "workbooks": [selected_workbook],
-                        "sheets": [candidate.sheet_name, *related_sheet_names],
+                        "answer": final_answer,
+                        "workbook": selected_workbook_names[0]
+                        if len(selected_workbook_names) == 1
+                        else "",
+                        "workbooks": selected_workbook_names,
+                        "sheets": selected_sheet_names,
                         "retrieval": retrieval_payload,
-                        "qa": public_qa_info,
+                        "qa": group_answers[0]["qa"]
+                        if len(group_answers) == 1
+                        else {
+                            "success": all(
+                                item["qa"].get("success") for item in group_answers
+                            ),
+                            "fallback_used": any(
+                                item["qa"].get("fallback_used") for item in group_answers
+                            ),
+                            "replan_count": sum(
+                                int(item["qa"].get("replan_count", 0) or 0)
+                                for item in group_answers
+                            ),
+                            "per_workbook": [
+                                {"workbook": item["workbook"], **item["qa"]}
+                                for item in group_answers
+                            ],
+                        },
                         "token_usage": {
-                            "prompt": prompt_tokens,
-                            "completion": completion_tokens,
+                            "prompt": total_prompt_tokens,
+                            "completion": total_completion_tokens,
                         },
                     }
                 ],

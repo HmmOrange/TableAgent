@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expected indexed-QA answer shape or acceptance criteria for final review.",
     )
     parser.add_argument(
+        "--retrieval-top-k",
+        type=_positive_int,
+        default=1,
+        metavar="N",
+        help="Maximum number of distinct workbooks selected for indexed QA.",
+    )
+    parser.add_argument(
         "--sheet",
         action="append",
         default=[],
@@ -114,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.artifacts
         or args.answer_instruction
         or args.expected_output
+        or args.retrieval_top_k != 1
         or args.max_workers is not None
     ):
         parser.error("cleanup flags cannot be combined with workbook processing flags")
@@ -147,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": load_artifacts(args.artifacts),
                 "answer_instruction": args.answer_instruction,
                 "expected_output": args.expected_output,
+                "retrieval_top_k": args.retrieval_top_k,
             }
             if args.max_workers is not None:
                 run_kwargs["max_workers"] = args.max_workers
