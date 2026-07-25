@@ -130,6 +130,7 @@ class TableAgentPipeline(BasePipeline):
             self._metadata_for_workbook_sheet,
         )
         self._verified_samples: dict[str, StructureCacheRecord] = {}
+        self._prepared_source_samples: set[str] = set()
         self._progress_callback: Callable[[str], None] | None = None
         self._apply_generation_cap()
 
@@ -161,6 +162,12 @@ class TableAgentPipeline(BasePipeline):
         failed = [record for record in records if not record.valid]
         if failed:
             raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
+        if self.settings.phase == "all":
+            self._prepared_source_samples.update(
+                sample.sample_id
+                for sample in samples
+                if has_workbook_sources(sample)
+            )
 
     def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
         """Apply the exclusions used by the 18-question perfect-retrieval benchmark."""
@@ -345,9 +352,15 @@ class TableAgentPipeline(BasePipeline):
             if (
                 self.settings.phase == "all"
                 and not self.settings.perfect_retrieval
-                and not self.source_retriever.load_candidates(sample)
             ):
-                self.source_preparer.prepare([sample], regenerate_invalid=True)
+                if sample.sample_id in self._prepared_source_samples:
+                    self._prepared_source_samples.discard(sample.sample_id)
+                else:
+                    self.source_preparer.prepare(
+                        [sample],
+                        regenerate_invalid=True,
+                        force=True,
+                    )
             responses: list[LLMResponse] = []
             candidate = (
                 self.source_retriever.select_perfect(sample)
