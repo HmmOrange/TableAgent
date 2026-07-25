@@ -166,7 +166,7 @@ class TableAgentPipeline(BasePipeline):
             self._prepared_source_samples.update(
                 sample.sample_id
                 for sample in samples
-                if has_workbook_sources(sample)
+                if self.settings.run_retrieval and is_siflex(sample)
             )
 
     def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:

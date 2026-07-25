@@ -454,7 +454,7 @@ def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run
 ):
     sample = EvalSample(
         index=0,
-        sample_id="all/source-direct",
+        sample_id="siflex/all-source-direct",
         table_id="workbook_set",
         table_content="",
         question="What is the answer?",
@@ -505,7 +505,7 @@ def test_table_agent_all_phase_does_not_regenerate_twice_after_prepare(
     (candidate_dir / "structure.yaml").write_text("table1: {}\n", encoding="utf-8")
     sample = EvalSample(
         index=0,
-        sample_id="all/source-prepared",
+        sample_id="siflex/all-source-prepared",
         table_id="workbook_set",
         table_content="",
         question="What is the answer?",
