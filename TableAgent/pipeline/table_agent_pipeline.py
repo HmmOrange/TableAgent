@@ -673,6 +673,10 @@ class TableAgentPipeline(BasePipeline):
             ) as runner:
             result = runner.run(question)
             qa_token_usage = result.token_usage
+            llm_calls = list(getattr(result, "llm_calls", []) or [])
+            capped_call_count = sum(
+                1 for call in llm_calls if bool(call.get("token_capped"))
+            )
             qa_info = {
                 "success": result.success,
                 "error": result.error,
@@ -681,6 +685,18 @@ class TableAgentPipeline(BasePipeline):
                 "artifacts": result.artifacts,
                 "fallback_used": not result.success,
                 "replan_count": int(getattr(result, "replan_count", 0) or 0),
+                "subtask_retry_count": int(
+                    getattr(result, "subtask_retry_count", 0) or 0
+                ),
+                "qa_max_retries": int(getattr(result, "qa_max_retries", 0) or 0),
+                "llm_call_count": len(llm_calls),
+                "token_capped_call_count": capped_call_count,
+                "llm_total_ms": sum(
+                    int(call.get("duration_ms", 0) or 0) for call in llm_calls
+                ),
+                "llm_calls": llm_calls,
+                "generation_max_tokens": self.settings.generation_max_tokens,
+                "thinking_enabled": self._qa_thinking_enabled(),
                 "answer_route": (
                     "common_info"
                     if result.success
@@ -712,6 +728,15 @@ class TableAgentPipeline(BasePipeline):
         response.prompt_tokens += int(qa_token_usage.get("prompt", 0) or 0)
         response.completion_tokens += int(qa_token_usage.get("completion", 0) or 0)
         return response, qa_info
+
+    def _qa_thinking_enabled(self) -> bool:
+        extra_body = getattr(self.llm, "extra_body", {})
+        if not isinstance(extra_body, dict):
+            return True
+        template_kwargs = extra_body.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            return True
+        return bool(template_kwargs.get("enable_thinking", True))
 
     def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
         """Find prepared structures for sibling sheets of the selected workbook."""

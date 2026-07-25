@@ -28,14 +28,47 @@ class TokenCountingLLM:
         self.client = client
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.calls: list[dict[str, Any]] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> Any:
-        response = self.client.generate(prompt, system_prompt=system_prompt)
+        started_at = time.perf_counter()
+        try:
+            response = self.client.generate(prompt, system_prompt=system_prompt)
+        except Exception as exc:
+            self.calls.append(
+                {
+                    "index": len(self.calls) + 1,
+                    "duration_ms": max(
+                        0, round((time.perf_counter() - started_at) * 1000)
+                    ),
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_capped": False,
+                    "success": False,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            raise
         self.prompt_tokens += int(getattr(response, "prompt_tokens", 0) or 0)
         self.completion_tokens += int(getattr(response, "completion_tokens", 0) or 0)
+        self.calls.append(
+            {
+                "index": len(self.calls) + 1,
+                "duration_ms": max(
+                    0, round((time.perf_counter() - started_at) * 1000)
+                ),
+                "prompt_tokens": int(getattr(response, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(
+                    getattr(response, "completion_tokens", 0) or 0
+                ),
+                "token_capped": bool(getattr(response, "token_capped", False)),
+                "success": True,
+                "error_type": None,
+            }
+        )
         return response
 
     def token_usage(self) -> dict[str, int]:
@@ -43,6 +76,9 @@ class TokenCountingLLM:
             "prompt": self.prompt_tokens,
             "completion": self.completion_tokens,
         }
+
+    def call_metrics(self) -> list[dict[str, Any]]:
+        return [dict(call) for call in self.calls]
 
 
 class TableQARunner:
@@ -101,6 +137,7 @@ class TableQARunner:
         self.env_plan_category_review = bool(self.settings.get("qa_plan_category_review", False))
         self.qa_artifact_root = artifact_root
         self.max_replans = max(0, actual_max_replans)
+        self.max_retries = max(0, actual_max_retries)
 
         self.env = QAEnvironment(
             structure_path=structure_path,
@@ -241,6 +278,9 @@ class TableQARunner:
                 execution_time=execution_time,
                 token_usage=self._token_usage(),
                 replan_count=replan_count,
+                subtask_retry_count=0,
+                qa_max_retries=self.max_retries,
+                llm_calls=self._llm_call_metrics(),
             )
             self.env.logger.log_event("run_complete", {
                 "success": False,
@@ -346,6 +386,12 @@ class TableQARunner:
             error=error_msg,
             execution_time=execution_time,
             token_usage=self._token_usage(),
+            subtask_retry_count=sum(
+                max(0, int(getattr(output, "attempt_count", 1) or 1) - 1)
+                for output in subtask_outputs
+            ),
+            qa_max_retries=self.max_retries,
+            llm_calls=self._llm_call_metrics(),
         )
         result.replan_count = replan_count
 
@@ -868,3 +914,8 @@ class TableQARunner:
         if self.llm_client is None:
             return {"prompt": 0, "completion": 0}
         return self.llm_client.token_usage()
+
+    def _llm_call_metrics(self) -> list[dict[str, Any]]:
+        if self.llm_client is None:
+            return []
+        return self.llm_client.call_metrics()

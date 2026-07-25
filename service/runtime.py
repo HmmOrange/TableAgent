@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
@@ -217,6 +218,7 @@ class TableAgentService:
         artifacts: Iterable[dict[str, Any]],
         qa_max_replans: int | None = None,
         qa_enable_final_review: bool | None = None,
+        mode: str = "thinking",
     ) -> dict[str, Any]:
         """Answer from ingestion-time verified structures without running layout extraction."""
         normalized_query = str(query).strip()
@@ -224,6 +226,8 @@ class TableAgentService:
             raise ValueError("At least one non-empty query is required for indexed QA")
         if qa_max_replans is not None and qa_max_replans < 0:
             raise ValueError("qa_max_replans must be greater than or equal to 0")
+        if mode not in {"instant", "thinking"}:
+            raise ValueError("Indexed QA mode must be instant or thinking")
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
         if not workbook_list:
             raise ValueError("At least one workbook is required")
@@ -239,6 +243,7 @@ class TableAgentService:
                 artifact_list=artifact_list,
                 qa_max_replans=qa_max_replans,
                 qa_enable_final_review=qa_enable_final_review,
+                mode=mode,
             )
 
         run_id = new_job_id()
@@ -269,7 +274,7 @@ class TableAgentService:
                 raise ValueError("Indexed artifacts do not match any uploaded workbook")
 
             pipeline = self.pipeline_factory(
-                llm_client=self._answer_client(),
+                llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
                     "qa",
@@ -277,6 +282,7 @@ class TableAgentService:
                     source_dir,
                     embed=False,
                     qa_max_replans=qa_max_replans,
+                    mode=mode,
                 ),
             )
             group_answers: list[dict[str, Any]] = []
@@ -579,6 +585,7 @@ class TableAgentService:
         artifact_list: list[dict[str, Any]],
         qa_max_replans: int | None,
         qa_enable_final_review: bool | None,
+        mode: str,
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
@@ -613,7 +620,7 @@ class TableAgentService:
                 and str(artifact.get("structure_yaml") or "").strip()
             ]
             pipeline = self.pipeline_factory(
-                llm_client=self._answer_client(),
+                llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
                     "qa",
@@ -621,6 +628,7 @@ class TableAgentService:
                     source_dir,
                     embed=False,
                     qa_max_replans=qa_max_replans,
+                    mode=mode,
                 ),
             )
             responses = []
@@ -842,6 +850,20 @@ class TableAgentService:
             )
         return self._llm_client
 
+    def _answer_client_for_mode(self, mode: str) -> Any:
+        client = self._answer_client()
+        if mode != "instant":
+            return client
+        instant_client = copy(client)
+        if not hasattr(client, "extra_body"):
+            return instant_client
+        extra_body = dict(getattr(client, "extra_body", {}) or {})
+        template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        template_kwargs["enable_thinking"] = False
+        extra_body["chat_template_kwargs"] = template_kwargs
+        instant_client.extra_body = extra_body
+        return instant_client
+
     def _layout_client(self) -> Any:
         if self._layout_vlm_client is None:
             self._layout_vlm_client = create_model_client(
@@ -860,6 +882,7 @@ class TableAgentService:
         embed: bool = False,
         qa_max_replans: int | None = None,
         retrieval_rerank_with_llm: bool | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
@@ -877,6 +900,13 @@ class TableAgentService:
                 agent_config[key] = self.config[key]
         if qa_max_replans is not None:
             agent_config["qa_max_replans"] = qa_max_replans
+        if mode == "instant":
+            agent_config["qa_max_retries"] = int(
+                agent_config.get("qa_instant_max_retries", 1)
+            )
+            agent_config["generation_max_tokens"] = int(
+                agent_config.get("qa_instant_generation_max_tokens", 2048)
+            )
         if retrieval_rerank_with_llm is not None:
             agent_config["retrieval_rerank_with_llm"] = retrieval_rerank_with_llm
         return agent_config

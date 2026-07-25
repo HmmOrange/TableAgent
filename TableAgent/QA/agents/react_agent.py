@@ -136,5 +136,6 @@ class TableQAAgent(BaseReActAgent):
             success=success,
             observation=observation,
             reasoning=reasoning,
-            namespace_updates=last_updates
+            namespace_updates=last_updates,
+            attempt_count=max(0, round_num - 1),
         )

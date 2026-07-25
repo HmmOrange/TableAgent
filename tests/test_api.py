@@ -51,6 +51,7 @@ class FakeService:
         artifacts,
         qa_max_replans,
         qa_enable_final_review,
+        mode,
     ):
         self.indexed_calls.append(
             {
@@ -59,6 +60,7 @@ class FakeService:
                 "artifacts": artifacts,
                 "qa_max_replans": qa_max_replans,
                 "qa_enable_final_review": qa_enable_final_review,
+                "mode": mode,
             }
         )
         return {"answers": [{"query": query, "answer": "indexed"}], "artifacts": []}
@@ -160,6 +162,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
             data={
                 "payload": (
                     '{"stage":"qa","queries":["question"],"qa_max_replans":2,'
+                    '"mode":"instant",'
                     '"qa_enable_final_review":false,"artifacts":'
                     '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
                 )
@@ -173,6 +176,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
     assert service.indexed_calls[0]["query"] == "question"
     assert service.indexed_calls[0]["qa_max_replans"] == 2
     assert service.indexed_calls[0]["qa_enable_final_review"] is False
+    assert service.indexed_calls[0]["mode"] == "instant"
 
 
 def test_indexed_upload_job_rejects_multiple_queries(tmp_path: Path):

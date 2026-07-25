@@ -62,6 +62,8 @@ table_agent:
   shift_cells: 45
   max_retry: 3
   qa_max_retries: 3
+  qa_instant_max_retries: 1
+  qa_instant_generation_max_tokens: 2048
   qa_max_replans: 5
   qa_max_experience_records: 5
   qa_log_path: null

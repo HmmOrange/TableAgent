@@ -232,6 +232,94 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
     assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
 
 
+def test_instant_indexed_qa_disables_thinking_and_uses_instant_limits(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    answer_client = SimpleNamespace(
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        max_tokens=8192,
+    )
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {
+                "qa_max_retries": 3,
+                "generation_max_tokens": 8192,
+                "qa_instant_max_retries": 1,
+                "qa_instant_generation_max_tokens": 2048,
+            },
+        },
+        llm_client=answer_client,
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        mode="instant",
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    pipeline = FakeIndexedPipeline.instances[0]
+    assert pipeline.llm_client is not answer_client
+    assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
+    assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
+    assert pipeline.config["qa_max_retries"] == 1
+    assert pipeline.config["generation_max_tokens"] == 2048
+
+
+def test_thinking_indexed_qa_preserves_default_client_and_limits(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    answer_client = SimpleNamespace(
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        max_tokens=8192,
+    )
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {
+                "qa_max_retries": 3,
+                "generation_max_tokens": 8192,
+            },
+        },
+        llm_client=answer_client,
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        mode="thinking",
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    pipeline = FakeIndexedPipeline.instances[0]
+    assert pipeline.llm_client is answer_client
+    assert pipeline.config["qa_max_retries"] == 3
+    assert pipeline.config["generation_max_tokens"] == 8192
+
+
 def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path, monkeypatch):
     sales = _workbook(tmp_path / "sales.xlsx")
     sales_book = openpyxl.load_workbook(sales)

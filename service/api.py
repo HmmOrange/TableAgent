@@ -41,6 +41,7 @@ class UploadJobRequest(BaseModel):
     sheets: list[str] = Field(default_factory=list)
     qa_max_replans: int | None = Field(default=None, ge=0)
     qa_enable_final_review: bool | None = None
+    mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -171,6 +172,7 @@ def create_app(
                         artifacts=request.artifacts,
                         qa_max_replans=request.qa_max_replans,
                         qa_enable_final_review=request.qa_enable_final_review,
+                        mode=request.mode,
                     )
                 return await asyncio.to_thread(
                     resolved_service.run,
