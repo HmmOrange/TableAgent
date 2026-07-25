@@ -650,10 +650,12 @@ def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, mo
     config["table_agent"]["retrieval_rerank_with_llm"] = False
     config["table_agent"]["retrieval_embedding_provider"] = "mock"
     qa_workbooks = []
+    qa_calls = []
 
     def run_verified_qa(_pipeline, **kwargs):
         workbook_name = kwargs["workbook_path"].name
         qa_workbooks.append(workbook_name)
+        qa_calls.append(kwargs)
         return (
             LLMResponse(
                 content=f"Evidence from {workbook_name}",
@@ -695,6 +697,12 @@ def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, mo
 
     answer = result["answers"][0]
     assert set(qa_workbooks) == {"sales.xlsx", "maintenance.xlsx"}
+    assert all(
+        "Workbook-specific evidence pass:" in call["question"]
+        for call in qa_calls
+    )
+    assert all(call["expected_output"] == "" for call in qa_calls)
+    assert all(call["enable_final_answer_review"] is False for call in qa_calls)
     assert set(answer["workbooks"]) == {"sales.xlsx", "maintenance.xlsx"}
     assert answer["retrieval"]["mode"] == "table_agent_hybrid_top_k"
     assert answer["retrieval"]["top_k_requested"] == 2

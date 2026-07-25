@@ -783,6 +783,7 @@ class TableAgentService:
                 int(getattr(response, "completion_tokens", 0) or 0)
                 for response in responses
             )
+            multi_workbook = len(selected_candidates) > 1
             for group_index, candidate in enumerate(selected_candidates, start=1):
                 selected_workbook = candidate.workbook_path.name
                 selected_artifact = next(
@@ -869,25 +870,40 @@ class TableAgentService:
                     related_sheet_names.append(sheet_name)
 
                 selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
+                workbook_question = qa_question
+                workbook_expected_output = expected_output
+                if multi_workbook:
+                    workbook_question = (
+                        f"{qa_question}\n\n"
+                        f"Workbook-specific evidence pass: {selected_workbook}. "
+                        "Extract only the rows, values, identifiers, and intermediate calculations "
+                        "this workbook can contribute to the final cross-workbook answer. "
+                        "Do not fail because another selected workbook contains the remaining evidence."
+                    )
+                    workbook_expected_output = ""
                 fallback_prompt = (
                     "Answer the spreadsheet question using only the indexed, verified "
                     "TableAgent context. Do not invent values absent from the context.\n\n"
-                    f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}\n\n"
+                    f"Question and workbook role:\n{workbook_question}\n\n"
                     f"Selected retrieval card:\n{selected_card}"
                 )
                 answer_response, qa_info = pipeline._run_verified_qa(
-                    question=qa_question,
+                    question=workbook_question,
                     structure_path=structure_path,
                     workbook_path=candidate.workbook_path,
                     qa_artifact_dir=output_dir / "qa" / f"workbook-{group_index}",
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
                     related_structure_paths=related_structure_paths,
-                    expected_output=expected_output,
+                    expected_output=workbook_expected_output,
                     enable_final_answer_review=(
-                        True
-                        if qa_enable_final_review is None
-                        else qa_enable_final_review
+                        False
+                        if multi_workbook
+                        else (
+                            True
+                            if qa_enable_final_review is None
+                            else qa_enable_final_review
+                        )
                     ),
                 )
                 public_qa_info = dict(qa_info)
