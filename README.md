@@ -45,6 +45,7 @@ Edit `config.yaml` before running TableAgent. The important sections are:
 | `vlm.provider` | Name of the default profile under `vlm_models` |
 | `table_agent.libreoffice_path` | LibreOffice executable path when it is not on `PATH` |
 | `service.root_dir` | Root directory for saved CLI run output |
+| `service.max_workers` | Default number of concurrent structure and QA workers. |
 
 The profile names must match. For example, `llm.provider: answer_model` selects
 `models.answer_model`, while `vlm.provider: layout_model` selects
@@ -175,6 +176,7 @@ Summary:
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
 | `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
 | `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
+| `--workers N` | Overrides `service.max_workers` for this run; `--max-workers` is an alias. |
 | `--delete-job ID` | Deletes one saved run directory. Repeat for multiple run IDs. |
 | `--delete-all-jobs` | Deletes every saved run directory under `service.root_dir`. |
 
@@ -182,6 +184,21 @@ Worksheet matching is exact and case-sensitive. When multiple workbooks are
 provided, every requested worksheet must exist in every workbook. Metadata always
 lists every worksheet in the workbook, even when `--sheet` limits structure and
 schema processing.
+
+Set `--workers` above `1` to process independent workbook sheets concurrently during
+structure generation and independent queries concurrently during QA. Each worker
+uses its own pipeline and, for configured model clients, its own HTTP session.
+LibreOffice runs with a separate temporary user profile per render. PDFium remains
+isolated in one subprocess per concurrent render because its API is not thread-safe.
+Use `--workers 1` to retain serial execution.
+
+```bash
+uv run table-agent --config config.yaml --stage all \
+  --workbook sample/QA_sample.xlsx \
+  --query "What is the total revenue?" \
+  --query "Which region is largest?" \
+  --workers 8
+```
 
 For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
 

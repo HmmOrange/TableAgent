@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -97,6 +98,7 @@ class WorkbookRenderer:
             resolution=self.settings.libreoffice_image_resolution,
             timeout_seconds=self.settings.render_timeout_seconds,
             show_coordinates=self.settings.workbook_show_coordinates,
+            max_workers=self.settings.max_workers,
         )
         result = _image_render_result(image_path, browser_path=Path("libreoffice"))
         _write_render_metadata(
@@ -137,10 +139,10 @@ def _render_xlsx_range_with_libreoffice(
     resolution: int = 192,
     timeout_seconds: float = 60,
     show_coordinates: bool = True,
+    max_workers: int = 1,
 ) -> None:
     try:
         import openpyxl
-        import pypdfium2
         from openpyxl.worksheet.dimensions import ColumnDimension, RowDimension
     except ImportError as exc:
         raise RuntimeError(
@@ -205,24 +207,51 @@ def _render_xlsx_range_with_libreoffice(
                 f"{completed.stderr.strip() or completed.stdout.strip()}"
             )
 
-        # PDFium is not thread-safe, so concurrent sample workers must not
-        # enter any part of its document/page/bitmap lifecycle together.
-        with _PDFIUM_LOCK:
-            pdf = pypdfium2.PdfDocument(str(pdf_path))
-            try:
-                page = pdf[0]
-                try:
-                    render_resolution = max(384 if cell_range else 96, int(resolution))
-                    bitmap = page.render(scale=render_resolution / 72)
-                    try:
-                        bitmap.to_pil().save(image_path)
-                    finally:
-                        bitmap.close()
-                finally:
-                    page.close()
-            finally:
-                pdf.close()
+        render_resolution = max(384 if cell_range else 96, int(resolution))
+        if int(max_workers) > 1:
+            _render_pdf_page_in_subprocess(
+                pdf_path,
+                image_path,
+                render_resolution,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            # PDFium APIs are process-global and not thread-safe.
+            with _PDFIUM_LOCK:
+                from TableAgent.rendering.pdfium_worker import render_pdf_page
+
+                render_pdf_page(pdf_path, image_path, render_resolution)
         _trim_image_file_to_content(image_path)
+
+
+def _render_pdf_page_in_subprocess(
+    pdf_path: Path,
+    image_path: Path,
+    resolution: int,
+    *,
+    timeout_seconds: float,
+) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "TableAgent.rendering.pdfium_worker",
+        str(pdf_path),
+        str(image_path),
+        str(resolution),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=max(1, float(timeout_seconds)),
+    )
+    if completed.returncode != 0 or not image_path.is_file():
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            "PDFium worker failed to render the LibreOffice PDF"
+            + (f": {detail}" if detail else "")
+        )
 
 
 def _resolve_libreoffice_path(libreoffice_path: Path | str | None) -> Path:

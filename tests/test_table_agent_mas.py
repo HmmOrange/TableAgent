@@ -254,6 +254,59 @@ def test_libreoffice_range_renderer_serializes_pdfium(monkeypatch, tmp_path: Pat
     assert state["max_active"] == 1
 
 
+def test_libreoffice_range_renderer_uses_pdfium_process_in_concurrent_mode(
+    monkeypatch,
+    tmp_path: Path,
+):
+    workbook_path = tmp_path / "book.xlsx"
+    image_path = tmp_path / "render.png"
+    _workbook(workbook_path)
+    calls = {}
+
+    monkeypatch.setattr(
+        "TableAgent.rendering.workbook._resolve_libreoffice_path",
+        lambda path: Path("C:/LibreOffice/program/soffice.exe"),
+    )
+
+    def fake_run(command, **kwargs):
+        outdir = Path(command[command.index("--outdir") + 1])
+        prepared = Path(command[-1])
+        (outdir / prepared.with_suffix(".pdf").name).write_bytes(b"%PDF-1.4")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_pdfium_worker(pdf_path, destination, resolution, *, timeout_seconds):
+        calls.update(
+            {
+                "pdf_path": pdf_path,
+                "resolution": resolution,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        Image.new("RGB", (100, 80), "white").save(destination)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "TableAgent.rendering.workbook._render_pdf_page_in_subprocess",
+        fake_pdfium_worker,
+    )
+
+    _render_xlsx_range_with_libreoffice(
+        workbook_path,
+        "Sheet1",
+        "A1:B10",
+        image_path,
+        libreoffice_path=Path("soffice.exe"),
+        resolution=240,
+        timeout_seconds=30,
+        max_workers=2,
+    )
+
+    assert image_path.is_file()
+    assert calls["pdf_path"].suffix == ".pdf"
+    assert calls["resolution"] == 384
+    assert calls["timeout_seconds"] == 30
+
+
 def _hierarchical_workbook(path: Path) -> None:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
