@@ -11,17 +11,39 @@ from TableAgent.schema.subtask import SubTask
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
 Return only one JSON object with a non-empty `subtasks` list. Each subtask must have
-    `id`, `description`, `layer` (`table_inspect`, `inspect`, or `synthesis`), and `depends_on` (a list).
-    Include one table_inspect subtask, at least one inspect subtask, and a final synthesis subtask. No prose."""
+`id`, `description`, `layer` (`table_inspect`, `inspect`, or `synthesis`), and
+`depends_on` (a list). Include one table_inspect subtask when multiple tables must be
+routed, at least one inspect subtask, and a final synthesis subtask. No prose."""
 
 
 def parse_planner_output(content: str) -> list[SubTask]:
     json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
     payload = json_match.group(1) if json_match else content.strip()
+    data = None
     try:
         data = json.loads(payload)
-    except Exception as exc:
-        raise ValueError("Planner output must be valid JSON or a ```json code block.") from exc
+    except Exception:
+        decoder = json.JSONDecoder()
+        candidates = []
+        for index, character in enumerate(payload):
+            if character not in "[{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(payload[index:])
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(candidate, list)
+                and bool(candidate)
+                and all(isinstance(item, dict) and item.get("id") for item in candidate)
+            ) or (
+                isinstance(candidate, dict) and isinstance(candidate.get("subtasks"), list)
+            ):
+                candidates.append(candidate)
+        if candidates:
+            data = candidates[-1]
+    if data is None:
+        raise ValueError("Planner output must contain a valid JSON plan or a ```json code block.")
 
     items = data.get("subtasks", []) if isinstance(data, dict) else data
     if not isinstance(items, list):
@@ -42,12 +64,17 @@ def parse_planner_output(content: str) -> list[SubTask]:
             raise ValueError(
                 f"Subtask '{subtask_id}' has invalid layer {layer!r}; expected 'table_inspect', 'inspect', or 'synthesis'."
             )
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = dict(metadata)
+        if item.get("target_names") and "target_names" not in metadata:
+            metadata["target_names"] = item["target_names"]
         subtasks.append(SubTask(
             id=subtask_id,
             description=description,
             layer=layer,  # type: ignore
             depends_on=_split_depends_on(item.get("depends_on", [])),
             status="pending",
+            metadata=metadata,
         ))
     if not subtasks:
         raise ValueError("Planner JSON did not contain any subtasks.")
@@ -62,6 +89,35 @@ def _split_depends_on(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _related_structure_summary(env: Any) -> str:
+    lines = []
+    seen = set()
+    for source in getattr(env, "related_structures", []):
+        structure = source.get("structure") or {}
+        table_id = str(source.get("table_id") or structure.get("id") or "")
+        sheet_name = str(structure.get("sheet") or "")
+        table_name = str(structure.get("name") or table_id)
+        key = (sheet_name, table_id, table_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        headers = []
+        for header in structure.get("headers") or []:
+            label = str(getattr(header, "label", "") or getattr(header, "id", ""))
+            description = str(getattr(header, "description", ""))
+            headers.append(f"{label}: {description}" if description else label)
+        lines.append(
+            "\n".join([
+                f"- table_id: {table_id}",
+                f"  name: {table_name}",
+                f"  description: {structure.get('description', '')}",
+                f"  sheet: {sheet_name}",
+                f"  headers: {'; '.join(headers) if headers else '(none)'}",
+            ])
+        )
+    return "\n".join(lines)
 
 
 class WriteQAPlanAction(BasePlanAction):
@@ -91,11 +147,26 @@ class WriteQAPlanAction(BasePlanAction):
                 get_structure_summary(self.env, table_id)
                 for table_id in self.env.operators.list_tables()
             )
+        related_summary = _related_structure_summary(self.env)
+        if related_summary:
+            struct_summary = f"{struct_summary}\n\nRelated prepared-sheet structures:\n{related_summary}"
         prompt = PLANNER_USER_PROMPT_TEMPLATE.format(
             question=request.question,
+            workbook_sheets=", ".join(self.env.workbook.sheetnames),
             table_catalog=table_catalog,
             table_structure=struct_summary,
         )
+        if request.failure_context:
+            previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)
+            prompt += (
+                "\n\nReplanning context:\n"
+                "The previous plan failed during execution. Create a corrected complete plan using only the "
+                "runtime evidence below. Do not invent facts or reuse a failed operation unchanged. Preserve any "
+                "valid table and field selections, but change the decomposition, dependencies, or inspected fields "
+                "when the evidence requires it.\n\n"
+                f"Previous plan:\n{previous_plan}\n\n"
+                f"Execution failure and reviewer feedback:\n{request.failure_context}"
+            )
         self.env.logger.log_event("planner_prompt", {"prompt": prompt, "system_prompt": PLANNER_SYSTEM_PROMPT})
         response = self.llm_client.generate(prompt, system_prompt=PLANNER_SYSTEM_PROMPT)
         raw_response = response.content

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 PLANNER_SYSTEM_PROMPT = """You are an expert spreadsheet data planner.
-Your job is to decompose a user question about one or more spreadsheet tables into a three-layer plan:
+Decompose a user question about one or more workbook sheets and tables into a three-layer plan:
 1. Table inspect layer: select the relevant table_id or table_ids from the table catalog.
-2. Field inspect layer: extract the required fields, ranges, rows, and data areas from the selected table(s).
-3. Synthesis layer: formulate and compute the final answer using the extracted data.
+2. Field inspect layer: inspect workbook metadata or extract the required fields, ranges, rows, and data areas.
+3. Synthesis layer: formulate and compute the final answer from verified inspection evidence.
 
-You have access to a table catalog plus structure summaries (headers, labels, descriptions, and parent/sub-header hierarchies).
+You have access to workbook sheet names, a table catalog, primary structure summaries, and related prepared-sheet
+structures. Use these sources to plan both data questions and workbook/sheet/table description questions through the
+same inspect and synthesis flow. Do not invent a separate answer route based on question wording.
+
+When a requested field is a parent header, plan to resolve all applicable children with
+`operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with
+`operators.group_header_mask(...)`. A month/year in a sheet title or report name is context, not permission to replace
+the requested business field with a monthly tracking column unless the question explicitly asks for that tracking data.
 
 Provide your plan as JSON only, preferably inside a ```json code block.
 Use a DAG: each subtask may depend on earlier subtasks by id. Keep layers to:
@@ -23,7 +30,7 @@ Format:
 ```json
 {
 	  "subtasks": [
-	    {
+            {
 	      "id": "select_relevant_tables",
 	      "layer": "table_inspect",
 	      "depends_on": [],
@@ -53,6 +60,8 @@ Format:
 """
 
 PLANNER_USER_PROMPT_TEMPLATE = """User Question: {question}
+Workbook Sheets: {workbook_sheets}
+
 Table Catalog:
 {table_catalog}
 

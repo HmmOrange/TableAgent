@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 
 import pytest
 
@@ -34,6 +35,7 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.workbook == ["sales.xlsx", "costs.xlsx"]
     assert args.query == ["Total revenue?", "Largest cost?"]
     assert args.embed is False
+    assert args.artifacts == []
     assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
@@ -58,6 +60,40 @@ def test_cli_parser_accepts_embed_and_sheet_flags():
 
     assert args.embed is True
     assert args.sheet == ["Summary,Detail", "Archive"]
+
+
+def test_cli_parser_accepts_repeatable_artifact_files():
+    args = cli.build_parser().parse_args(
+        [
+            "--stage",
+            "qa",
+            "--workbook",
+            "book.xlsx",
+            "--query",
+            "What is the answer?",
+            "--artifacts",
+            "run.json",
+            "--artifacts",
+            "other.pkl",
+        ]
+    )
+
+    assert args.artifacts == ["run.json", "other.pkl"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--stage", "structure", "--artifacts", "run.json"],
+        ["--stage", "qa", "--query", "one", "--query", "two", "--artifacts", "run.json"],
+        ["--stage", "qa", "--query", "one", "--embed", "--artifacts", "run.json"],
+    ],
+)
+def test_cli_rejects_invalid_artifact_flag_combinations(arguments):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--workbook", "book.xlsx", *arguments])
+
+    assert exc_info.value.code == 2
 
 
 @pytest.mark.parametrize("flag", ["--schema", "--metadata"])
@@ -128,6 +164,75 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "sheets": [],
     }
     assert json.loads(capsys.readouterr().out) == {"job_id": "job-one", "stage": "structure"}
+
+
+def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeypatch, capsys):
+    artifact_path = tmp_path / "run.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "retrieval_records": [
+                    {
+                        "id": "book:Summary:table1",
+                        "upload_name": "book.xlsx",
+                        "sheet": "Summary",
+                        "retrieval_card": "Revenue summary",
+                        "structure_yaml": "table1: {}",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(path, **kwargs):
+            return FakeTableAgentService()
+
+        def run_indexed_qa(self, **kwargs):
+            captured.update(kwargs)
+            return {"stage": "qa", "answer": "indexed"}
+
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+
+    result = cli.main(
+        [
+            "--stage",
+            "qa",
+            "--workbook",
+            "book.xlsx",
+            "--query",
+            "What is the answer?",
+            "--artifacts",
+            str(artifact_path),
+        ]
+    )
+
+    assert result == 0
+    assert captured["query"] == "What is the answer?"
+    assert captured["workbooks"] == ["book.xlsx"]
+    assert captured["artifacts"][0]["id"] == "book:Summary:table1"
+    assert json.loads(capsys.readouterr().out) == {"stage": "qa", "answer": "indexed"}
+
+
+def test_load_artifacts_accepts_jsonl_and_pickle(tmp_path):
+    record = {
+        "id": "book:Summary:table1",
+        "upload_name": "book.xlsx",
+        "sheet": "Summary",
+        "retrieval_card": "Revenue summary",
+    }
+    jsonl_path = tmp_path / "records.jsonl"
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    pickle_path = tmp_path / "records.pkl"
+    with pickle_path.open("wb") as handle:
+        pickle.dump([record], handle)
+
+    loaded = cli.load_artifacts([str(jsonl_path), str(pickle_path)])
+
+    assert loaded == [record]
 
 
 def test_cli_deletes_selected_jobs_without_requiring_workbooks(monkeypatch, capsys):

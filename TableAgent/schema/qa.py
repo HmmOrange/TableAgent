@@ -12,6 +12,8 @@ class AgentOutput:
     observation: str
     reasoning: str = ""
     namespace_updates: Dict[str, Any] = field(default_factory=dict)
+    layer: str = ""
+    attempt_count: int = 1
 
 @dataclass
 class QAResult:
@@ -24,6 +26,10 @@ class QAResult:
     execution_time: float = 0.0
     artifacts: Dict[str, str] = field(default_factory=dict)
     token_usage: Dict[str, int] = field(default_factory=dict)
+    replan_count: int = 0
+    subtask_retry_count: int = 0
+    qa_max_retries: int = 0
+    llm_calls: List[Dict[str, Any]] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return f"QAResult(success={self.success}, final_answer='{self.final_answer}')"

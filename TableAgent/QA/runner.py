@@ -13,7 +13,8 @@ from TableAgent.QA.agents.synthesis_agent import TableQASynthesisAgent
 from TableAgent.QA.actions.base_action import BaseCodeGenerationAction
 from TableAgent.QA.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.QA.actions.review import ReviewSubtaskAction
-from TableAgent.schema.qa import QAResult
+from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
+from TableAgent.schema.qa import AgentOutput, QAResult
 from TableAgent.schema.subtask import SubTask
 
 if TYPE_CHECKING:
@@ -26,14 +27,47 @@ class TokenCountingLLM:
         self.client = client
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.calls: list[dict[str, Any]] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> Any:
-        response = self.client.generate(prompt, system_prompt=system_prompt)
+        started_at = time.perf_counter()
+        try:
+            response = self.client.generate(prompt, system_prompt=system_prompt)
+        except Exception as exc:
+            self.calls.append(
+                {
+                    "index": len(self.calls) + 1,
+                    "duration_ms": max(
+                        0, round((time.perf_counter() - started_at) * 1000)
+                    ),
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_capped": False,
+                    "success": False,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            raise
         self.prompt_tokens += int(getattr(response, "prompt_tokens", 0) or 0)
         self.completion_tokens += int(getattr(response, "completion_tokens", 0) or 0)
+        self.calls.append(
+            {
+                "index": len(self.calls) + 1,
+                "duration_ms": max(
+                    0, round((time.perf_counter() - started_at) * 1000)
+                ),
+                "prompt_tokens": int(getattr(response, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(
+                    getattr(response, "completion_tokens", 0) or 0
+                ),
+                "token_capped": bool(getattr(response, "token_capped", False)),
+                "success": True,
+                "error_type": None,
+            }
+        )
         return response
 
     def token_usage(self) -> dict[str, int]:
@@ -41,6 +75,9 @@ class TokenCountingLLM:
             "prompt": self.prompt_tokens,
             "completion": self.completion_tokens,
         }
+
+    def call_metrics(self) -> list[dict[str, Any]]:
+        return [dict(call) for call in self.calls]
 
 
 class TableQARunner:
@@ -62,12 +99,14 @@ class TableQARunner:
         max_experience_records: int = 5,
         max_retries: int = 3,
         table_retriever: TableRetrieverContract | None = None,
+        related_structure_paths: Optional[list[str | Path]] = None,
     ):
         raw_config = config or {}
         self.settings = raw_config.get("table_agent", raw_config) if isinstance(raw_config, dict) else {}
         
         # Load parameters from configuration/settings if present
         actual_max_retries = max_retries
+        actual_max_replans = 5
         actual_max_records = max_experience_records
         log_path = None
         artifact_root = Path("logs") / "qa_runs"
@@ -77,6 +116,7 @@ class TableQARunner:
         
         if self.settings:
             actual_max_retries = int(self.settings.get("qa_max_retries", max_retries))
+            actual_max_replans = int(self.settings.get("qa_max_replans", 5))
             actual_max_records = int(self.settings.get("qa_max_experience_records", max_experience_records))
             log_path_val = self.settings.get("qa_log_path")
             if log_path_val:
@@ -92,7 +132,10 @@ class TableQARunner:
             if explicit_artifact_root:
                 artifact_root = Path(str(explicit_artifact_root))
         self.console_progress = bool(config.get("qa_console_progress", False)) if isinstance(config, dict) else False
+        self.enable_final_answer_review = bool(self.settings.get("qa_final_answer_review", False))
         self.qa_artifact_root = artifact_root
+        self.max_replans = max(0, actual_max_replans)
+        self.max_retries = max(0, actual_max_retries)
 
         self.env = QAEnvironment(
             structure_path=structure_path,
@@ -103,10 +146,16 @@ class TableQARunner:
             max_error_chars=max_error_chars,
             max_value_repr_chars=max_value_repr_chars,
             table_retriever=table_retriever,
+            related_structure_paths=related_structure_paths,
         )
-        
+        self.env.excluded_sheet_names = {
+            str(name).strip().casefold()
+            for name in self.settings.get("qa_excluded_sheet_names", [])
+            if str(name).strip()
+        }
         self.env.logger.log_event("config_loaded", {
             "max_retries": actual_max_retries,
+            "max_replans": self.max_replans,
             "max_experience_records": actual_max_records,
             "log_path": log_path,
             "max_observation_chars": max_observation_chars,
@@ -160,6 +209,7 @@ class TableQARunner:
             review_action=review_action,
             max_retries=actual_max_retries,
         )
+        self.final_answer_review = ReviewFinalAnswerAction(self.env, llm_client=self.llm_client)
 
     def run(self, question: str) -> QAResult:
         event_start_index = len(self.env.logger.events)
@@ -180,13 +230,39 @@ class TableQARunner:
         if table_id:
             self._set_active_tables([table_id])
             
-        # 1. Plan
-        try:
-            plan = self.planner.plan(question, table_id=table_id)
-            self._progress(f"[qa] planning done | subtasks={[(subtask.id, subtask.layer) for subtask in plan]}")
-        except Exception as exc:
+        # 1. Plan, retrying malformed or failed planning through the same bounded replanning budget.
+        replan_count = 0
+        planning_failure = None
+        while True:
+            try:
+                plan = self.planner.plan(
+                    question,
+                    table_id=table_id,
+                    failure_context=planning_failure,
+                    previous_plan=[],
+                )
+                self._progress(
+                    "[qa] planning done | subtasks="
+                    f"{[(subtask.id, subtask.layer) for subtask in plan]}"
+                )
+                break
+            except Exception as exc:
+                if replan_count >= self.max_replans:
+                    plan = []
+                    planning_error = exc
+                    break
+                replan_count += 1
+                planning_failure = f"Planning attempt failed: {exc}"
+                self.env.logger.log_event("replanning_start", {
+                    "attempt": replan_count,
+                    "max_replans": self.max_replans,
+                    "error": planning_failure,
+                    "previous_plan": [],
+                })
+
+        if not plan:
             execution_time = time.time() - start_time
-            error_msg = f"Planning failed: {exc}"
+            error_msg = f"Planning failed: {planning_error}"
             result = QAResult(
                 question=question,
                 plan=[],
@@ -196,6 +272,10 @@ class TableQARunner:
                 error=error_msg,
                 execution_time=execution_time,
                 token_usage=self._token_usage(),
+                replan_count=replan_count,
+                subtask_retry_count=0,
+                qa_max_retries=self.max_retries,
+                llm_calls=self._llm_call_metrics(),
             )
             self.env.logger.log_event("run_complete", {
                 "success": False,
@@ -207,109 +287,91 @@ class TableQARunner:
             self._persist_run_artifacts(result, run_dir, event_start_index)
             return result
         
-        # 2. Execute plan subtasks in dependency order
-        try:
-            execution_plan = self._topological_sort(plan)
-        except ValueError as exc:
-            execution_time = time.time() - start_time
-            result = QAResult(
-                question=question,
-                plan=plan,
-                subtask_outputs=[],
-                final_answer=None,
-                success=False,
-                error=str(exc),
-                execution_time=execution_time,
-                token_usage=self._token_usage(),
-            )
-            result.logs = self.env.logger.events
-            self.env.logger.log_event("run_complete", {
-                "success": False,
-                "final_answer": None,
-                "error": str(exc),
-                "execution_time": execution_time,
-            })
-            self._persist_run_artifacts(result, run_dir, event_start_index)
-            return result
-
+        # 2. Execute the plan, asking the LLM to produce a corrected complete plan after bounded failures.
         subtask_outputs = []
-        success = True
+        success = False
         error_msg = None
-        completed: set[str] = set()
-
-        self.env.logger.log_event("execution_plan", {
-            "order": [subtask.id for subtask in execution_plan],
-            "dependencies": {subtask.id: subtask.depends_on for subtask in execution_plan},
-        })
-
-        for subtask in execution_plan:
-            missing_deps = [dep for dep in subtask.depends_on if dep not in completed]
-            if missing_deps:
-                success = False
-                error_msg = f"Subtask '{subtask.id}' has unfinished dependencies: {missing_deps}"
-                break
-            self._progress(f"[qa] subtask start | id={subtask.id} | layer={subtask.layer}")
-            self.env.logger.log_event("subtask_start", {
-                "subtask_id": subtask.id,
-                "layer": subtask.layer,
-                "description": subtask.description,
-                "depends_on": subtask.depends_on,
-            })
-            
-            if subtask.layer == "synthesis":
-                output = self.synthesis_agent.run_subtask(question, subtask)
-            else:
-                if subtask.layer == "inspect":
-                    selected_table_ids = self._selected_table_ids()
-                    if not selected_table_ids:
-                        selected_table_ids = [self.env.default_table_id()]
-                        self._set_active_tables(selected_table_ids)
-                    if not subtask.metadata:
-                        subtask.metadata = {}
-                    subtask.metadata.setdefault("table_ids", selected_table_ids)
-                    subtask.metadata.setdefault("table_id", selected_table_ids[0])
-                output = self.agent.run_subtask(question, subtask)
-                if output.success and subtask.layer == "table_inspect":
-                    selected_table_ids = self._selected_table_ids()
-                    if not selected_table_ids:
-                        selected_table_ids = [self.env.default_table_id()]
-                    self._set_active_tables(selected_table_ids)
-            self._progress(
-                f"[qa] subtask done | id={subtask.id} | success={output.success} | "
-                f"updates={list(output.namespace_updates.keys())}"
-            )
-                
-            subtask_outputs.append(output)
-            
-            selected_exp = self.env.experience_pool.select()
-            self.env.logger.log_event("subtask_complete", {
-                "subtask_id": subtask.id,
-                "success": output.success,
-                "observation": output.observation,
-                "code": output.code,
-                "namespace_updates": list(output.namespace_updates.keys()),
-                "experience_count": len(selected_exp)
-            })
-            
-            if not output.success:
-                success = False
-                error_msg = f"Failed at subtask '{subtask.id}': {output.observation}"
-                break
-            completed.add(subtask.id)
-
-        # 3. Retrieve final answer from the shared namespace
         final_answer = None
-        if success:
-            final_val = self.env.execution_namespace.get("final_answer")
-            if final_val is not None:
-                final_answer = self._humanize_header_ids(str(final_val))
-                self.env.execution_namespace["final_answer"] = final_answer
-            else:
+        execution_plan: list[SubTask] = []
+        baseline_namespace = dict(self.env.execution_namespace)
+        execution_attempt = 0
+
+        while True:
+            if execution_attempt:
+                self.env.execution_namespace.clear()
+                self.env.execution_namespace.update(baseline_namespace)
+            execution_attempt += 1
+            final_answer = None
+            self.env.execution_namespace.pop("final_answer", None)
+            try:
+                execution_plan = self._topological_sort(plan)
+                attempt_outputs, success, error_msg = self._execute_plan(question, plan, execution_plan)
+                subtask_outputs.extend(attempt_outputs)
+            except ValueError as exc:
                 success = False
-                error_msg = "Synthesis layer completed, but 'final_answer' variable was not set in namespace."
+                error_msg = str(exc)
+                attempt_outputs = []
+
+            if success:
+                final_answer = self._final_answer(execution_plan, plan)
+                if final_answer is None:
+                    success = False
+                    error_msg = "Synthesis layer completed, but 'final_answer' variable was not set in namespace."
+                elif self.enable_final_answer_review:
+                    final_review = self.final_answer_review.run(
+                        question=question,
+                        plan=plan,
+                        outputs=attempt_outputs,
+                        final_answer=final_answer,
+                    )
+                    self.env.logger.log_event("final_answer_review", {
+                        "accepted": final_review.accepted,
+                        "score": final_review.score,
+                        "feedback": final_review.feedback,
+                    })
+                    if not final_review.accepted:
+                        success = False
+                        error_msg = f"Final answer review rejected the plan: {final_review.feedback}"
+
+            if success or replan_count >= self.max_replans:
+                break
+
+            replan_count += 1
+            failure_context = self._replanning_context(error_msg, attempt_outputs)
+            self._progress(
+                f"[qa] replanning start | attempt={replan_count}/{self.max_replans} | error={error_msg}"
+            )
+            self.env.logger.log_event("replanning_start", {
+                "attempt": replan_count,
+                "max_replans": self.max_replans,
+                "error": error_msg,
+                "previous_plan": self._plan_payload(plan),
+            })
+            try:
+                plan = self.planner.plan(
+                    question,
+                    table_id=table_id,
+                    failure_context=failure_context,
+                    previous_plan=self._plan_payload(plan),
+                )
+            except Exception as exc:
+                error_msg = f"Replanning failed after execution error ({error_msg}): {exc}"
+                self.env.logger.log_event("replanning_error", {
+                    "attempt": replan_count,
+                    "error": str(exc),
+                })
+                break
+            self.env.logger.log_event("replanning_complete", {
+                "attempt": replan_count,
+                "subtasks": self._plan_payload(plan),
+            })
+            self._progress(
+                "[qa] replanning done | subtasks="
+                f"{[(subtask.id, subtask.layer) for subtask in plan]}"
+            )
 
         execution_time = time.time() - start_time
-        
+
         result = QAResult(
             question=question,
             plan=plan,
@@ -319,22 +381,236 @@ class TableQARunner:
             error=error_msg,
             execution_time=execution_time,
             token_usage=self._token_usage(),
+            subtask_retry_count=sum(
+                max(0, int(getattr(output, "attempt_count", 1) or 1) - 1)
+                for output in subtask_outputs
+            ),
+            qa_max_retries=self.max_retries,
+            llm_calls=self._llm_call_metrics(),
         )
-        
+        result.replan_count = replan_count
+
         # Expose logs/events on the result object
         result.logs = self.env.logger.events
-        
+
         self.env.logger.log_event("run_complete", {
             "success": success,
             "final_answer": final_answer,
             "error": error_msg,
-            "execution_time": execution_time
+            "execution_time": execution_time,
+            "replan_count": replan_count,
         })
 
         self._persist_run_artifacts(result, run_dir, event_start_index)
         self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
-        
+
         return result
+
+    def _execute_plan(
+        self,
+        question: str,
+        plan: list[SubTask],
+        execution_plan: list[SubTask],
+    ) -> tuple[list[Any], bool, str | None]:
+        subtasks_by_id = {subtask.id: subtask for subtask in plan}
+        accepted_updates: dict[str, tuple[str, ...]] = {}
+        outputs = []
+        completed: set[str] = set()
+        self.env.logger.log_event("execution_plan", {
+            "order": [subtask.id for subtask in execution_plan],
+            "dependencies": {subtask.id: subtask.depends_on for subtask in execution_plan},
+        })
+
+        for subtask in execution_plan:
+            missing_deps = [dependency for dependency in subtask.depends_on if dependency not in completed]
+            if missing_deps:
+                return outputs, False, f"Subtask '{subtask.id}' has unfinished dependencies: {missing_deps}"
+
+            self._progress(
+                f"[qa] subtask start | id={subtask.id} | layer={subtask.layer}"
+            )
+            self.env.logger.log_event("subtask_start", {
+                "subtask_id": subtask.id,
+                "layer": subtask.layer,
+                "description": subtask.description,
+                "depends_on": subtask.depends_on,
+            })
+
+            if subtask.layer == "synthesis":
+                if not subtask.metadata:
+                    subtask.metadata = {}
+                subtask.metadata["dependency_variables"] = self._dependency_variables(
+                    subtask,
+                    subtasks_by_id,
+                    accepted_updates,
+                )
+
+            try:
+                if subtask.layer == "synthesis":
+                    output = self.synthesis_agent.run_subtask(question, subtask)
+                else:
+                    if subtask.layer == "inspect":
+                        selected_table_ids = self._selected_table_ids()
+                        if not selected_table_ids:
+                            selected_table_ids = [self.env.default_table_id()]
+                            self._set_active_tables(selected_table_ids)
+                        if not subtask.metadata:
+                            subtask.metadata = {}
+                        subtask.metadata.setdefault("table_ids", selected_table_ids)
+                        subtask.metadata.setdefault("table_id", selected_table_ids[0])
+                    output = self.agent.run_subtask(question, subtask)
+                    if output.success and subtask.layer == "table_inspect":
+                        selected_table_ids = self._selected_table_ids() or [self.env.default_table_id()]
+                        self._set_active_tables(selected_table_ids)
+            except Exception as exc:
+                output = AgentOutput(
+                    subtask_id=subtask.id,
+                    description=subtask.description,
+                    code=subtask.code_attempt or "",
+                    success=False,
+                    observation=f"Unhandled subtask error: {exc}",
+                    reasoning="The subtask raised outside its normal execution/review loop.",
+                )
+                self.env.logger.log_event("subtask_exception", {
+                    "subtask_id": subtask.id,
+                    "error": str(exc),
+                })
+
+            self._progress(
+                f"[qa] subtask done | id={subtask.id} | success={output.success} | "
+                f"updates={list(output.namespace_updates.keys())}"
+            )
+            output.layer = subtask.layer
+            outputs.append(output)
+            selected_exp = self.env.experience_pool.select()
+            self.env.logger.log_event("subtask_complete", {
+                "subtask_id": subtask.id,
+                "success": output.success,
+                "observation": output.observation,
+                "code": output.code,
+                "namespace_updates": list(output.namespace_updates.keys()),
+                "experience_count": len(selected_exp),
+            })
+            if not output.success:
+                return outputs, False, f"Failed at subtask '{subtask.id}': {output.observation}"
+            accepted_updates[subtask.id] = tuple(output.namespace_updates.keys())
+            completed.add(subtask.id)
+
+        return outputs, True, None
+
+    @staticmethod
+    def _dependency_variables(
+        subtask: SubTask,
+        subtasks_by_id: dict[str, SubTask],
+        accepted_updates: dict[str, tuple[str, ...]],
+    ) -> list[str]:
+        """Collect accepted namespace updates from all transitive dependencies."""
+        dependency_ids: list[str] = []
+        visited: set[str] = set()
+
+        def visit(subtask_id: str) -> None:
+            if subtask_id in visited:
+                return
+            visited.add(subtask_id)
+            dependency = subtasks_by_id.get(subtask_id)
+            if dependency is None:
+                return
+            for parent_id in dependency.depends_on:
+                visit(parent_id)
+            dependency_ids.append(subtask_id)
+
+        for dependency_id in subtask.depends_on:
+            visit(dependency_id)
+
+        names: list[str] = []
+        for dependency_id in dependency_ids:
+            for name in accepted_updates.get(dependency_id, ()):
+                if name != "final_answer" and name not in names:
+                    names.append(name)
+        return names
+
+    def _final_answer(self, execution_plan: list[SubTask], plan: list[SubTask]) -> str | None:
+        final_val = self.env.execution_namespace.get("final_answer")
+        if final_val is None:
+            return None
+        serialized = self._serialize_final_value(final_val)
+        answer = self._humanize_header_ids(serialized)
+        self.env.execution_namespace["final_answer"] = answer
+        return answer
+
+    @classmethod
+    def _serialize_final_value(cls, value: Any) -> str:
+        """Serialize pandas values without inheriting display truncation settings."""
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                headers = [cls._markdown_cell(column) for column in value.columns]
+                lines = [
+                    "| " + " | ".join(headers) + " |",
+                    "| " + " | ".join("---" for _ in headers) + " |",
+                ]
+                for row in value.itertuples(index=False, name=None):
+                    lines.append("| " + " | ".join(cls._markdown_cell(cell) for cell in row) + " |")
+                return "\n".join(lines)
+            if isinstance(value, pd.Series):
+                return value.to_string(max_rows=None)
+        except ImportError:
+            pass
+        if isinstance(value, (list, tuple)) and value and all(isinstance(item, dict) for item in value):
+            headers = []
+            for item in value:
+                for key in item:
+                    if key not in headers:
+                        headers.append(key)
+            lines = [
+                "| " + " | ".join(cls._markdown_cell(header) for header in headers) + " |",
+                "| " + " | ".join("---" for _ in headers) + " |",
+            ]
+            for item in value:
+                lines.append(
+                    "| " + " | ".join(cls._markdown_cell(item.get(header)) for header in headers) + " |"
+                )
+            return "\n".join(lines)
+        return str(value)
+
+    @staticmethod
+    def _markdown_cell(value: Any) -> str:
+        try:
+            import pandas as pd
+
+            if pd.isna(value):
+                return ""
+        except (ImportError, TypeError, ValueError):
+            pass
+        return str(value).replace("|", r"\|").replace("\r\n", "<br>").replace("\n", "<br>")
+
+    @staticmethod
+    def _plan_payload(plan: list[SubTask]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": subtask.id,
+                "layer": subtask.layer,
+                "depends_on": list(subtask.depends_on),
+                "description": subtask.description,
+                "metadata": dict(subtask.metadata or {}),
+            }
+            for subtask in plan
+        ]
+
+    @staticmethod
+    def _replanning_context(error_msg: str | None, outputs: list[Any]) -> str:
+        recent = []
+        for output in outputs[-4:]:
+            observation = str(getattr(output, "observation", "") or "")
+            if len(observation) > 2000:
+                observation = observation[:2000] + "\n...[truncated]"
+            recent.append(
+                f"- subtask={getattr(output, 'subtask_id', '')} success={getattr(output, 'success', False)}\n"
+                f"  observation={observation}"
+            )
+        evidence = "\n".join(recent) or "No subtask output was produced."
+        return f"Failure: {error_msg or 'Unknown execution failure'}\n\nRecent runtime evidence:\n{evidence}"
 
     def close(self) -> None:
         self.env.workbook.close()
@@ -430,7 +706,7 @@ class TableQARunner:
             if header_id == label or header_id.isdecimal():
                 continue
             pattern = rf"(?<![\w]){re.escape(header_id)}(?![\w])"
-            humanized = re.sub(pattern, lambda _match, value=label: value, humanized, flags=re.IGNORECASE)
+            humanized = re.sub(pattern, lambda _match, value=label: value, humanized)
         return humanized
 
     def _topological_sort(self, plan: List[SubTask]) -> List[SubTask]:
@@ -523,6 +799,7 @@ class TableQARunner:
             "final_answer": result.final_answer,
             "error": result.error,
             "execution_time": result.execution_time,
+            "replan_count": result.replan_count,
             "token_usage": result.token_usage,
             "artifacts": artifacts,
             "plan": [self._subtask_to_dict(subtask) for subtask in result.plan],
@@ -534,6 +811,7 @@ class TableQARunner:
                     "observation": output.observation,
                     "reasoning": output.reasoning,
                     "code": output.code,
+                    "layer": output.layer,
                     "namespace_updates": list(output.namespace_updates.keys()),
                 }
                 for output in result.subtask_outputs
@@ -582,3 +860,8 @@ class TableQARunner:
         if self.llm_client is None:
             return {"prompt": 0, "completion": 0}
         return self.llm_client.token_usage()
+
+    def _llm_call_metrics(self) -> list[dict[str, Any]]:
+        if self.llm_client is None:
+            return []
+        return self.llm_client.call_metrics()

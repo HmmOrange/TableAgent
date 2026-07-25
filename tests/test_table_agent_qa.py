@@ -19,6 +19,8 @@ from TableAgent.utils import (
 )
 from TableAgent.environment.qa_env import QAEnvironment
 from TableAgent.QA import TableQARunner
+from TableAgent.QA.runner import TokenCountingLLM
+from TableAgent.llm import LLMResponse
 from tests.mock_policy import MockActionPolicy
 from TableAgent.QA.agents import TableQAPlanner, TableQAAgent
 from TableAgent.QA.actions.write_plan import parse_planner_output
@@ -49,6 +51,7 @@ def _two_step_plan_json() -> str:
             },
         ],
     })
+
 
 def test_a1_conversions():
     # column name to number
@@ -406,6 +409,7 @@ def test_react_loop_and_retry_self_repair():
     
     # Subtask should succeed because of round 2 self-repair
     assert output.success
+    assert output.attempt_count == 2
     assert subtask.status == "success"
     
     # Experience pool should contain 2 attempts (one failed with score 0.0, one succeeded with score 1.0)
@@ -416,9 +420,52 @@ def test_react_loop_and_retry_self_repair():
 
     # Check formatting of experience
     formatted_exp = env.experience_pool.format()
-    assert "<attempt round=\"1\" subtask=\"test_subtask\">" in formatted_exp
-    assert "<attempt round=\"2\" subtask=\"test_subtask\">" in formatted_exp
+    assert '<attempt round="1" subtask="test_subtask">' in formatted_exp
+    assert '<attempt round="2" subtask="test_subtask">' in formatted_exp
     assert "Error during execution:" in formatted_exp
+
+
+def test_llm_call_metrics_record_tokens_duration_and_caps():
+    class CappedClient:
+        def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
+            return LLMResponse(
+                content="done",
+                prompt_tokens=12,
+                completion_tokens=2048,
+                token_capped=True,
+            )
+
+    client = TokenCountingLLM(CappedClient())
+
+    client.generate("question")
+
+    assert client.token_usage() == {"prompt": 12, "completion": 2048}
+    metrics = client.call_metrics()
+    assert len(metrics) == 1
+    assert metrics[0]["index"] == 1
+    assert metrics[0]["duration_ms"] >= 0
+    assert metrics[0]["prompt_tokens"] == 12
+    assert metrics[0]["completion_tokens"] == 2048
+    assert metrics[0]["token_capped"] is True
+    assert metrics[0]["success"] is True
+    assert metrics[0]["error_type"] is None
+
+
+def test_runner_keeps_subtask_retries_separate_from_replans():
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=FakeLLM({"Table Structure": _two_step_plan_json()}),
+        policy=MockActionPolicy(simulate_error=True),
+        config={"table_agent": {"qa_max_retries": 3, "qa_max_replans": 0}},
+    )
+
+    result = runner.run("What is the average score of all people?")
+
+    assert result.success
+    assert result.replan_count == 0
+    assert result.subtask_retry_count == 2
+    assert result.qa_max_retries == 3
 
 def test_full_runner_pipeline():
     # Test 1: Average score question
@@ -910,3 +957,126 @@ def test_operator_modules_have_runnable_smoke_entrypoints():
         )
         assert result.returncode == 0, f"{module} failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         assert result.stdout.strip()
+
+
+def test_group_header_mask_resolves_leaf_columns():
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    try:
+        dataframe = env.operators.read_table_as_dataframe("table1", has_headers=True)
+
+        child_ids = env.operators.resolve_header_columns("table1", "name")
+        mask = env.operators.group_header_mask(
+            dataframe,
+            "table1",
+            "name",
+            equals="Minh",
+            mode="any",
+        )
+
+        assert child_ids == ["first_name", "middle_name", "last_name"]
+        assert dataframe.loc[mask, "no"].tolist() == [1, 3, 5, 8]
+    finally:
+        env.workbook.close()
+
+
+def test_planner_extracts_trailing_json_and_preserves_metadata():
+    trailing = parse_planner_output(
+        "I would inspect the workbook first.\n"
+        '[{"id":"inspect","layer":"inspect","depends_on":[],"description":"Read data"},'
+        '{"id":"finish","layer":"synthesis","depends_on":["inspect"],"description":"Answer"}]'
+    )
+    descriptive_plan = parse_planner_output(_llm_json({
+        "subtasks": [
+            {
+                "id": "inspect_sheet_info",
+                "layer": "inspect",
+                "depends_on": [],
+                "description": "Describe the OIL sheet structure.",
+                "metadata": {
+                    "target_names": ["OIL"],
+                },
+            },
+            {
+                "id": "synthesize_sheet_info",
+                "layer": "synthesis",
+                "depends_on": ["inspect_sheet_info"],
+                "description": "Return the verified sheet summary.",
+            },
+        ],
+    }))
+
+    assert [subtask.id for subtask in trailing] == ["inspect", "finish"]
+    assert descriptive_plan[0].metadata["target_names"] == ["OIL"]
+    assert not hasattr(descriptive_plan[0], "category")
+
+
+def test_runner_serializes_full_dataframe_final_answer():
+    import pandas as pd
+
+    from TableAgent.schema.subtask import SubTask
+
+    runner = TableQARunner(STRUCTURE_PATH, WORKBOOK_PATH, policy=MockActionPolicy())
+    try:
+        rows = 68
+        runner.env.execution_namespace["final_answer"] = pd.DataFrame({
+            "STT": range(1, rows + 1),
+            "item": [f"part-{index}" for index in range(1, rows + 1)],
+        })
+        synthesis = SubTask(id="synthesize_answer", description="Return all rows.", layer="synthesis")
+
+        answer = runner._final_answer([synthesis], [synthesis])
+
+        assert answer is not None
+        assert "part-68" in answer
+        assert "..." not in answer
+        assert len(answer.splitlines()) == rows + 2
+    finally:
+        runner.close()
+
+
+def test_descriptive_plan_uses_general_inspection_and_synthesis(tmp_path: Path):
+    plan = _llm_json({
+        "subtasks": [
+            {
+                "id": "inspect_table_info",
+                "layer": "inspect",
+                "depends_on": [],
+                "description": "Describe the verified table.",
+            },
+            {
+                "id": "synthesize_table_info",
+                "layer": "synthesis",
+                "depends_on": ["inspect_table_info"],
+                "description": "Return the verified table summary.",
+            },
+        ],
+    })
+    answer = "## Table: People Nested Headers\n- Description: Verified people table."
+    llm = FakeLLM({
+        "Table Structure": plan,
+        "Assigned Subtask:": _llm_json({
+            "reasoning": "Read the verified table metadata.",
+            "code": "table_description = env.get_table_structure('table1')['description']",
+            "description": "Reads the table description.",
+        }),
+        "Variables in namespace:": _llm_json({
+            "reasoning": "Format the inspected metadata.",
+            "code": f"final_answer = {answer!r}",
+            "description": "Formats the verified table summary.",
+        }),
+    })
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=llm,
+        config={"qa_artifact_dir": str(tmp_path / "qa")},
+    )
+    try:
+        result = runner.run("Describe the People Nested Headers table.")
+
+        assert result.success
+        assert result.final_answer == answer
+        assert [output.layer for output in result.subtask_outputs] == ["inspect", "synthesis"]
+        assert all(not hasattr(output, "category") for output in result.subtask_outputs)
+    finally:
+        runner.close()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from TableAgent.llm import LLMResponse
@@ -35,6 +35,10 @@ class SourceCandidate:
     retrieval_level: str = "table"
     retrieval_trace: tuple[dict[str, Any], ...] = ()
     retrieval_audit: tuple[dict[str, Any], ...] = ()
+    artifact_id: str = ""
+    embedding_vector: tuple[float, ...] = ()
+    embedding_model: str = ""
+    embedding_source: str = ""
 
 
 def safe_name(value: str) -> str:
@@ -45,8 +49,13 @@ def display_path(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
-def is_siflex(sample: EvalSample) -> bool:
-    return "siflex" in str(sample.sample_path or sample.sample_id).lower()
+_WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+
+
+def has_workbook_sources(sample: EvalSample) -> bool:
+    """Identify source-retrieval inputs from their workbook paths, not a dataset name."""
+    paths = [part.strip() for part in str(sample.table_path or "").split(";") if part.strip()]
+    return bool(paths) and all(PureWindowsPath(path).suffix.lower() in _WORKBOOK_SUFFIXES for path in paths)
 
 
 def token_usage(responses: list[LLMResponse]) -> dict[str, int]:

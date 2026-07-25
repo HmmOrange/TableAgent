@@ -14,7 +14,7 @@ from TableAgent.artifacts import (
 )
 from TableAgent.configs import TableAgentConfig
 from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.pipeline.common import is_siflex, safe_name
+from TableAgent.pipeline.common import has_workbook_sources, safe_name
 from TableAgent.schema import EvalSample
 from TableAgent.structure.layout.parsing import _is_valid_structure
 
@@ -28,11 +28,15 @@ class SourcePreparer:
         analyze_sheet: Callable[[Path, str, SheetMetadata, Path], str],
         metadata_extractor: ExStructMetadataExtractor | None = None,
         progress_callback: Callable[..., None] | None = None,
+        embedding_client: Any | None = None,
+        embedding_model: str = "",
     ):
         self.settings = settings
         self.analyze_sheet = analyze_sheet
         self.metadata_extractor = metadata_extractor or ExStructMetadataExtractor(settings.exstruct_mode)
         self.progress_callback = progress_callback
+        self.embedding_client = embedding_client
+        self.embedding_model = embedding_model
 
     def _progress(self, stage: str, **fields: Any) -> None:
         if self.progress_callback:
@@ -46,7 +50,7 @@ class SourcePreparer:
         regenerate_invalid: bool = True,
         force: bool = False,
     ) -> None:
-        if not samples or not is_siflex(samples[0]):
+        if not samples or not has_workbook_sources(samples[0]):
             return
 
         selected_sheets = set(self.selected_sheet_names(samples))
@@ -276,6 +280,8 @@ class SourcePreparer:
                 source_path,
                 sheet_name,
                 include_embeddings=bool(self.settings.embed_retrieval_cards),
+                embedding_client=self.embedding_client,
+                embedding_model=self.embedding_model,
             )
         except Exception as exc:
             if logger:

@@ -17,6 +17,7 @@ _HIDDEN_WORKSPACE_NAMES = {
     "CellRange",
     "AxisSelection",
     "Header",
+    "namespace",
 }
 
 
@@ -71,10 +72,13 @@ class ReviewSubtaskAction(BaseReviewAction):
         self.llm_client = llm_client
 
     def run(self, request: ReviewRequest) -> ReviewResult:
-        if self.llm_client:
+        local_result = self._local_review(request)
+        if not local_result.accepted:
+            result = local_result
+        elif self.llm_client:
             result = self._llm_review(request)
         else:
-            result = self._local_review(request)
+            result = local_result
 
         self.env.logger.log_event("review_subtask", {
             "action": self.name,

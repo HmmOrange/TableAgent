@@ -24,6 +24,7 @@ class PathJobRequest(BaseModel):
     workbooks: list[str] = Field(min_length=1)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
+    qa_max_replans: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "PathJobRequest":
@@ -38,11 +39,25 @@ class UploadJobRequest(BaseModel):
     queries: list[str] = Field(default_factory=list)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
+    qa_max_replans: int | None = Field(default=None, ge=0)
+    qa_enable_final_review: bool | None = None
+    mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
         _require_queries(self.stage, self.queries)
+        if self.stage == "qa" and self.artifacts:
+            queries = [str(query).strip() for query in self.queries if str(query).strip()]
+            if len(queries) != 1:
+                raise ValueError("Indexed QA requires exactly one non-empty query")
         return self
+
+
+class IndexedRetrievalRequest(BaseModel):
+    query: str = Field(min_length=1)
+    artifacts: list[dict[str, Any]] = Field(min_length=1)
+    mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
 
 
 def create_app(
@@ -103,6 +118,7 @@ def create_app(
                 workbooks=workbooks,
                 embed=request.embed,
                 sheets=request.sheets,
+                qa_max_replans=request.qa_max_replans,
                 persist=False,
             )
         except (RuntimeError, ValueError) as exc:
@@ -142,11 +158,22 @@ def create_app(
                     saved.append(target)
             except (OSError, ValueError) as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
             finally:
                 for upload in files:
                     await upload.close()
 
             try:
+                if request.stage == "qa" and request.artifacts:
+                    return await asyncio.to_thread(
+                        resolved_service.run_indexed_qa,
+                        query=request.queries[0],
+                        workbooks=saved,
+                        artifacts=request.artifacts,
+                        qa_max_replans=request.qa_max_replans,
+                        qa_enable_final_review=request.qa_enable_final_review,
+                        mode=request.mode,
+                    )
                 return await asyncio.to_thread(
                     resolved_service.run,
                     stage=request.stage,
@@ -154,10 +181,25 @@ def create_app(
                     workbooks=saved,
                     embed=request.embed,
                     sheets=request.sheets,
+                    qa_max_replans=request.qa_max_replans,
                     persist=False,
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.post("/v1/retrieval/select")
+    def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:
+        try:
+            return resolved_service.select_indexed_artifact(
+                query=request.query,
+                artifacts=request.artifacts,
+                mode=request.mode,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
     return app
 
@@ -182,4 +224,9 @@ def _require_queries(stage: Stage, queries: list[str]) -> None:
         raise ValueError("At least one non-empty query is required for qa and all stages")
 
 
-__all__ = ["PathJobRequest", "UploadJobRequest", "create_app"]
+__all__ = [
+    "IndexedRetrievalRequest",
+    "PathJobRequest",
+    "UploadJobRequest",
+    "create_app",
+]

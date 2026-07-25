@@ -57,6 +57,9 @@ class TableOperators(BaseOperator):
     def get_header(self, table_id: str, header_id: str) -> Optional[Header]:
         return self._structure.get_header(table_id, header_id)
 
+    def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
+        return self._structure.resolve_header_columns(table_id, header_id)
+
     def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
         """Read the bounding range covered by a table's verified headers and data."""
         headers = self.list_headers(table_id)
@@ -104,7 +107,46 @@ class TableOperators(BaseOperator):
             ]
             candidates.sort(key=lambda header: header.header_range.end_col - header.header_range.start_col)  # type: ignore[union-attr]
             column_ids.append(candidates[0].id if candidates else f"col_{column}")
-        return pd.DataFrame(rows, columns=column_ids)
+        frame = pd.DataFrame(rows, columns=column_ids)
+        # A verified header can span several physical columns. Collapse those columns into one
+        # logical field so agents cannot accidentally select only the first duplicate column.
+        if len(set(column_ids)) == len(column_ids):
+            if not frame.columns.is_unique:
+                raise ValueError("Logical table DataFrame contains duplicate column names.")
+            return frame
+
+        collapsed: dict[str, pd.Series] = {}
+        for column_id in dict.fromkeys(column_ids):
+            duplicate_columns = frame.loc[:, [value == column_id for value in column_ids]]
+            if duplicate_columns.shape[1] == 1:
+                collapsed[column_id] = duplicate_columns.iloc[:, 0]
+                continue
+
+            def combine_row(row: pd.Series) -> Any:
+                values = []
+                for value in row.tolist():
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        continue
+                    text = str(value).strip()
+                    if text and text not in values:
+                        values.append(text)
+                if not values:
+                    return None
+                if len(values) == 1:
+                    original = next(
+                        value
+                        for value in row.tolist()
+                        if value is not None and not (isinstance(value, float) and pd.isna(value))
+                        and str(value).strip()
+                    )
+                    return original
+                return "\n".join(values)
+
+            collapsed[column_id] = duplicate_columns.apply(combine_row, axis=1)
+        result = pd.DataFrame(collapsed, index=frame.index)
+        if not result.columns.is_unique:
+            raise ValueError("Logical table DataFrame contains duplicate column names after collapse.")
+        return result
 
     # Range operators
     def resolve_ranges(
@@ -150,9 +192,38 @@ class TableOperators(BaseOperator):
     def read_range_as_dataframe(self, range_or_a1: Union[CellRange, str], sheet: str = "", has_headers: bool = True) -> pd.DataFrame:
         return self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
 
+    def sheet_dimensions(self, sheet: str = "") -> dict[str, int | str]:
+        return self._workbook.sheet_dimensions(sheet)
+
+    def read_sheet_as_dataframe(
+        self,
+        sheet: str = "",
+        *,
+        min_row: int = 1,
+        max_row: int | None = None,
+        min_col: int = 1,
+        max_col: int | None = None,
+    ) -> pd.DataFrame:
+        return self._workbook.read_sheet_as_dataframe(
+            sheet,
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
+        )
+
     # Value filter / sparse selection operators
     def filter_values(self, range_or_a1: Union[CellRange, str], **kwargs: Any) -> AxisSelection:
         return self._filter.filter_values(range_or_a1, **kwargs)
+
+    def group_header_mask(
+        self,
+        dataframe: pd.DataFrame,
+        table_id: str,
+        header_id: str,
+        **kwargs: Any,
+    ) -> pd.Series:
+        return self._filter.group_header_mask(dataframe, table_id, header_id, **kwargs)
 
     def read_selection(self, selection: AxisSelection, target_range: Union[CellRange, str], sheet: str = "") -> List[Any]:
         return self._filter.read_selection(selection, target_range, sheet=sheet)

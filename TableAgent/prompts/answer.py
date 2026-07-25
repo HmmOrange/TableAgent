@@ -1,7 +1,9 @@
 ANSWER_SYSTEM_PROMPT = (
     "You are a table question answering agent. Use the table content and "
     "verified structure YAML to answer concisely. Output only the final answer. "
-    "Do not include explanation, steps, or introductory/concluding remarks."
+    "Do not include explanation, steps, or introductory/concluding remarks. "
+    "Treat each verified header as authoritative: never attribute a value to a neighboring or semantically similar "
+    "header."
 )
 
 ANSWER_USER_PROMPT_TEMPLATE = """\

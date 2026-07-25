@@ -13,6 +13,7 @@ class StructureOperator(BaseOperator):
         "operators.list_headers(table_id) -> list[Header]",
         "operators.find_headers(table_id, query) -> list[Header]",
         "operators.get_header(table_id, header_id) -> Header | None",
+        "operators.resolve_header_columns(table_id, parent_header_id) -> list[str]",
     )
 
     def list_tables(self) -> List[str]:
@@ -53,6 +54,22 @@ class StructureOperator(BaseOperator):
             if h.id == header_id:
                 return h
         return None
+
+    def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
+        """Resolve a header to the leaf column IDs represented in a table DataFrame."""
+        header = self.get_header(table_id, header_id)
+        if header is None:
+            raise ValueError(f"Header {header_id!r} was not found in table {table_id!r}.")
+
+        def leaf_ids(node: Header) -> List[str]:
+            if not node.sub_headers:
+                return [node.id]
+            result: List[str] = []
+            for child in node.sub_headers:
+                result.extend(leaf_ids(child))
+            return result
+
+        return leaf_ids(header)
 
 if __name__ == "__main__":
     import argparse

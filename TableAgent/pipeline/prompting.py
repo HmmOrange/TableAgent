@@ -3,7 +3,7 @@ from __future__ import annotations
 from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.common import SourceCandidate, is_siflex
+from TableAgent.pipeline.common import SourceCandidate
 
 
 class PromptBuilder:
@@ -12,8 +12,6 @@ class PromptBuilder:
         self.templates = templates
 
     def answer_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
-        if is_siflex(sample):
-            return self._siflex_answer_prompt(sample, table_context, structure_text)
         return self.templates.answer_user_prompt_template.format(
             question=sample.question,
             structure_text=structure_text,
@@ -43,30 +41,3 @@ class PromptBuilder:
                 f"retrieval_card:\n{card}"
             )
         return "\n\n".join(lines)
-
-    def _siflex_answer_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
-        answer_type = sample.raw.get("answer_type", "") if isinstance(sample.raw, dict) else ""
-        if answer_type == "table":
-            format_instructions = (
-                "CRITICAL EXPECTED FORMAT: TABLE\n"
-                "Format your final answer as a markdown table and preserve the table relations."
-            )
-        elif answer_type == "list":
-            format_instructions = (
-                "CRITICAL EXPECTED FORMAT: LIST\n"
-                "Format your final answer as a bulleted list with one item per answer unit."
-            )
-        elif answer_type == "form":
-            format_instructions = (
-                "CRITICAL EXPECTED FORMAT: FORM/DOCUMENT\n"
-                "Organize your final answer in a clear document structure."
-            )
-        else:
-            format_instructions = "CRITICAL EXPECTED FORMAT: STRUCTURED RESPONSE\nAnswer clearly in the question language."
-        return (
-            f"Question: {sample.question}\n\n"
-            f"Verified structure.yaml:\n{structure_text}\n\n"
-            f"Table content:\n{table_context}\n\n"
-            f"FORMAT INSTRUCTIONS:\n{format_instructions}\n\n"
-            "Answer:"
-        )

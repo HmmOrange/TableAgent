@@ -134,7 +134,17 @@ omits layout-only noise such as used ranges and merged ranges.
 
 Add `--embed` when you want ingestion to also export `retrieval_cards.pkl`. The
 pickle stores the same records plus an `embedding` field with the embedding model,
-dimension, and vector values.
+dimension, and vector values. TableAgent uses
+`table_agent.retrieval_embedding_provider`, which must name a configured real
+OpenAI-compatible embedding model. Ingestion rejects missing or `mock` providers so
+production artifacts cannot silently contain test embeddings. The example configuration
+uses `BAAI/bge-m3` through `TABLE_AGENT_EMBEDDING_BASE_URL`.
+
+The returned `retrieval_records` are ready for an external index. Sheet- and
+table-level records include the sheet's `structure_yaml`, while every record also
+includes the workbook schema and metadata. Store the record unchanged so query-time
+hybrid retrieval can reuse the ingestion embedding instead of embedding each card
+again.
 
 The CLI result includes per-sheet records in `structures` and workbook-level paths
 in `schema_artifacts` and `metadata_artifacts`. A schema embeds the parsed structure
@@ -280,10 +290,24 @@ run directory.
 | `--stage qa` | Generates structures and runs QA in one invocation. |
 | `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
 | `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
+| `--artifacts PATH` | Runs indexed QA from `run.json`, JSON/JSONL records, or a trusted `retrieval_cards.pkl`. Repeat for multiple files; requires `--stage qa`. |
 | `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
 | `--llm NAME` | Overrides the configured answer LLM profile. |
 
 The `--vlm` option selects the layout VLM used to generate structures for QA.
+
+To query ingestion artifacts directly from the CLI without rerunning layout extraction:
+
+```bash
+uv run table-agent --config config.yaml --stage qa \
+  --workbook sample/QA_sample.xlsx \
+  --query "What is the total revenue?" \
+  --artifacts outputs/<ingestion-run>/run.json
+```
+
+You can instead pass the workbook-level
+`outputs/<ingestion-run>/workbooks/<workbook>/retrieval_cards.pkl` produced by
+`--embed`. Only load pickle files you trust, because Python pickle is executable data.
 
 ### Run End-To-End
 
@@ -318,6 +342,22 @@ curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
 Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
 Ingestion always generates workbook schema and metadata artifacts. Sheet list
 entries may contain comma-separated names.
+
+For indexed QA, upload the selected workbook and send one query plus the retrieval
+records returned by ingestion (or a subset returned by your vector/metadata index):
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
+  -H "X-API-Key: your-service-key" \
+  -F 'payload={"stage":"qa","queries":["Compare Summary and Detail"],"artifacts":[{"id":"book.xlsx:Summary:table1","upload_name":"book.xlsx","sheet":"Summary","retrieval_card":"...","structure_yaml":"...","embedding":{"model":"...","dimension":3,"values":[0.1,0.2,0.3]}}]}' \
+  -F "files=@sample/QA_sample.xlsx"
+```
+
+TableAgent combines hybrid lexical, entity, and stored-embedding scores, selects one
+primary sheet, and supplies other indexed structures from the same workbook as
+multi-sheet context. If an older index record has retrieval context but no
+`structure_yaml`, the request is still accepted and returns a source-context fallback
+answer with `qa.fallback_source: "missing_structure"` instead of rejecting the job.
 
 Omit `X-API-Key` when `service.api_key` is empty. The serving layer keeps no jobs,
 logs, uploads, workbooks, structures, or other artifacts on disk. It uses temporary

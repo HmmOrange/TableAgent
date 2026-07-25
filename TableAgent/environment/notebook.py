@@ -9,6 +9,7 @@ import json
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Dict, List, Tuple, Optional
 
 try:
@@ -120,6 +121,7 @@ def validate_code_imports(code: str) -> None:
             }:
                 raise PermissionError(f"Access to '{node.slice.value}' key is restricted.")
 
+
 def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     if not isinstance(name, str):
         raise TypeError("module name must be a string")
@@ -193,7 +195,12 @@ class Notebook:
         self.max_error_chars = max_error_chars
         self.max_value_repr_chars = max_value_repr_chars
         self.namespace = dict(initial_namespace)
-        self.namespace["__builtins__"] = safe_builtins
+        workspace_view = MappingProxyType(self.namespace)
+        notebook_builtins = dict(safe_builtins)
+        notebook_builtins["locals"] = lambda: workspace_view
+        notebook_builtins["globals"] = lambda: workspace_view
+        self.namespace["namespace"] = workspace_view
+        self.namespace["__builtins__"] = notebook_builtins
         self.nb = new_notebook() if new_notebook is not None else None
 
     def execute_cell(self, cell_id: str, code: str) -> CellResult:
@@ -240,7 +247,7 @@ class Notebook:
         for k, v in self.namespace.items():
             if k.startswith("__"):
                 continue
-            if k in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "Header", "np"}:
+            if k in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "Header", "np", "namespace"}:
                 continue
             if k not in pre_keys:
                 updates[k] = v

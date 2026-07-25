@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import pickle
 import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
+import pytest
 import yaml
 
+from TableAgent.configs import load_config
+from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.llm import LLMResponse
 from service.runtime import TableAgentService
@@ -84,6 +88,40 @@ class FakeSummaryClient:
         return LLMResponse(content=f'{{"description": "{description}"}}')
 
 
+class FakeEmbeddingClient:
+    model = "test-embedding"
+
+    def __init__(self):
+        self.calls = []
+
+    async def encode(self, texts):
+        values = list(texts) if isinstance(texts, list) else [texts]
+        self.calls.append(values)
+        return [[1.0, float(index + 1)] for index, _ in enumerate(values)]
+
+
+class FakeIndexedPipeline:
+    instances = []
+    calls = []
+
+    def __init__(self, llm_client, layout_vlm_client, config):
+        self.llm_client = llm_client
+        self.layout_vlm_client = layout_vlm_client
+        self.config = config
+        self.qa_agent = SimpleNamespace(
+            run=lambda prompt: LLMResponse(content="combined indexed answer", prompt_tokens=2, completion_tokens=1)
+        )
+        type(self).instances.append(self)
+
+    def _run_verified_qa(self, **kwargs):
+        type(self).calls.append(kwargs)
+        assert Path(kwargs["structure_path"]).is_file()
+        return (
+            LLMResponse(content="indexed answer", prompt_tokens=3, completion_tokens=2),
+            {"success": True, "fallback_used": False, "replan_count": 0},
+        )
+
+
 def _workbook(path: Path) -> Path:
     workbook = openpyxl.Workbook()
     workbook.active["A1"] = "value"
@@ -147,10 +185,12 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
 def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")
+    embedding_client = FakeEmbeddingClient()
     service = TableAgentService(
         {"service": {"root_dir": str(tmp_path / "service")}},
         llm_client=FakeSummaryClient(),
         layout_vlm_client=object(),
+        embedding_client=embedding_client,
         pipeline_factory=FakePipeline,
     )
 
@@ -158,11 +198,392 @@ def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
         stage="structure",
         workbooks=[source],
         job_id="structure-artifacts",
+        embed=True,
     )
 
     assert len(FakePipeline.instances) == 1
     assert result["schema_artifacts"][0]["artifact"] == "workbooks/book.xlsx/schema.yaml"
     assert result["metadata_artifacts"][0]["artifact"] == "workbooks/book.xlsx/metadata.json"
+    assert result["retrieval_records"]
+    assert result["retrieval_records"][0]["schema_yaml"]
+    sheet_records = [record for record in result["retrieval_records"] if record["sheet"]]
+    assert sheet_records
+    assert all(record["structure_yaml"] for record in sheet_records)
+    assert all(record["embedding"]["model"] == "test-embedding" for record in result["retrieval_records"])
+    assert embedding_client.calls
+    schema = yaml.safe_load(result["retrieval_records"][0]["schema_yaml"])
+    assert schema["Sheet"]["structure"]["table1"]["name"] == "Sheet"
+    persisted_records = pickle.loads(
+        (
+            service.root_dir
+            / "structure-artifacts"
+            / "workbooks"
+            / "book.xlsx"
+            / "retrieval_cards.pkl"
+        ).read_bytes()
+    )
+    persisted_sheet_records = [record for record in persisted_records if record["sheet"]]
+    assert all(record["structure_yaml"] for record in persisted_sheet_records)
+    assert all(
+        record["embedding"]["model"] == "test-embedding"
+        for record in persisted_records
+    )
+
+
+def test_embed_requires_a_configured_real_embedding_provider(tmp_path: Path):
+    service = TableAgentService({"service": {"root_dir": str(tmp_path / "service")}})
+
+    with pytest.raises(ValueError, match="configured real embedding model"):
+        service._retrieval_embedding_backend()
+
+
+def test_embed_rejects_mock_embedding_provider(tmp_path: Path):
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {"retrieval_embedding_provider": "mock"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="mock embeddings are not allowed"):
+        service._retrieval_embedding_backend()
+
+
+def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    result = service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        qa_max_replans=2,
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "document_name": "book.xlsx",
+                "score": 0.9,
+                "sheet": "Sheet",
+                "retrieval_level": "table",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert len(FakeIndexedPipeline.instances) == 1
+    assert FakeIndexedPipeline.instances[0].layout_vlm_client is None
+    assert FakeIndexedPipeline.instances[0].config["qa_max_replans"] == 2
+    assert "indexed_schema_text" not in FakeIndexedPipeline.calls[0]
+    assert result["answers"][0]["answer"] == "indexed answer"
+    assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
+
+
+def test_instant_indexed_qa_disables_thinking_and_uses_instant_limits(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    answer_client = SimpleNamespace(
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        max_tokens=8192,
+    )
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {
+                "qa_max_retries": 3,
+                "generation_max_tokens": 8192,
+                "qa_instant_max_retries": 1,
+                "qa_instant_generation_max_tokens": 2048,
+            },
+        },
+        llm_client=answer_client,
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        mode="instant",
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    pipeline = FakeIndexedPipeline.instances[0]
+    assert pipeline.llm_client is not answer_client
+    assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
+    assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
+    assert pipeline.config["qa_max_retries"] == 1
+    assert pipeline.config["generation_max_tokens"] == 2048
+
+
+def test_thinking_indexed_qa_disables_reasoning_and_preserves_limits(tmp_path: Path):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    answer_client = SimpleNamespace(
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        max_tokens=8192,
+    )
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {
+                "qa_max_retries": 3,
+                "generation_max_tokens": 8192,
+            },
+        },
+        llm_client=answer_client,
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        mode="thinking",
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    pipeline = FakeIndexedPipeline.instances[0]
+    assert pipeline.llm_client is not answer_client
+    assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
+    assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
+    assert pipeline.config["qa_max_retries"] == 3
+    assert pipeline.config["generation_max_tokens"] == 8192
+
+
+def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path, monkeypatch):
+    sales = _workbook(tmp_path / "sales.xlsx")
+    sales_book = openpyxl.load_workbook(sales)
+    sales_book.create_sheet("Archive")
+    sales_book.save(sales)
+    sales_book.close()
+    maintenance = _workbook(tmp_path / "maintenance.xlsx")
+    maintenance_book = openpyxl.load_workbook(maintenance)
+    maintenance_book.active["B1"] = "maintenance"
+    maintenance_book.save(maintenance)
+    maintenance_book.close()
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = False
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    qa_calls = []
+
+    def run_verified_qa(_pipeline, **kwargs):
+        qa_calls.append(
+            {
+                **kwargs,
+                "structure_text": kwargs["structure_path"].read_text(
+                    encoding="utf-8"
+                ),
+                "related_structure_texts": [
+                    path.read_text(encoding="utf-8")
+                    for path in kwargs["related_structure_paths"]
+                ],
+            }
+        )
+        return (
+            LLMResponse(content="Sales answer", prompt_tokens=3, completion_tokens=2),
+            {"success": True, "fallback_used": False, "replan_count": 0},
+        )
+
+    monkeypatch.setattr(TableAgentPipeline, "_run_verified_qa", run_verified_qa)
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    selection = service.select_indexed_artifact(
+        query="regional revenue score",
+        mode="instant",
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+            },
+        ],
+    )
+    assert selection["document_id"] == "doc-sales"
+    assert selection["retrieval"]["candidate_count"] == 3
+
+    result = service.run_indexed_qa(
+        query="regional revenue score",
+        workbooks=[sales, maintenance],
+        qa_enable_final_review=False,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+            },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+            },
+        ],
+    )
+
+    answer = result["answers"][0]
+    assert len(qa_calls) == 1
+    assert qa_calls[0]["workbook_path"].name == "sales.xlsx"
+    assert qa_calls[0]["structure_text"] == (
+        "table1:\n  sheet: Sheet\n  headers: []\n"
+    )
+    assert len(qa_calls[0]["related_structure_paths"]) == 1
+    assert qa_calls[0]["related_structure_texts"] == [
+        "table1:\n  sheet: Archive\n  headers: []\n"
+    ]
+    assert qa_calls[0]["enable_final_answer_review"] is False
+    assert answer["workbook"] == "sales.xlsx"
+    assert answer["workbooks"] == ["sales.xlsx"]
+    assert answer["sheets"] == ["Sheet", "Archive"]
+    assert answer["retrieval"]["mode"] == "table_agent_hybrid"
+    assert answer["retrieval"]["document_id"] == "doc-sales"
+    assert answer["retrieval"]["embedding_used"] is True
+    assert answer["retrieval"]["candidate_count"] == 3
+    assert answer["retrieval"]["workbook_count"] == 2
+    assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
+
+
+def test_indexed_qa_falls_back_when_selected_artifact_has_no_structure(tmp_path: Path):
+    source = _workbook(tmp_path / "book.xlsx")
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = False
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    result = service.run_indexed_qa(
+        query="regional revenue score",
+        workbooks=[source],
+        artifacts=[
+            {
+                "id": "book:sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+            }
+        ],
+    )
+
+    answer = result["answers"][0]
+    assert answer["answer"]
+    assert answer["qa"]["success"] is False
+    assert answer["qa"]["fallback_used"] is True
+    assert answer["qa"]["fallback_source"] == "missing_structure"
+    assert "Missing structure.yaml" in answer["qa"]["error"]
+
+
+def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = True
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    selection = service.select_indexed_artifact(
+        query="name in the CV",
+        mode="instant",
+        artifacts=[
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Plan",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert selection["status"] == "no_evidence"
+    assert selection["document_id"] is None
+    assert selection["retrieval"]["selected_artifact_id"] is None
+    assert selection["retrieval"]["audit"][0]["selected"] is False
 
 
 def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
@@ -182,6 +603,46 @@ def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     assert FakePipeline.instances[0].forces == [True]
     assert FakePipeline.instances[1].layout_vlm_client is None
     assert result["answers"][0]["answer"] == "answer: question"
+
+
+def test_qa_stage_accepts_per_run_max_replans_override(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {"qa_max_replans": 5},
+        },
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    service.run(
+        stage="qa",
+        workbooks=[source],
+        queries=["question"],
+        qa_max_replans=2,
+    )
+
+    assert FakePipeline.instances[1].config["qa_max_replans"] == 2
+
+
+def test_service_rejects_negative_qa_max_replans(tmp_path: Path):
+    service = TableAgentService({"service": {"root_dir": str(tmp_path / "service")}})
+    source = _workbook(tmp_path / "book.xlsx")
+
+    try:
+        service.run(
+            stage="qa",
+            workbooks=[source],
+            queries=["question"],
+            qa_max_replans=-1,
+        )
+    except ValueError as exc:
+        assert "qa_max_replans" in str(exc)
+    else:
+        raise AssertionError("Expected a negative qa_max_replans validation error")
 
 
 def test_service_always_regenerates_structure_in_a_fresh_workspace(tmp_path: Path):

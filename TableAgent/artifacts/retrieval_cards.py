@@ -15,8 +15,6 @@ from TableAgent.pipeline.retrieval.cards import (
     build_sheet_metadata_payload,
     build_table_retrieval_cards,
 )
-from TableAgent.pipeline.retrieval.embeddings import MockEmbeddingModel
-
 DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL = "mock-hash-embedding"
 
 
@@ -81,14 +79,13 @@ def write_sheet_retrieval_cards(
             }
         )
 
-    _write_records(
+    return _write_records(
         sheet_dir,
         records,
         include_embeddings=include_embeddings,
         embedding_client=embedding_client,
         embedding_model=embedding_model,
     )
-    return records
 
 
 def write_workbook_retrieval_cards(
@@ -136,14 +133,13 @@ def write_workbook_retrieval_cards(
         "metadata": workbook_payload,
     }
     all_records = [workbook_record, *records]
-    _write_records(
+    return _write_records(
         workbook_dir,
         all_records,
         include_embeddings=include_embeddings,
         embedding_client=embedding_client,
         embedding_model=embedding_model,
     )
-    return all_records
 
 
 def _write_records(
@@ -153,7 +149,7 @@ def _write_records(
     include_embeddings: bool,
     embedding_client: Any | None,
     embedding_model: str,
-) -> None:
+) -> list[dict[str, Any]]:
     directory.mkdir(parents=True, exist_ok=True)
     jsonl_path = directory / "retrieval_cards.jsonl"
     csv_path = directory / "retrieval_cards.csv"
@@ -181,16 +177,18 @@ def _write_records(
             writer.writerow({field: record.get(field, "") for field in writer.fieldnames})
     if not include_embeddings:
         pickle_path.unlink(missing_ok=True)
-        return
-    pickle_path.write_bytes(
-        pickle.dumps(
-            _records_with_embeddings(
-                records,
-                embedding_client=embedding_client,
-                embedding_model=embedding_model,
-            )
+        return records
+    if embedding_client is None:
+        raise ValueError(
+            "Embedding export requires an explicit configured embedding client"
         )
+    embedded_records = _records_with_embeddings(
+        records,
+        embedding_client=embedding_client,
+        embedding_model=embedding_model,
     )
+    pickle_path.write_bytes(pickle.dumps(embedded_records))
+    return embedded_records
 
 
 def _records_with_embeddings(
@@ -199,22 +197,49 @@ def _records_with_embeddings(
     embedding_client: Any | None,
     embedding_model: str,
 ) -> list[dict[str, Any]]:
-    client = embedding_client or MockEmbeddingModel()
-    vectors = _encode_cards(client, [str(record.get("retrieval_card") or "") for record in records])
-    result: list[dict[str, Any]] = []
-    for record, vector in zip(records, vectors):
+    if embedding_client is None:
+        raise ValueError("Embedding export requires an explicit embedding client")
+    client = embedding_client
+    result: list[dict[str, Any] | None] = [None] * len(records)
+    missing_indices: list[int] = []
+    for index, record in enumerate(records):
+        existing = _embedding_values(record, embedding_model)
+        if existing is None:
+            missing_indices.append(index)
+            continue
+        result[index] = dict(record)
+
+    vectors = _encode_cards(
+        client,
+        [str(records[index].get("retrieval_card") or "") for index in missing_indices],
+    ) if missing_indices else []
+    for index, vector in zip(missing_indices, vectors):
+        record = records[index]
         values = [float(value) for value in vector]
-        result.append(
-            {
-                **record,
-                "embedding": {
-                    "model": embedding_model,
-                    "dimension": len(values),
-                    "values": values,
-                },
-            }
-        )
-    return result
+        result[index] = {
+            **record,
+            "embedding": {
+                "model": embedding_model,
+                "dimension": len(values),
+                "values": values,
+            },
+        }
+    return [record for record in result if record is not None]
+
+
+def _embedding_values(record: dict[str, Any], embedding_model: str) -> list[float] | None:
+    embedding = record.get("embedding")
+    if not isinstance(embedding, dict):
+        return None
+    if str(embedding.get("model") or "") != embedding_model:
+        return None
+    values = embedding.get("values")
+    if not isinstance(values, list) or not values:
+        return None
+    try:
+        return [float(value) for value in values]
+    except (TypeError, ValueError):
+        return None
 
 
 def _encode_cards(embedding_client: Any, texts: list[str]) -> list[list[float]]:
