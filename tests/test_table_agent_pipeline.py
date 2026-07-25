@@ -447,6 +447,108 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     assert second.predicted_answer == "100"
 
 
+def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sample = EvalSample(
+        index=0,
+        sample_id="all/source-direct",
+        table_id="workbook_set",
+        table_content="",
+        question="What is the answer?",
+        answer=[],
+        table_path=str(tmp_path / "source.xlsx"),
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "all"},
+    )
+    candidate = object()
+    prepare_calls = []
+    expected = object()
+
+    monkeypatch.setattr(
+        pipeline.source_preparer,
+        "prepare",
+        lambda samples, **kwargs: prepare_calls.append((list(samples), kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline.source_retriever,
+        "load_candidates",
+        lambda sample: [candidate],
+    )
+    monkeypatch.setattr(
+        pipeline.source_retriever,
+        "select",
+        lambda sample, responses, fit_context: candidate,
+    )
+    monkeypatch.setattr(pipeline, "_run_prepared_source", lambda *args: expected)
+
+    assert pipeline.run(sample) is expected
+    assert pipeline.run(sample) is expected
+    assert len(prepare_calls) == 2
+    assert prepare_calls[0][0] == [sample]
+    assert prepare_calls[0][1] == {"regenerate_invalid": True, "force": True}
+    assert prepare_calls[1][1] == {"regenerate_invalid": True, "force": True}
+
+
+def test_table_agent_all_phase_does_not_regenerate_twice_after_prepare(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workbook_path = tmp_path / "source.xlsx"
+    candidate_dir = tmp_path / "prepared" / "Sheet1"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "structure.yaml").write_text("table1: {}\n", encoding="utf-8")
+    sample = EvalSample(
+        index=0,
+        sample_id="all/source-prepared",
+        table_id="workbook_set",
+        table_content="",
+        question="What is the answer?",
+        answer=[],
+        table_path=str(workbook_path),
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "all"},
+    )
+
+    class Candidate:
+        pass
+
+    candidate = Candidate()
+    candidate.directory = candidate_dir
+    candidate.workbook_path = workbook_path
+    candidate.sheet_name = "Sheet1"
+    prepare_calls = []
+    expected = object()
+    monkeypatch.setattr(
+        pipeline.source_preparer,
+        "prepare",
+        lambda samples, **kwargs: prepare_calls.append((list(samples), kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline.source_retriever,
+        "load_candidates",
+        lambda sample: [candidate],
+    )
+    monkeypatch.setattr(
+        pipeline.source_retriever,
+        "select",
+        lambda sample, responses, fit_context: candidate,
+    )
+    monkeypatch.setattr(pipeline, "_run_prepared_source", lambda *args: expected)
+
+    pipeline.prepare_samples([sample])
+    assert pipeline.run(sample) is expected
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0][1] == {"regenerate_invalid": True, "force": True}
+
+
 def test_table_agent_qa_phase_fails_on_missing_cache(tmp_path: Path):
     sample = EvalSample(0, "missing/1", "table-1", "A | B\n1 | 2", "What is B?", ["2"])
     pipeline = TableAgentPipeline(
