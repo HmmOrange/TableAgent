@@ -1027,7 +1027,7 @@ table1:
         include_embeddings=True,
         embedding_client=MockEmbeddingModel(),
     )
-    write_workbook_retrieval_cards(
+    workbook_records = write_workbook_retrieval_cards(
         tmp_path / "Book.xlsx",
         "Book.xlsx",
         sheet_records,
@@ -1042,6 +1042,8 @@ table1:
         assert embedding["dimension"] == 128
         assert len(embedding["values"]) == 128
         assert all(isinstance(value, float) for value in embedding["values"])
+    assert workbook_records
+    assert all("embedding" in record for record in workbook_records)
 
 
 def test_retrieval_entity_match_promotes_specific_value_candidate(temp_sources_dir):

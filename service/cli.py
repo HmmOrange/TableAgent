@@ -63,6 +63,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--vlm",
         help="Configured VLM profile to use instead of the config.yaml default.",
     )
+    parser.add_argument(
+        "--workers",
+        "--max-workers",
+        dest="max_workers",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Maximum concurrent structure and QA workers. "
+            "Overrides service.max_workers for this run."
+        ),
+    )
     cleanup = parser.add_mutually_exclusive_group()
     cleanup.add_argument(
         "--delete-job",
@@ -84,7 +96,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cleanup_requested = bool(args.delete_job or args.delete_all_jobs)
     if cleanup_requested and (
-        args.workbook or args.query or args.embed or args.sheet or args.artifacts
+        args.workbook
+        or args.query
+        or args.embed
+        or args.sheet
+        or args.artifacts
+        or args.max_workers is not None
     ):
         parser.error("cleanup flags cannot be combined with workbook processing flags")
     if not cleanup_requested and not args.workbook:
@@ -109,19 +126,27 @@ def main(argv: list[str] | None = None) -> int:
         if cleanup_requested:
             result = service.delete_runs(args.delete_job, all_runs=args.delete_all_jobs)
         elif args.artifacts:
+            run_kwargs = {
+                "query": next(query for query in args.query if query.strip()),
+                "workbooks": args.workbook,
+                "artifacts": load_artifacts(args.artifacts),
+            }
+            if args.max_workers is not None:
+                run_kwargs["max_workers"] = args.max_workers
             result = service.run_indexed_qa(
-                query=next(query for query in args.query if query.strip()),
-                workbooks=args.workbook,
-                artifacts=load_artifacts(args.artifacts),
+                **run_kwargs,
             )
         else:
-            result = service.run(
-                stage=args.stage,
-                workbooks=args.workbook,
-                queries=args.query,
-                embed=args.embed,
-                sheets=args.sheet,
-            )
+            run_kwargs = {
+                "stage": args.stage,
+                "workbooks": args.workbook,
+                "queries": args.query,
+                "embed": args.embed,
+                "sheets": args.sheet,
+            }
+            if args.max_workers is not None:
+                run_kwargs["max_workers"] = args.max_workers
+            result = service.run(**run_kwargs)
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
         print(f"table-agent: error: {exc}", file=sys.stderr)
         return 1
@@ -196,6 +221,16 @@ def _artifact_records(payload: Any, path: Path) -> list[dict[str, Any]]:
             f"Artifact file must contain a list of records or a run.json wrapper: {path}"
         )
     return [dict(item) for item in payload]
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 if __name__ == "__main__":

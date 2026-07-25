@@ -18,6 +18,7 @@ class FakeService:
         self.indexed_calls = []
 
     def run(self, *, stage, queries, workbooks, embed, sheets, qa_max_replans, persist):
+        workbook_names = [Path(path).name for path in workbooks]
         self.calls.append(
             {
                 "stage": stage,
@@ -32,9 +33,24 @@ class FakeService:
         return {
             "job_id": "ephemeral-run",
             "stage": stage,
-            "workbooks": [Path(path).name for path in workbooks],
+            "workbooks": workbook_names,
             "structures": [],
             "answers": [{"query": query, "answer": "ok"} for query in queries],
+            "retrieval_artifacts": (
+                [
+                    {
+                        "workbook": workbook_names[0],
+                        "retrieval_cards": [
+                            {
+                                "id": f"{workbook_names[0]}:metadata",
+                                "embedding": {"model": "mock-hash-embedding", "dimension": 1, "values": [1.0]},
+                            }
+                        ],
+                    }
+                ]
+                if embed
+                else []
+            ),
             "artifacts": [],
         }
 
@@ -103,6 +119,7 @@ def test_health_status_and_upload_job(tmp_path: Path):
 
         assert response.status_code == 200
         assert body["answers"][0]["answer"] == "ok"
+        assert body["retrieval_artifacts"][0]["retrieval_cards"][0]["embedding"]["values"] == [1.0]
         assert client.get("/v1/status").json()["persistence"] is False
         assert service.calls[0]["stage"] == "all"
         assert service.calls[0]["queries"] == ["question"]

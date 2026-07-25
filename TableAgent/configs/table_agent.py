@@ -18,6 +18,7 @@ class TableAgentConfig:
     max_refinement_rounds: int
     max_context_chars: int
     render_timeout_seconds: float
+    max_workers: int
     libreoffice_path: Path | None
     libreoffice_image_resolution: int
     workbook_show_coordinates: bool
@@ -67,6 +68,7 @@ class TableAgentConfig:
             max_refinement_rounds=int(_required(merged, "max_refinement_rounds")),
             max_context_chars=int(_required(merged, "max_context_chars")),
             render_timeout_seconds=float(_required(merged, "render_timeout_seconds")),
+            max_workers=_positive_int(merged.get("max_workers", 1), "max_workers"),
             libreoffice_path=_optional_path(merged.get("libreoffice_path")),
             libreoffice_image_resolution=int(
                 merged.get("libreoffice_image_resolution", merged.get("aspose_image_resolution", 192))
@@ -163,6 +165,13 @@ def _optional_int(value: Any) -> int | None:
 
 def _optional_path(value: Any) -> Path | None:
     return None if value is None else Path(str(value))
+
+
+def _positive_int(value: Any, key: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"table_agent.{key} must be a positive integer")
+    return parsed
 
 
 def _bool(value: Any) -> bool:

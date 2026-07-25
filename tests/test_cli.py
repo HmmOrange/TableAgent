@@ -27,6 +27,8 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
             "alternate_answer",
             "--vlm",
             "alternate_layout",
+            "--workers",
+            "6",
         ]
     )
 
@@ -39,6 +41,7 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
+    assert args.max_workers == 6
     assert args.delete_job == []
     assert args.delete_all_jobs is False
 
@@ -119,6 +122,16 @@ def test_cli_rejects_removed_force_flag():
     assert exc_info.value.code == 2
 
 
+@pytest.mark.parametrize("value", ["0", "-1", "many"])
+def test_cli_rejects_invalid_worker_counts(value):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(
+            ["--stage", "structure", "--workbook", "book.xlsx", "--workers", value]
+        )
+
+    assert exc_info.value.code == 2
+
+
 def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
     captured = {}
 
@@ -164,6 +177,36 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "sheets": [],
     }
     assert json.loads(capsys.readouterr().out) == {"job_id": "job-one", "stage": "structure"}
+
+
+def test_cli_passes_worker_override_to_service(monkeypatch, capsys):
+    captured = {}
+
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(path, **kwargs):
+            return FakeTableAgentService()
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return {"stage": kwargs["stage"]}
+
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+
+    result = cli.main(
+        [
+            "--stage",
+            "structure",
+            "--workbook",
+            "book.xlsx",
+            "--max-workers",
+            "12",
+        ]
+    )
+
+    assert result == 0
+    assert captured["max_workers"] == 12
+    assert json.loads(capsys.readouterr().out) == {"stage": "structure"}
 
 
 def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeypatch, capsys):

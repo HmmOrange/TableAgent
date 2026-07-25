@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +72,8 @@ class TableAgentService:
         )
         self._llm_client = llm_client
         self._layout_vlm_client = layout_vlm_client
+        self._llm_client_injected = llm_client is not None
+        self._layout_vlm_client_injected = layout_vlm_client is not None
         self._embedding_client = embedding_client
         self._embedding_model: str | None = None
         self.llm_profile = llm_profile or "table_agent"
@@ -95,10 +98,12 @@ class TableAgentService:
         embed: bool = False,
         sheets: Iterable[str] = (),
         qa_max_replans: int | None = None,
+        max_workers: int | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
+        worker_count = self._resolve_max_workers(max_workers)
         if qa_max_replans is not None and qa_max_replans < 0:
             raise ValueError("qa_max_replans must be greater than or equal to 0")
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
@@ -124,31 +129,69 @@ class TableAgentService:
                 normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
                 self._validate_sheet_filters(normalized, selected_sheets)
 
-                table_path = ";".join(str(item["path"]) for item in normalized)
-                workbook_identities = self._workbook_identities(normalized)
-                base_sample = self._sample(
-                    sample_id=f"{run_id}-structure",
-                    question=query_list[0] if query_list else "Generate workbook structure",
-                    table_path=table_path,
-                    workbook_names=[item["name"] for item in normalized],
-                    selected_sheets=selected_sheets,
-                    workbook_identities=workbook_identities,
-                )
                 structures: list[dict[str, Any]] = []
                 answers: list[dict[str, Any]] = []
                 source_dir = workspace_dir / "structure"
+                table_path = ";".join(str(item["path"]) for item in normalized)
+                workbook_identities = self._workbook_identities(normalized)
 
-                pipeline = self.pipeline_factory(
-                    llm_client=self._answer_client(),
-                    layout_vlm_client=self._layout_client(),
-                    config=self._pipeline_config(
-                        "structure",
-                        output_dir,
-                        source_dir,
-                        embed=False,
-                    ),
-                )
-                records = pipeline.verify_samples([base_sample], force=True)
+                if worker_count == 1:
+                    base_sample = self._sample(
+                        sample_id=f"{run_id}-structure",
+                        question=query_list[0] if query_list else "Generate workbook structure",
+                        table_path=table_path,
+                        workbook_names=[item["name"] for item in normalized],
+                        selected_sheets=selected_sheets,
+                        workbook_identities=workbook_identities,
+                    )
+                    pipeline = self.pipeline_factory(
+                        llm_client=self._answer_client(),
+                        layout_vlm_client=self._layout_client(),
+                        config=self._pipeline_config(
+                            "structure",
+                            output_dir,
+                            source_dir,
+                            embed=False,
+                            max_workers=worker_count,
+                        ),
+                    )
+                    records = pipeline.verify_samples([base_sample], force=True)
+                else:
+                    structure_samples = []
+                    for workbook_index, item in enumerate(normalized, start=1):
+                        identity = self._workbook_identities([item])
+                        for sheet_index, sheet_name in enumerate(
+                            self._selected_sheet_names(item["path"], selected_sheets),
+                            start=1,
+                        ):
+                            structure_samples.append(
+                                self._sample(
+                                    sample_id=(
+                                        f"{run_id}-structure-{workbook_index}-{sheet_index}-"
+                                        f"{safe_name(sheet_name)}"
+                                    ),
+                                    question=(
+                                        query_list[0]
+                                        if query_list
+                                        else "Generate workbook structure"
+                                    ),
+                                    table_path=str(item["path"]),
+                                    workbook_names=[item["name"]],
+                                    selected_sheets=(sheet_name,),
+                                    workbook_identities=identity,
+                                )
+                            )
+                    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                        record_groups = executor.map(
+                            lambda sample: self._verify_structure_sample(
+                                sample,
+                                output_dir=output_dir,
+                                source_dir=source_dir,
+                                max_workers=worker_count,
+                            ),
+                            structure_samples,
+                        )
+                        records = [record for group in record_groups for record in group]
                 structures = self._structure_results(
                     records,
                     normalized,
@@ -172,23 +215,46 @@ class TableAgentService:
                         )
                         for index, query in enumerate(query_list, start=1)
                     ]
-                    pipeline = self.pipeline_factory(
-                        llm_client=self._answer_client(),
-                        layout_vlm_client=None,
-                        config=self._pipeline_config(
-                            "qa",
-                            output_dir,
-                            source_dir,
-                            embed=False,
-                            qa_max_replans=qa_max_replans,
-                        ),
-                    )
-                    pipeline.prepare_samples(samples)
-                    for sample in samples:
-                        output = pipeline.run(sample)
-                        answers.append(self._answer_result(sample.question, output, normalized))
+                    if worker_count == 1:
+                        pipeline = self.pipeline_factory(
+                            llm_client=self._answer_client(),
+                            layout_vlm_client=None,
+                            config=self._pipeline_config(
+                                "qa",
+                                output_dir,
+                                source_dir,
+                                embed=False,
+                                qa_max_replans=qa_max_replans,
+                                max_workers=worker_count,
+                            ),
+                        )
+                        pipeline.prepare_samples(samples)
+                        for sample in samples:
+                            output = pipeline.run(sample)
+                            answers.append(self._answer_result(sample.question, output, normalized))
+                    else:
+                        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                            outputs = executor.map(
+                                lambda sample: self._run_qa_sample(
+                                    sample,
+                                    output_dir=output_dir,
+                                    source_dir=source_dir,
+                                    qa_max_replans=qa_max_replans,
+                                    max_workers=worker_count,
+                                ),
+                                samples,
+                            )
+                            answers = [
+                                self._answer_result(sample.question, output, normalized)
+                                for sample, output in zip(samples, outputs)
+                            ]
 
-                schema_artifacts, metadata_artifacts, retrieval_records = self._build_workbook_artifacts(
+                (
+                    schema_artifacts,
+                    metadata_artifacts,
+                    retrieval_records,
+                    retrieval_artifacts,
+                ) = self._build_workbook_artifacts(
                     normalized,
                     output_dir,
                     embed=embed,
@@ -204,6 +270,7 @@ class TableAgentService:
                     "schema_artifacts": schema_artifacts,
                     "metadata_artifacts": metadata_artifacts,
                     "retrieval_records": retrieval_records,
+                    "retrieval_artifacts": retrieval_artifacts,
                     "answers": answers,
                     "artifacts": self._artifact_paths(output_dir) if persist else [],
                 }
@@ -228,6 +295,7 @@ class TableAgentService:
         qa_max_replans: int | None = None,
         qa_enable_final_review: bool | None = None,
         mode: str = "thinking",
+        max_workers: int | None = None,
     ) -> dict[str, Any]:
         """Answer from ingestion-time verified structures without running layout extraction."""
         normalized_query = str(query).strip()
@@ -237,6 +305,7 @@ class TableAgentService:
             raise ValueError("qa_max_replans must be greater than or equal to 0")
         if mode not in {"instant", "thinking"}:
             raise ValueError("Indexed QA mode must be instant or thinking")
+        worker_count = self._resolve_max_workers(max_workers)
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
         if not workbook_list:
             raise ValueError("At least one workbook is required")
@@ -253,6 +322,7 @@ class TableAgentService:
                 qa_max_replans=qa_max_replans,
                 qa_enable_final_review=qa_enable_final_review,
                 mode=mode,
+                max_workers=worker_count,
             )
 
         run_id = new_job_id()
@@ -292,6 +362,7 @@ class TableAgentService:
                     embed=False,
                     qa_max_replans=qa_max_replans,
                     mode=mode,
+                    max_workers=worker_count,
                 ),
             )
             group_answers: list[dict[str, Any]] = []
@@ -598,6 +669,7 @@ class TableAgentService:
         qa_max_replans: int | None,
         qa_enable_final_review: bool | None,
         mode: str,
+        max_workers: int,
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
@@ -644,6 +716,7 @@ class TableAgentService:
                     embed=False,
                     qa_max_replans=qa_max_replans,
                     mode=mode,
+                    max_workers=max_workers,
                 ),
             )
             responses = []
@@ -937,6 +1010,90 @@ class TableAgentService:
             )
         return self._layout_vlm_client
 
+    def _worker_client(self, kind: Literal["llm", "vlm"]) -> tuple[Any, bool]:
+        """Return an isolated model client for a concurrent pipeline task."""
+        if kind == "llm":
+            if self._llm_client_injected:
+                return self._llm_client, False
+            return create_model_client(self.config, kind="llm", profile=self.llm_profile), True
+        if self._layout_vlm_client_injected:
+            return self._layout_vlm_client, False
+        return create_model_client(self.config, kind="vlm", profile=self.vlm_profile), True
+
+    @staticmethod
+    def _close_worker_client(client: Any, owned: bool) -> None:
+        if owned:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+    def _verify_structure_sample(
+        self,
+        sample: EvalSample,
+        *,
+        output_dir: Path,
+        source_dir: Path,
+        max_workers: int,
+    ) -> list[Any]:
+        llm_client, llm_owned = self._worker_client("llm")
+        layout_client = None
+        layout_owned = False
+        try:
+            layout_client, layout_owned = self._worker_client("vlm")
+            pipeline = self.pipeline_factory(
+                llm_client=llm_client,
+                layout_vlm_client=layout_client,
+                config=self._pipeline_config(
+                    "structure",
+                    output_dir,
+                    source_dir,
+                    embed=False,
+                    max_workers=max_workers,
+                ),
+            )
+            return pipeline.verify_samples([sample], force=True)
+        finally:
+            self._close_worker_client(llm_client, llm_owned)
+            self._close_worker_client(layout_client, layout_owned)
+
+    def _run_qa_sample(
+        self,
+        sample: EvalSample,
+        *,
+        output_dir: Path,
+        source_dir: Path,
+        qa_max_replans: int | None,
+        max_workers: int,
+    ) -> PipelineOutput:
+        llm_client, llm_owned = self._worker_client("llm")
+        try:
+            pipeline = self.pipeline_factory(
+                llm_client=llm_client,
+                layout_vlm_client=None,
+                config=self._pipeline_config(
+                    "qa",
+                    output_dir,
+                    source_dir,
+                    embed=False,
+                    qa_max_replans=qa_max_replans,
+                    max_workers=max_workers,
+                ),
+            )
+            pipeline.prepare_samples([sample])
+            return pipeline.run(sample)
+        finally:
+            self._close_worker_client(llm_client, llm_owned)
+
+    def _resolve_max_workers(self, override: int | None) -> int:
+        value = self.max_workers if override is None else override
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_workers must be a positive integer") from exc
+        if resolved < 1:
+            raise ValueError("max_workers must be a positive integer")
+        return resolved
+
     def _pipeline_config(
         self,
         phase: Stage,
@@ -947,6 +1104,7 @@ class TableAgentService:
         qa_max_replans: int | None = None,
         retrieval_rerank_with_llm: bool | None = None,
         mode: str | None = None,
+        max_workers: int | None = None,
     ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
         agent_config.update(
@@ -959,6 +1117,8 @@ class TableAgentService:
                 "embed_retrieval_cards": bool(embed),
             }
         )
+        if max_workers is not None:
+            agent_config["max_workers"] = int(max_workers)
         for key in ("models", "vlm_models", "llm_providers", "embedding"):
             if key in self.config:
                 agent_config[key] = self.config[key]
@@ -1016,10 +1176,16 @@ class TableAgentService:
         embed: bool,
         selected_sheets: tuple[str, ...],
         include_artifact_paths: bool,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         schema_artifacts: list[dict[str, Any]] = []
         metadata_artifacts: list[dict[str, Any]] = []
         retrieval_records: list[dict[str, Any]] = []
+        retrieval_artifacts: list[dict[str, Any]] = []
         embedding_client = None
         embedding_model = DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL
         if embed:
@@ -1112,6 +1278,14 @@ class TableAgentService:
                     embedding_client=embedding_client,
                     embedding_model=embedding_model,
                 )
+            if embed and workbook_retrieval_records:
+                retrieval_path = job_workbook_dir / "retrieval_cards.pkl"
+                retrieval_artifact: dict[str, Any] = {"workbook": item["name"]}
+                if include_artifact_paths:
+                    retrieval_artifact["artifact"] = retrieval_path.relative_to(job_dir).as_posix()
+                else:
+                    retrieval_artifact["retrieval_cards"] = workbook_retrieval_records
+                retrieval_artifacts.append(retrieval_artifact)
             for record in workbook_retrieval_records:
                 sheet_name = str(record.get("sheet") or "").strip()
                 retrieval_records.append(
@@ -1136,7 +1310,7 @@ class TableAgentService:
                 metadata_record["metadata"] = workbook_metadata
             metadata_artifacts.append(metadata_record)
 
-        return schema_artifacts, metadata_artifacts, retrieval_records
+        return schema_artifacts, metadata_artifacts, retrieval_records, retrieval_artifacts
 
     @staticmethod
     def _sample(

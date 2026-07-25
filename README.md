@@ -45,6 +45,7 @@ Edit `config.yaml` before running TableAgent. The important sections are:
 | `vlm.provider` | Name of the default profile under `vlm_models` |
 | `table_agent.libreoffice_path` | LibreOffice executable path when it is not on `PATH` |
 | `service.root_dir` | Root directory for saved CLI run output |
+| `service.max_workers` | Default number of concurrent structure and QA workers. |
 
 The profile names must match. For example, `llm.provider: answer_model` selects
 `models.answer_model`, while `vlm.provider: layout_model` selects
@@ -144,7 +145,8 @@ The returned `retrieval_records` are ready for an external index. Sheet- and
 table-level records include the sheet's `structure_yaml`, while every record also
 includes the workbook schema and metadata. Store the record unchanged so query-time
 hybrid retrieval can reuse the ingestion embedding instead of embedding each card
-again.
+again. Persisted CLI results also expose the workbook-level pickle under
+`retrieval_artifacts` and include it in the `artifacts` list.
 
 The CLI result includes per-sheet records in `structures` and workbook-level paths
 in `schema_artifacts` and `metadata_artifacts`. A schema embeds the parsed structure
@@ -185,6 +187,7 @@ Summary:
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
 | `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
 | `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
+| `--workers N` | Overrides `service.max_workers` for this run; `--max-workers` is an alias. |
 | `--delete-job ID` | Deletes one saved run directory. Repeat for multiple run IDs. |
 | `--delete-all-jobs` | Deletes every saved run directory under `service.root_dir`. |
 
@@ -192,6 +195,21 @@ Worksheet matching is exact and case-sensitive. When multiple workbooks are
 provided, every requested worksheet must exist in every workbook. Metadata always
 lists every worksheet in the workbook, even when `--sheet` limits structure and
 schema processing.
+
+Set `--workers` above `1` to process independent workbook sheets concurrently during
+structure generation and independent queries concurrently during QA. Each worker
+uses its own pipeline and, for configured model clients, its own HTTP session.
+LibreOffice runs with a separate temporary user profile per render. PDFium remains
+isolated in one subprocess per concurrent render because its API is not thread-safe.
+Use `--workers 1` to retain serial execution.
+
+```bash
+uv run table-agent --config config.yaml --stage all \
+  --workbook sample/QA_sample.xlsx \
+  --query "What is the total revenue?" \
+  --query "Which region is largest?" \
+  --workers 8
+```
 
 For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
 
@@ -257,6 +275,7 @@ The CLI prints a JSON result with the answer and supporting execution details:
       "artifact": "workbooks/QA_sample.xlsx/metadata.json"
     }
   ],
+  "retrieval_artifacts": [],
   "answers": [
     {
       "query": "What is the total revenue?",
@@ -342,6 +361,33 @@ curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
 Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
 Ingestion always generates workbook schema and metadata artifacts. Sheet list
 entries may contain comma-separated names.
+
+When `embed` is `true`, the response also includes one aggregate
+`retrieval_artifacts` entry per workbook. Serving is ephemeral, so embedded records
+are returned inline instead of as a temporary file:
+
+```json
+{
+  "retrieval_artifacts": [
+    {
+      "workbook": "QA_sample.xlsx",
+      "retrieval_cards": [
+        {
+          "id": "QA_sample.xlsx:metadata",
+          "embedding": {
+            "model": "BAAI/bge-m3",
+            "dimension": 1024,
+            "values": [0.0]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+The example vector is abbreviated; the actual `values` array contains the full
+embedding. With `embed` omitted or `false`, `retrieval_artifacts` is an empty list.
 
 For indexed QA, upload the selected workbook and send one query plus the retrieval
 records returned by ingestion (or a subset returned by your vector/metadata index):

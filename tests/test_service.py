@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pickle
 import re
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -171,6 +173,7 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert result["metadata_artifacts"] == [
         {"workbook": "book.xlsx", "artifact": "workbooks/book.xlsx/metadata.json"}
     ]
+    assert result["retrieval_artifacts"] == []
     assert [item["answer"] for item in result["answers"]] == [
         "answer: first question",
         "answer: second question",
@@ -180,6 +183,116 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "jobs").exists()
     assert not (service.root_dir / "inputs").exists()
     assert not (service.root_dir / "structure").exists()
+
+
+def test_service_runs_structure_and_qa_units_concurrently(tmp_path: Path):
+    state = {
+        "structure_active": 0,
+        "structure_max": 0,
+        "qa_active": 0,
+        "qa_max": 0,
+    }
+    state_lock = threading.Lock()
+    instances = []
+
+    def enter(phase: str) -> None:
+        with state_lock:
+            active_key = f"{phase}_active"
+            max_key = f"{phase}_max"
+            state[active_key] += 1
+            state[max_key] = max(state[max_key], state[active_key])
+
+    def leave(phase: str) -> None:
+        with state_lock:
+            state[f"{phase}_active"] -= 1
+
+    class ConcurrentPipeline:
+        def __init__(self, llm_client, layout_vlm_client, config):
+            self.config = config
+            instances.append(self)
+
+        def verify_samples(self, samples, force=False):
+            sample = samples[0]
+            workbook_path = Path(sample.table_path)
+            sheet_name = sample.raw["selected_sheets"][0]
+            enter("structure")
+            try:
+                time.sleep(0.08)
+                structure_dir = (
+                    Path(self.config["source_artifact_dir"])
+                    / workbook_path.stem
+                    / sheet_name
+                )
+                structure_dir.mkdir(parents=True, exist_ok=True)
+                structure_path = structure_dir / "structure.yaml"
+                structure_path.write_text(
+                    f"table1:\n  name: {workbook_path.stem}\n  headers: []\n",
+                    encoding="utf-8",
+                )
+                return [
+                    SimpleNamespace(
+                        workbook_path=workbook_path,
+                        sheet_name=sheet_name,
+                        structure_path=structure_path,
+                        status="good",
+                        cache_hit=False,
+                    )
+                ]
+            finally:
+                leave("structure")
+
+        def prepare_samples(self, samples):
+            pass
+
+        def run(self, sample):
+            enter("qa")
+            try:
+                time.sleep(0.08)
+                return PipelineOutput(
+                    sample_id=sample.sample_id,
+                    structured_table="table1: {}\n",
+                    predicted_answer=f"answer: {sample.question}",
+                    latency=0.08,
+                    token_usage={"prompt": 1, "completion": 1},
+                    metadata={
+                        "workbook_path": sample.table_path.split(";")[0],
+                        "workbook_sheets": ["Sheet"],
+                        "verification": {"status": "good"},
+                        "qa": {"success": True},
+                    },
+                )
+            finally:
+                leave("qa")
+
+    source = _multi_sheet_workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=ConcurrentPipeline,
+    )
+
+    result = service.run(
+        stage="all",
+        workbooks=[source],
+        queries=["first question", "second question"],
+        max_workers=2,
+        persist=False,
+    )
+
+    assert state["structure_max"] == 2
+    assert state["qa_max"] == 2
+    assert len(instances) == 5
+    assert all(instance.config["max_workers"] == 2 for instance in instances)
+    assert [(item["workbook"], item["sheet"]) for item in result["structures"]] == [
+        ("book.xlsx", "Summary"),
+        ("book.xlsx", "Detail"),
+        ("book.xlsx", "Archive"),
+    ]
+    assert [item["answer"] for item in result["answers"]] == [
+        "answer: first question",
+        "answer: second question",
+    ]
 
 
 def test_structure_stage_always_generates_schema_and_metadata(tmp_path: Path):
@@ -696,7 +809,7 @@ def test_service_normalizes_repeated_comma_separated_sheet_filters(tmp_path: Pat
     assert list(yaml.safe_load(schema_path.read_text(encoding="utf-8"))) == ["Summary", "Detail"]
 
 
-def test_ephemeral_service_run_returns_contents_without_persisting(tmp_path: Path):
+def test_ephemeral_service_run_returns_embedded_retrieval_cards_without_persisting(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")
     output_root = tmp_path / "output"
@@ -704,16 +817,46 @@ def test_ephemeral_service_run_returns_contents_without_persisting(tmp_path: Pat
         {"service": {"root_dir": str(output_root)}},
         llm_client=FakeSummaryClient(),
         layout_vlm_client=object(),
+        embedding_client=FakeEmbeddingClient(),
         pipeline_factory=FakePipeline,
     )
 
-    result = service.run(stage="structure", workbooks=[source], persist=False)
+    result = service.run(stage="structure", workbooks=[source], embed=True, persist=False)
 
     assert result["artifacts"] == []
     assert result["structures"][0]["artifact"] is None
     assert "table1" in result["schema_artifacts"][0]["schema"]
     assert result["metadata_artifacts"][0]["metadata"]["name"] == "book.xlsx"
+    retrieval = result["retrieval_artifacts"][0]
+    assert retrieval["workbook"] == "book.xlsx"
+    assert retrieval["retrieval_cards"]
+    for card in retrieval["retrieval_cards"]:
+        embedding = card["embedding"]
+        assert embedding["model"] == "test-embedding"
+        assert embedding["dimension"] == 2
+        assert len(embedding["values"]) == 2
     assert not output_root.exists()
+
+
+def test_persisted_service_run_returns_embedded_retrieval_artifact_path(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "output")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        embedding_client=FakeEmbeddingClient(),
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(stage="structure", workbooks=[source], embed=True, job_id="embedded")
+
+    retrieval = result["retrieval_artifacts"][0]
+    assert retrieval == {
+        "workbook": "book.xlsx",
+        "artifact": "workbooks/book.xlsx/retrieval_cards.pkl",
+    }
+    assert (service.root_dir / "embedded" / retrieval["artifact"]).is_file()
 
 
 def test_service_deletes_selected_or_all_saved_runs(tmp_path: Path):
