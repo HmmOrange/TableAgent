@@ -330,6 +330,40 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 
 
+def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+    config["table_agent"]["retrieval_rerank_with_llm"] = True
+    config["table_agent"]["retrieval_embedding_provider"] = "mock"
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+    )
+
+    selection = service.select_indexed_artifact(
+        query="name in the CV",
+        mode="instant",
+        artifacts=[
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Plan",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Equipment maintenance schedule and spare parts",
+                "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert selection["status"] == "no_evidence"
+    assert selection["document_id"] is None
+    assert selection["retrieval"]["selected_artifact_id"] is None
+    assert selection["retrieval"]["audit"][0]["selected"] is False
+
+
 def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")

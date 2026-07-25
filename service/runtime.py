@@ -507,16 +507,69 @@ class TableAgentService:
         )
         if selected_artifact is None:
             raise RuntimeError("Selected TableAgent artifact is missing from the candidate set")
+        retrieval = self._indexed_retrieval_payload(
+            candidate,
+            eligible_artifacts,
+        )
+        rejection_reason = self._indexed_rejection_reason(
+            candidate,
+            retrieval,
+            mode=mode,
+        )
+        if rejection_reason:
+            return {
+                "status": "no_evidence",
+                "selected_artifact_id": None,
+                "document_id": None,
+                "workbook": None,
+                "sheet": None,
+                "retrieval": {
+                    **retrieval,
+                    "document_id": None,
+                    "workbook": None,
+                    "sheet": None,
+                    "table_id": None,
+                    "table_name": None,
+                    "selected_artifact_id": None,
+                    "rejection_reason": rejection_reason,
+                    "audit": [
+                        {**row, "selected": False}
+                        for row in retrieval.get("audit", [])
+                    ],
+                },
+            }
         return {
+            "status": "selected",
             "selected_artifact_id": candidate.artifact_id,
             "document_id": str(selected_artifact.get("document_id") or ""),
             "workbook": candidate.workbook_path.name,
             "sheet": candidate.sheet_name,
-            "retrieval": self._indexed_retrieval_payload(
-                candidate,
-                eligible_artifacts,
-            ),
+            "retrieval": retrieval,
         }
+
+    @staticmethod
+    def _indexed_rejection_reason(
+        candidate: Any,
+        retrieval: dict[str, Any],
+        *,
+        mode: str,
+    ) -> str | None:
+        reranker = retrieval.get("reranker")
+        if isinstance(reranker, dict) and reranker.get("status") == "need_more":
+            return "The TableAgent reranker found no sufficiently relevant indexed table."
+        if mode != "instant":
+            return None
+
+        matched_count = len(candidate.matched_terms)
+        term_count = matched_count + len(candidate.missing_terms)
+        coverage = matched_count / term_count if term_count else 0.0
+        if (
+            candidate.lexical_score >= 2
+            or coverage >= 0.5
+            or (candidate.embedding_used and candidate.embedding_score >= 0.5)
+        ):
+            return None
+        return "No indexed table passed the instant-mode relevance threshold."
 
     def _run_indexed_qa_hybrid(
         self,
