@@ -109,9 +109,12 @@ Verified runtime evidence and code:
 Verified grouped-header structure:
 {grouped_headers}
 
+Expected output or acceptance criteria:
+{expected_output}
+
 Final answer:
 {final_answer}
 
 Verify coverage, exact target identity, header-to-value ownership, grouped-header child coverage, aggregation
-correctness, and grounding.
+correctness, grounding, and compliance with the expected output.
 """

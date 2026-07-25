@@ -292,6 +292,8 @@ class TableAgentService:
         query: str,
         workbooks: Iterable[str | Path],
         artifacts: Iterable[dict[str, Any]],
+        answer_instruction: str | None = None,
+        expected_output: str | None = None,
         qa_max_replans: int | None = None,
         qa_enable_final_review: bool | None = None,
         mode: str = "thinking",
@@ -301,6 +303,9 @@ class TableAgentService:
         normalized_query = str(query).strip()
         if not normalized_query:
             raise ValueError("At least one non-empty query is required for indexed QA")
+        normalized_instruction = str(answer_instruction or "").strip()
+        normalized_expected_output = str(expected_output or "").strip()
+        qa_question = _indexed_qa_question(normalized_query, normalized_instruction)
         if qa_max_replans is not None and qa_max_replans < 0:
             raise ValueError("qa_max_replans must be greater than or equal to 0")
         if mode not in {"instant", "thinking"}:
@@ -317,6 +322,8 @@ class TableAgentService:
         if self.pipeline_factory is TableAgentPipeline:
             return self._run_indexed_qa_hybrid(
                 normalized_query=normalized_query,
+                answer_instruction=normalized_instruction,
+                expected_output=normalized_expected_output,
                 workbook_list=workbook_list,
                 artifact_list=artifact_list,
                 qa_max_replans=qa_max_replans,
@@ -397,17 +404,18 @@ class TableAgentService:
                 fallback_prompt = (
                     "Answer the spreadsheet question using only the indexed, verified TableAgent context. "
                     "Do not invent values that are absent from the context.\n\n"
-                    f"Question: {normalized_query}\n\n"
+                    f"{_indexed_qa_constraints(normalized_query, normalized_instruction, normalized_expected_output)}\n\n"
                     f"Retrieved cards:\n{cards}"
                 )
                 answer_response, qa_info = pipeline._run_verified_qa(
-                    question=normalized_query,
+                    question=qa_question,
                     structure_path=structures[0][1],
                     workbook_path=Path(by_name[workbook_name]["path"]),
                     qa_artifact_dir=output_dir / "qa" / f"group-{group_index}",
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
                     related_structure_paths=[path for _, path in structures[1:]],
+                    expected_output=normalized_expected_output,
                     enable_final_answer_review=(
                         True
                         if qa_enable_final_review is None
@@ -451,7 +459,8 @@ class TableAgentService:
                 synthesis_prompt = (
                     "Combine the independently verified workbook answers into one direct answer to the user. "
                     "Preserve disagreements and workbook attribution, and do not add facts not present in the evidence.\n\n"
-                    f"Question: {normalized_query}\n\nEvidence:\n{evidence}"
+                    f"{_indexed_qa_constraints(normalized_query, normalized_instruction, normalized_expected_output)}"
+                    f"\n\nEvidence:\n{evidence}"
                 )
                 synthesis_response = pipeline.qa_agent.run(prompt=synthesis_prompt)
                 final_answer = synthesis_response.content
@@ -477,6 +486,8 @@ class TableAgentService:
                 "answers": [
                     {
                         "query": normalized_query,
+                        "answer_instruction": normalized_instruction,
+                        "expected_output": normalized_expected_output,
                         "answer": final_answer,
                         "workbook": selected_workbooks[0] if len(selected_workbooks) == 1 else "",
                         "workbooks": selected_workbooks,
@@ -664,6 +675,8 @@ class TableAgentService:
         self,
         *,
         normalized_query: str,
+        answer_instruction: str,
+        expected_output: str,
         workbook_list: list[Path],
         artifact_list: list[dict[str, Any]],
         qa_max_replans: int | None,
@@ -673,6 +686,7 @@ class TableAgentService:
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
+        qa_question = _indexed_qa_question(normalized_query, answer_instruction)
         with tempfile.TemporaryDirectory(
             prefix=f"table-agent-indexed-{safe_name(run_id)}-"
         ) as workspace_text:
@@ -819,17 +833,18 @@ class TableAgentService:
             fallback_prompt = (
                 "Answer the spreadsheet question using only the indexed, verified "
                 "TableAgent context. Do not invent values absent from the context.\n\n"
-                f"Question: {normalized_query}\n\n"
+                f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}\n\n"
                 f"Selected retrieval card:\n{selected_card}"
             )
             answer_response, qa_info = pipeline._run_verified_qa(
-                question=normalized_query,
+                question=qa_question,
                 structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=output_dir / "qa",
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
                 related_structure_paths=related_structure_paths,
+                expected_output=expected_output,
                 enable_final_answer_review=(
                     True
                     if qa_enable_final_review is None
@@ -861,6 +876,8 @@ class TableAgentService:
                 "answers": [
                     {
                         "query": normalized_query,
+                        "answer_instruction": answer_instruction,
+                        "expected_output": expected_output,
                         "answer": answer_response.content,
                         "workbook": selected_workbook,
                         "workbooks": [selected_workbook],
@@ -1533,6 +1550,25 @@ def _validate_stage(stage: str) -> Stage:
     if value not in {"structure", "qa", "all"}:
         raise ValueError("stage must be one of: structure, qa, all")
     return value  # type: ignore[return-value]
+
+
+def _indexed_qa_question(query: str, answer_instruction: str) -> str:
+    if not answer_instruction:
+        return query
+    return f"{query}\n\nAdditional answer instructions:\n{answer_instruction}"
+
+
+def _indexed_qa_constraints(
+    query: str,
+    answer_instruction: str,
+    expected_output: str,
+) -> str:
+    sections = [f"Question: {query}"]
+    if answer_instruction:
+        sections.append(f"Answer instructions: {answer_instruction}")
+    if expected_output:
+        sections.append(f"Expected output: {expected_output}")
+    return "\n\n".join(sections)
 
 
 def _validate_queries(queries: Iterable[str], *, required: bool) -> list[str]:

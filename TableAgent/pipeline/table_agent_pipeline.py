@@ -648,6 +648,7 @@ class TableAgentPipeline(BasePipeline):
         fallback_text_prompt: str | None = None,
         related_structure_paths: list[Path] | None = None,
         excluded_sheet_names: list[str] | None = None,
+        expected_output: str = "",
         enable_final_answer_review: bool = False,
     ) -> tuple[LLMResponse, dict[str, Any]]:
         """Run the notebook QA phase against the persisted verified structure."""
@@ -719,7 +720,8 @@ class TableAgentPipeline(BasePipeline):
                 table_retriever=self.table_retriever,
                 related_structure_paths=related_structure_paths,
             ) as runner:
-            result = runner.run(question)
+            run_kwargs = {"expected_output": expected_output} if expected_output else {}
+            result = runner.run(question, **run_kwargs)
             qa_token_usage = result.token_usage
             llm_calls = list(getattr(result, "llm_calls", []) or [])
             capped_call_count = sum(

@@ -18,7 +18,15 @@ class ReviewFinalAnswerAction:
         self.env = env
         self.llm_client = llm_client
 
-    def run(self, *, question: str, plan: list[Any], outputs: list[Any], final_answer: str) -> ReviewResult:
+    def run(
+        self,
+        *,
+        question: str,
+        plan: list[Any],
+        outputs: list[Any],
+        final_answer: str,
+        expected_output: str = "",
+    ) -> ReviewResult:
         if self.llm_client is None:
             return ReviewResult(accepted=True, feedback="Final review skipped without an LLM client.", score=1.0)
 
@@ -50,6 +58,10 @@ class ReviewFinalAnswerAction:
             evidence=evidence,
             grouped_headers=grouped_headers,
             final_answer=final_answer,
+            expected_output=(
+                expected_output.strip()
+                or "No additional output-shape requirement was supplied."
+            ),
         )
         self.env.logger.log_event("final_answer_review_prompt", {
             "prompt": prompt,

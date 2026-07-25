@@ -43,6 +43,8 @@ class UploadJobRequest(BaseModel):
     qa_enable_final_review: bool | None = None
     mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    answer_instruction: str | None = None
+    expected_output: str | None = None
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
@@ -51,6 +53,10 @@ class UploadJobRequest(BaseModel):
             queries = [str(query).strip() for query in self.queries if str(query).strip()]
             if len(queries) != 1:
                 raise ValueError("Indexed QA requires exactly one non-empty query")
+        elif self.answer_instruction or self.expected_output:
+            raise ValueError(
+                "answer_instruction and expected_output require indexed QA artifacts"
+            )
         return self
 
 
@@ -170,6 +176,8 @@ def create_app(
                         query=request.queries[0],
                         workbooks=saved,
                         artifacts=request.artifacts,
+                        answer_instruction=request.answer_instruction,
+                        expected_output=request.expected_output,
                         qa_max_replans=request.qa_max_replans,
                         qa_enable_final_review=request.qa_enable_final_review,
                         mode=request.mode,

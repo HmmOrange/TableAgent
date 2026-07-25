@@ -211,7 +211,7 @@ class TableQARunner:
         )
         self.final_answer_review = ReviewFinalAnswerAction(self.env, llm_client=self.llm_client)
 
-    def run(self, question: str) -> QAResult:
+    def run(self, question: str, *, expected_output: str = "") -> QAResult:
         event_start_index = len(self.env.logger.events)
         run_id = self._make_run_id(question)
         run_dir = self.qa_artifact_root / run_id
@@ -323,6 +323,7 @@ class TableQARunner:
                         plan=plan,
                         outputs=attempt_outputs,
                         final_answer=final_answer,
+                        expected_output=expected_output,
                     )
                     self.env.logger.log_event("final_answer_review", {
                         "accepted": final_review.accepted,

@@ -49,6 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--answer-instruction",
+        help=(
+            "Additional analytical or answer instructions for indexed QA. "
+            "This does not affect retrieval ranking."
+        ),
+    )
+    parser.add_argument(
+        "--expected-output",
+        help="Expected indexed-QA answer shape or acceptance criteria for final review.",
+    )
+    parser.add_argument(
         "--sheet",
         action="append",
         default=[],
@@ -101,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         or args.embed
         or args.sheet
         or args.artifacts
+        or args.answer_instruction
+        or args.expected_output
         or args.max_workers is not None
     ):
         parser.error("cleanup flags cannot be combined with workbook processing flags")
@@ -116,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--sheet cannot be combined with indexed --artifacts")
     if args.artifacts and len([query for query in args.query if query.strip()]) != 1:
         parser.error("Indexed QA with --artifacts requires exactly one non-empty --query")
+    if (args.answer_instruction or args.expected_output) and not args.artifacts:
+        parser.error("--answer-instruction and --expected-output require indexed --artifacts")
 
     try:
         service = TableAgentService.from_config(
@@ -130,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
                 "query": next(query for query in args.query if query.strip()),
                 "workbooks": args.workbook,
                 "artifacts": load_artifacts(args.artifacts),
+                "answer_instruction": args.answer_instruction,
+                "expected_output": args.expected_output,
             }
             if args.max_workers is not None:
                 run_kwargs["max_workers"] = args.max_workers

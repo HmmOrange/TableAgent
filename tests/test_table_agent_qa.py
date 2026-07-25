@@ -684,6 +684,30 @@ def test_runner_with_fake_llm_and_logging():
     assert complete_event["final_answer"] == "82.5"
 
 
+def test_final_answer_review_receives_expected_output():
+    from types import SimpleNamespace
+
+    from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
+
+    fake_llm = FakeLLM({})
+    env = SimpleNamespace(
+        logger=SimpleNamespace(log_event=lambda event_type, data: None),
+        operators=None,
+        execution_namespace={},
+    )
+
+    result = ReviewFinalAnswerAction(env, llm_client=fake_llm).run(
+        question="What is the total?",
+        plan=[],
+        outputs=[],
+        final_answer="42",
+        expected_output="Return JSON with a numeric total field.",
+    )
+
+    assert result.accepted is True
+    assert "Return JSON with a numeric total field." in fake_llm.calls[0][0]
+
+
 def test_runner_persists_per_run_artifacts(tmp_path):
     runner = TableQARunner(
         STRUCTURE_PATH,
