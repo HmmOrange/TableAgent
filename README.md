@@ -310,6 +310,7 @@ run directory.
 | `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
 | `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
 | `--artifacts PATH` | Runs indexed QA from `run.json`, JSON/JSONL records, or a trusted `retrieval_cards.pkl`. Repeat for multiple files; requires `--stage qa`. |
+| `--retrieval-top-k N` | Selects up to `N` distinct workbooks for indexed QA. Defaults to `1`. |
 | `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
 | `--llm NAME` | Overrides the configured answer LLM profile. |
 
@@ -323,6 +324,13 @@ uv run table-agent --config config.yaml --stage qa \
   --query "What is the total revenue?" \
   --artifacts outputs/<ingestion-run>/run.json
 ```
+
+Repeat `--workbook` and set `--retrieval-top-k` for questions that require joins
+across indexed workbooks. TableAgent retrieves one verified sheet from each selected
+workbook, builds a temporary workbook containing those sheets, and runs one shared
+notebook QA pass so values found in one source can filter or join another source.
+The temporary workbook is deleted after the request; the response keeps the original
+workbook and sheet provenance.
 
 You can instead pass the workbook-level
 `outputs/<ingestion-run>/workbooks/<workbook>/retrieval_cards.pkl` produced by

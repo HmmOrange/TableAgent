@@ -4,14 +4,16 @@ import hashlib
 import json
 import shutil
 import tempfile
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Literal
 
 import openpyxl
 import pandas as pd
+import yaml
 
 from service.clients import create_model_client
 from TableAgent.artifacts import (
@@ -20,9 +22,12 @@ from TableAgent.artifacts import (
     build_workbook_schema,
     copy_artifact_tree,
     sheet_artifact_dir,
+    workbook_artifact_dir,
     write_sheet_retrieval_cards,
     write_workbook_retrieval_cards,
-    workbook_artifact_dir,
+)
+from TableAgent.artifacts.retrieval_cards import (
+    DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL,
 )
 from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
@@ -31,11 +36,7 @@ from TableAgent.pipeline.common import safe_name
 from TableAgent.pipeline.retrieval.embeddings import (
     OpenAICompatibleEmbeddingClient,
 )
-from TableAgent.artifacts.retrieval_cards import (
-    DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL,
-)
 from TableAgent.schema import EvalSample
-
 
 Stage = Literal["structure", "qa", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
@@ -784,6 +785,129 @@ class TableAgentService:
                 for response in responses
             )
             multi_workbook = len(selected_candidates) > 1
+            if multi_workbook:
+                bundle_path, bundle_structure_path, bundle_groups = (
+                    self._build_indexed_workbook_bundle(
+                        workspace_dir=workspace_dir,
+                        selected_candidates=selected_candidates,
+                        eligible_artifacts=eligible_artifacts,
+                        workbook_paths=workbook_paths,
+                    )
+                )
+                cards = "\n\n".join(
+                    str(artifact.get("retrieval_card") or "").strip()
+                    for artifact in eligible_artifacts
+                    if str(
+                        artifact.get("upload_name")
+                        or artifact.get("document_name")
+                        or artifact.get("workbook")
+                        or ""
+                    ).strip()
+                    in selected_workbooks
+                    and str(artifact.get("retrieval_card") or "").strip()
+                )
+                fallback_prompt = (
+                    "Answer the spreadsheet question using only the indexed, verified "
+                    "TableAgent context. Do not invent values absent from the context.\n\n"
+                    f"{_indexed_qa_constraints(normalized_query, answer_instruction, expected_output)}\n\n"
+                    f"Selected retrieval cards:\n{cards}"
+                )
+                answer_response, qa_info = pipeline._run_verified_qa(
+                    question=qa_question,
+                    structure_path=bundle_structure_path,
+                    workbook_path=bundle_path,
+                    qa_artifact_dir=output_dir / "qa" / "multi-workbook",
+                    fallback_prompt=fallback_prompt,
+                    fallback_text_prompt=fallback_prompt,
+                    expected_output=expected_output,
+                    enable_final_answer_review=(
+                        True
+                        if qa_enable_final_review is None
+                        else qa_enable_final_review
+                    ),
+                )
+                total_prompt_tokens += int(
+                    getattr(answer_response, "prompt_tokens", 0) or 0
+                )
+                total_completion_tokens += int(
+                    getattr(answer_response, "completion_tokens", 0) or 0
+                )
+                public_qa_info = dict(qa_info)
+                public_qa_info.pop("artifacts", None)
+                public_qa_info["execution_mode"] = "bundled_multi_workbook"
+                retrieval_groups = []
+                for candidate, bundle_group in zip(
+                    selected_candidates, bundle_groups, strict=True
+                ):
+                    retrieval_groups.append(
+                        {
+                            "workbook": candidate.workbook_path.name,
+                            "sheets": bundle_group["sheets"],
+                            "bundled_sheets": bundle_group["bundled_sheets"],
+                            "candidates": [
+                                {
+                                    "id": candidate.artifact_id,
+                                    "score": float(candidate.score or 0.0),
+                                    "sheet": candidate.sheet_name,
+                                    "table_id": candidate.table_id or "",
+                                    "retrieval_type": candidate.retrieval_type
+                                    or "data",
+                                    "retrieval_level": candidate.retrieval_level
+                                    or "table",
+                                }
+                            ],
+                            "retrieval": self._indexed_retrieval_payload(
+                                candidate,
+                                eligible_artifacts,
+                            ),
+                        }
+                    )
+                selected_workbook_names = [
+                    candidate.workbook_path.name
+                    for candidate in selected_candidates
+                ]
+                selected_sheet_names = list(
+                    dict.fromkeys(
+                        sheet
+                        for group in bundle_groups
+                        for sheet in group["sheets"]
+                    )
+                )
+                return {
+                    "job_id": run_id,
+                    "stage": "qa",
+                    "workbooks": selected_workbook_names,
+                    "structures": [],
+                    "schema_artifacts": [],
+                    "metadata_artifacts": [],
+                    "retrieval_records": [],
+                    "answers": [
+                        {
+                            "query": normalized_query,
+                            "answer_instruction": answer_instruction,
+                            "expected_output": expected_output,
+                            "answer": answer_response.content,
+                            "workbook": "",
+                            "workbooks": selected_workbook_names,
+                            "sheets": selected_sheet_names,
+                            "retrieval": {
+                                "mode": "table_agent_hybrid_top_k",
+                                "top_k_requested": retrieval_top_k,
+                                "selected_workbooks": selected_workbook_names,
+                                "workbook_count": len(selected_workbook_names),
+                                "candidate_count": len(eligible_artifacts),
+                                "groups": retrieval_groups,
+                            },
+                            "qa": public_qa_info,
+                            "token_usage": {
+                                "prompt": total_prompt_tokens,
+                                "completion": total_completion_tokens,
+                            },
+                        }
+                    ],
+                    "artifacts": [],
+                }
+
             for group_index, candidate in enumerate(selected_candidates, start=1):
                 selected_workbook = candidate.workbook_path.name
                 selected_artifact = next(
@@ -1078,6 +1202,147 @@ class TableAgentService:
             ],
             "reranker": retrieval_trace,
         }
+
+    @staticmethod
+    def _build_indexed_workbook_bundle(
+        *,
+        workspace_dir: Path,
+        selected_candidates: list[Any],
+        eligible_artifacts: list[dict[str, Any]],
+        workbook_paths: dict[str, Path],
+    ) -> tuple[Path, Path, list[dict[str, Any]]]:
+        """Combine selected workbook sheets so verified QA can execute cross-workbook joins."""
+        bundle_path = workspace_dir / "selected-workbooks.xlsx"
+        structure_path = workspace_dir / "selected-workbooks.yaml"
+        bundle = openpyxl.Workbook()
+        bundle.remove(bundle.active)
+        used_sheet_names: set[str] = set()
+        used_table_ids: set[str] = set()
+        combined_structure: dict[str, Any] = {}
+        combined_relations: dict[str, list[dict[str, Any]]] = {}
+        bundle_groups: list[dict[str, Any]] = []
+
+        for group_index, candidate in enumerate(selected_candidates, start=1):
+            workbook_name = candidate.workbook_path.name
+            workbook_path = workbook_paths[workbook_name]
+            workbook_artifacts = [
+                artifact
+                for artifact in eligible_artifacts
+                if str(
+                    artifact.get("upload_name")
+                    or artifact.get("document_name")
+                    or artifact.get("workbook")
+                    or ""
+                ).strip()
+                == workbook_name
+                and str(
+                    artifact.get("sheet") or artifact.get("sheet_name") or ""
+                ).strip()
+                == candidate.sheet_name
+                and str(artifact.get("structure_yaml") or "").strip()
+            ]
+            sheet_artifacts: dict[str, dict[str, Any]] = {}
+            for artifact in workbook_artifacts:
+                sheet_name = str(
+                    artifact.get("sheet") or artifact.get("sheet_name") or ""
+                ).strip()
+                sheet_artifacts.setdefault(sheet_name, artifact)
+            if candidate.sheet_name not in sheet_artifacts:
+                raise RuntimeError(
+                    f"The selected indexed sheet {candidate.sheet_name!r} has no verified structure"
+                )
+
+            source = openpyxl.load_workbook(workbook_path, data_only=True)
+            original_sheets: list[str] = []
+            bundled_sheets: list[str] = []
+            try:
+                for sheet_name, artifact in sheet_artifacts.items():
+                    if sheet_name not in source.sheetnames:
+                        continue
+                    bundled_sheet_name = _unique_bundle_sheet_name(
+                        workbook_name,
+                        sheet_name,
+                        used_sheet_names,
+                    )
+                    target = bundle.create_sheet(bundled_sheet_name)
+                    source_sheet = source[sheet_name]
+                    for row in source_sheet.iter_rows():
+                        for cell in row:
+                            if isinstance(cell, openpyxl.cell.cell.MergedCell):
+                                continue
+                            target.cell(
+                                row=cell.row,
+                                column=cell.column,
+                                value=cell.value,
+                            )
+                    for merged_range in source_sheet.merged_cells.ranges:
+                        target.merge_cells(str(merged_range))
+
+                    parsed = yaml.safe_load(
+                        str(artifact.get("structure_yaml") or "")
+                    ) or {}
+                    if not isinstance(parsed, dict):
+                        continue
+                    table_id_map: dict[str, str] = {}
+                    for table_key, raw_structure in parsed.items():
+                        if table_key == "relations" or not isinstance(
+                            raw_structure, dict
+                        ):
+                            continue
+                        original_table_id = str(
+                            raw_structure.get("id") or table_key
+                        )
+                        bundled_table_id = _unique_bundle_table_id(
+                            f"w{group_index}_{original_table_id}",
+                            used_table_ids,
+                        )
+                        table_id_map[original_table_id] = bundled_table_id
+                        table_id_map[str(table_key)] = bundled_table_id
+                        structure = dict(raw_structure)
+                        structure["id"] = bundled_table_id
+                        structure["sheet"] = bundled_sheet_name
+                        source_note = f"Source workbook: {workbook_name}."
+                        description = str(structure.get("description") or "").strip()
+                        structure["description"] = (
+                            f"{source_note} {description}".strip()
+                        )
+                        combined_structure[bundled_table_id] = structure
+                    _merge_bundle_relations(
+                        combined_relations,
+                        parsed.get("relations"),
+                        table_id_map,
+                    )
+                    original_sheets.append(sheet_name)
+                    bundled_sheets.append(bundled_sheet_name)
+            finally:
+                source.close()
+
+            bundle_groups.append(
+                {
+                    "workbook": workbook_name,
+                    "sheets": original_sheets,
+                    "bundled_sheets": bundled_sheets,
+                }
+            )
+
+        if not bundle.sheetnames or not combined_structure:
+            bundle.close()
+            raise RuntimeError(
+                "Selected indexed workbooks did not produce a usable QA bundle"
+            )
+        if combined_relations:
+            combined_structure["relations"] = combined_relations
+        bundle.save(bundle_path)
+        bundle.close()
+        structure_path.write_text(
+            yaml.safe_dump(
+                combined_structure,
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return bundle_path, structure_path, bundle_groups
 
     def delete_runs(
         self,
@@ -1747,6 +2012,78 @@ def _workbook_name(path: Path, normalized: list[dict[str, Any]]) -> str:
         if resolved == item["path"].resolve():
             return str(item["name"])
     return path.name
+
+
+def _unique_bundle_sheet_name(
+    workbook_name: str,
+    sheet_name: str,
+    used_names: set[str],
+) -> str:
+    preferred = str(sheet_name).strip() or "Sheet"
+    if len(preferred) <= 31 and preferred.casefold() not in used_names:
+        used_names.add(preferred.casefold())
+        return preferred
+
+    prefix = safe_name(Path(workbook_name).stem)[:12] or "workbook"
+    base = f"{prefix}_{preferred}"
+    for suffix in range(1, 10_000):
+        suffix_text = "" if suffix == 1 else f"_{suffix}"
+        candidate = f"{base[: 31 - len(suffix_text)]}{suffix_text}"
+        if candidate.casefold() not in used_names:
+            used_names.add(candidate.casefold())
+            return candidate
+    raise RuntimeError("Unable to allocate a unique worksheet name for QA bundle")
+
+
+def _unique_bundle_table_id(value: str, used_ids: set[str]) -> str:
+    base = safe_name(value).replace("-", "_") or "table"
+    for suffix in range(1, 10_000):
+        candidate = base if suffix == 1 else f"{base}_{suffix}"
+        if candidate not in used_ids:
+            used_ids.add(candidate)
+            return candidate
+    raise RuntimeError("Unable to allocate a unique table id for QA bundle")
+
+
+def _merge_bundle_relations(
+    destination: dict[str, list[dict[str, Any]]],
+    raw_relations: Any,
+    table_id_map: dict[str, str],
+) -> None:
+    if not isinstance(raw_relations, dict):
+        return
+    relation_categories = {
+        "normal_formulas",
+        "aggregate_formulas",
+        "cell_formulas",
+        "invalid_formulas",
+    }
+    if relation_categories.intersection(raw_relations):
+        sources = [(None, raw_relations)]
+    else:
+        sources = [
+            (str(table_id), payload)
+            for table_id, payload in raw_relations.items()
+            if isinstance(payload, dict)
+        ]
+
+    for source_table_id, payload in sources:
+        for category in relation_categories:
+            records = payload.get(category)
+            if not isinstance(records, list):
+                continue
+            for raw_record in records:
+                if not isinstance(raw_record, dict):
+                    continue
+                record = dict(raw_record)
+                original_table_id = str(
+                    record.get("table_id") or source_table_id or ""
+                )
+                if original_table_id in table_id_map:
+                    record["table_id"] = table_id_map[original_table_id]
+                elif len(set(table_id_map.values())) == 1:
+                    record["table_id"] = next(iter(table_id_map.values()))
+                destination.setdefault(category, []).append(record)
 
 
 def new_job_id() -> str:

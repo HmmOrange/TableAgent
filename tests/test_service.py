@@ -11,11 +11,11 @@ import openpyxl
 import pytest
 import yaml
 
+from service.runtime import TableAgentService
 from TableAgent.configs import load_config
+from TableAgent.llm import LLMResponse
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
-from TableAgent.llm import LLMResponse
-from service.runtime import TableAgentService
 
 
 class FakePipeline:
@@ -649,16 +649,30 @@ def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, mo
     config["service"]["root_dir"] = str(tmp_path / "service")
     config["table_agent"]["retrieval_rerank_with_llm"] = False
     config["table_agent"]["retrieval_embedding_provider"] = "mock"
-    qa_workbooks = []
     qa_calls = []
 
     def run_verified_qa(_pipeline, **kwargs):
-        workbook_name = kwargs["workbook_path"].name
-        qa_workbooks.append(workbook_name)
         qa_calls.append(kwargs)
+        workbook = openpyxl.load_workbook(kwargs["workbook_path"], data_only=True)
+        try:
+            assert len(workbook.sheetnames) == 2
+            assert workbook[workbook.sheetnames[0]]["A1"].value == "value"
+            assert workbook[workbook.sheetnames[1]]["B1"].value == "maintenance"
+        finally:
+            workbook.close()
+        structure = yaml.safe_load(
+            Path(kwargs["structure_path"]).read_text(encoding="utf-8")
+        )
+        tables = {
+            table_id: value
+            for table_id, value in structure.items()
+            if table_id != "relations"
+        }
+        assert len(tables) == 2
+        assert len({value["sheet"] for value in tables.values()}) == 2
         return (
             LLMResponse(
-                content=f"Evidence from {workbook_name}",
+                content="joined indexed answer",
                 prompt_tokens=3,
                 completion_tokens=2,
             ),
@@ -676,6 +690,7 @@ def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, mo
         query="compare revenue with maintenance",
         workbooks=[sales, maintenance],
         retrieval_top_k=2,
+        expected_output="Return the comparison.",
         qa_enable_final_review=False,
         artifacts=[
             {
@@ -696,18 +711,17 @@ def test_real_indexed_qa_hybrid_runs_top_k_distinct_workbooks(tmp_path: Path, mo
     )
 
     answer = result["answers"][0]
-    assert set(qa_workbooks) == {"sales.xlsx", "maintenance.xlsx"}
-    assert all(
-        "Workbook-specific evidence pass:" in call["question"]
-        for call in qa_calls
-    )
-    assert all(call["expected_output"] == "" for call in qa_calls)
-    assert all(call["enable_final_answer_review"] is False for call in qa_calls)
+    assert len(qa_calls) == 1
+    assert qa_calls[0]["question"] == "compare revenue with maintenance"
+    assert qa_calls[0]["expected_output"] == "Return the comparison."
+    assert qa_calls[0]["enable_final_answer_review"] is False
     assert set(answer["workbooks"]) == {"sales.xlsx", "maintenance.xlsx"}
     assert answer["retrieval"]["mode"] == "table_agent_hybrid_top_k"
     assert answer["retrieval"]["top_k_requested"] == 2
     assert len(answer["retrieval"]["groups"]) == 2
-    assert answer["answer"]
+    assert all(group["bundled_sheets"] for group in answer["retrieval"]["groups"])
+    assert answer["qa"]["execution_mode"] == "bundled_multi_workbook"
+    assert answer["answer"] == "joined indexed answer"
 
 
 def test_indexed_qa_falls_back_when_selected_artifact_has_no_structure(tmp_path: Path):
