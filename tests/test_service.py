@@ -170,6 +170,37 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "structure").exists()
 
 
+def test_service_preserves_not_good_structure_artifacts(tmp_path: Path):
+    class NotGoodPipeline(FakePipeline):
+        def verify_samples(self, samples, force=False):
+            records = super().verify_samples(samples, force=force)
+            for record in records:
+                record.status = "not_good"
+            return records
+
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=NotGoodPipeline,
+    )
+
+    result = service.run(
+        stage="structure",
+        workbooks=[source],
+        queries=[],
+        job_id="not-good-structure",
+    )
+
+    structure = result["structures"][0]
+    assert structure["status"] == "not_good"
+    assert structure["structure"]
+    assert structure["artifact"]
+    assert (service.root_dir / "not-good-structure" / structure["artifact"]).is_file()
+    assert (service.root_dir / "not-good-structure" / "run.json").is_file()
+
+
 def test_service_runs_structure_and_qa_units_concurrently(tmp_path: Path):
     state = {
         "structure_active": 0,

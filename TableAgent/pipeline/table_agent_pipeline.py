@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable
@@ -238,6 +239,7 @@ class TableAgentPipeline(BasePipeline):
                         continue
                     seen.add(candidate.directory)
                     key = hashlib.sha256(str(candidate.directory.resolve()).encode("utf-8")).hexdigest()[:24]
+                    verification = self._prepared_verification(candidate.directory)
                     records.append(StructureCacheRecord(
                         key=key,
                         directory=candidate.directory,
@@ -245,7 +247,7 @@ class TableAgentPipeline(BasePipeline):
                         sheet_name=candidate.sheet_name,
                         structure_path=candidate.directory / "structure.yaml",
                         manifest_path=candidate.directory / "metadata.json",
-                        status="good",
+                        status=str(verification.get("status") or "good"),
                         cache_hit=not force,
                     ))
         return records
@@ -531,6 +533,11 @@ class TableAgentPipeline(BasePipeline):
             metadata=metadata,
             output_dir=sheet_dir,
         )
+        metadata_path = sheet_dir / "metadata.json"
+        if metadata_path.is_file():
+            metadata_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_payload["verification"] = result.verification
+            metadata_path.write_text(json.dumps(metadata_payload, ensure_ascii=False), encoding="utf-8")
         return result.structure_text
 
     def _run_prepared_source(
@@ -619,6 +626,7 @@ class TableAgentPipeline(BasePipeline):
         if hasattr(candidate, "reranker_selected_index"):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
             retrieval_info["reranker_rationale"] = getattr(candidate, "reranker_rationale", "")
+        verification = self._prepared_verification(candidate.directory)
 
         return PipelineOutput(
             sample_id=sample.sample_id,
@@ -636,7 +644,7 @@ class TableAgentPipeline(BasePipeline):
                 "html_path": display_path(candidate.html_path) if candidate.html_path else None,
                 "workbook_source_format": "xlsx",
                 "workbook_sheets": [candidate.sheet_name],
-                "verification": {"status": "good", "feedback": "Retrieved from encoded source"},
+                "verification": verification,
                 "artifact_dir": display_path(candidate.directory),
                 "image_tiles": read_image_tiles(candidate.directory),
                 "retrieval_info": retrieval_info,
@@ -650,6 +658,18 @@ class TableAgentPipeline(BasePipeline):
                 "qa": qa_info,
             },
         )
+
+    @staticmethod
+    def _prepared_verification(directory: Path) -> dict[str, Any]:
+        metadata_path = directory / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        verification = metadata.get("verification") if isinstance(metadata, dict) else None
+        if isinstance(verification, dict):
+            return dict(verification)
+        return {"status": "good", "feedback": "Retrieved from encoded source"}
 
     def _run_verified_qa(
         self,

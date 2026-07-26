@@ -190,7 +190,7 @@ class TableAgentService:
                     include_artifact_paths=persist,
                 )
                 structures = self._complete_structure_results(structures, normalized, selected_sheets)
-                failed = [record for record in structures if record["status"] != "good"]
+                failed = [record for record in structures if not record["structure"]]
                 if failed:
                     raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
 
