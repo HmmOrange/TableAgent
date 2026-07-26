@@ -125,6 +125,10 @@ class SourceRetriever:
             if workbook_path is None or not sheet_name or not structure_text:
                 continue
             retrieval_type = str(artifact.get("retrieval_type") or "data").strip()
+            try:
+                indexed_score = float(artifact["score"])
+            except (KeyError, TypeError, ValueError):
+                indexed_score = None
             candidate = self._source_candidate(
                 source_dir=workbook_path.parent,
                 workbook_path=workbook_path,
@@ -141,6 +145,8 @@ class SourceRetriever:
                 retrieval_type=retrieval_type,
                 retrieval_level=str(artifact.get("retrieval_level") or "table"),
                 artifact_id=str(artifact.get("id") or ""),
+                embedding_score=indexed_score or 0.0,
+                embedding_used=indexed_score is not None,
             )
             if retrieval_type == "metadata":
                 metadata_candidates.append(candidate)
@@ -600,8 +606,10 @@ class SourceRetriever:
         if not candidates:
             return []
 
-        embedding_used = False
-        if self.embedding_client is not None:
+        embedding_used = bool(candidates) and all(
+            candidate.embedding_used for candidate in candidates
+        )
+        if not embedding_used and self.embedding_client is not None:
             try:
                 vectors = self._encode([query] + [candidate.retrieval_card for candidate in candidates])
                 query_vector = vectors[0]
@@ -1056,6 +1064,8 @@ class SourceRetriever:
         retrieval_type: str = "data",
         retrieval_level: str = "table",
         artifact_id: str = "",
+        embedding_score: float = 0.0,
+        embedding_used: bool = False,
     ) -> SourceCandidate:
         lexical_score = _lexical_overlap_score(query, retrieval_card)
         entity_score, matched_terms, missing_terms = self._entity_match(query, retrieval_card)
@@ -1069,8 +1079,8 @@ class SourceRetriever:
             sheet_text=sheet_text,
             score=lexical_score,
             lexical_score=lexical_score,
-            embedding_score=0.0,
-            embedding_used=False,
+            embedding_score=embedding_score,
+            embedding_used=embedding_used,
             retrieval_card=retrieval_card,
             table_id=table_id,
             table_name=table_name,

@@ -667,6 +667,62 @@ def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path)
         "maintenance:plan",
     ]
 
+
+def test_indexed_retrieval_reuses_qdrant_scores_without_reembedding(
+    tmp_path,
+    monkeypatch,
+):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": "mock",
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+
+    def fail_if_called(_texts):
+        pytest.fail("Indexed retrieval cards must not be embedded again")
+
+    monkeypatch.setattr(retriever, "_encode", fail_if_called)
+    sales_path = tmp_path / "sales.xlsx"
+    maintenance_path = tmp_path / "maintenance.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="regional revenue score",
+        workbook_paths={
+            "sales.xlsx": sales_path,
+            "maintenance.xlsx": maintenance_path,
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "upload_name": "sales.xlsx",
+                "sheet": "Summary",
+                "score": 0.92,
+                "retrieval_card": "Quarterly metrics",
+                "structure_yaml": "table1:\n  sheet: Summary\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:plan",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Plan",
+                "score": 0.25,
+                "retrieval_card": "Regional revenue score",
+                "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.artifact_id == "sales:summary"
+    assert candidate.embedding_used is True
+    assert candidate.embedding_score == 0.92
+
 def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
     config = TableAgentConfig.from_config({
         "artifact_dir": str(temp_sources_dir.parent),
