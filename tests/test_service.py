@@ -632,6 +632,79 @@ def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):
     assert selection["retrieval"]["audit"][0]["selected"] is False
 
 
+def test_thinking_indexed_retrieval_uses_strong_candidate_fallback(tmp_path: Path):
+    candidate = SimpleNamespace(
+        artifact_id="aoi:standards",
+        workbook_path=Path("aoi.xlsx"),
+        sheet_name="AOI Standards",
+        table_id="aoi_standards",
+        table_name="AOI Standards",
+        matched_terms=["aoi", "inspection", "tool"],
+        missing_terms=["pin", "hole"],
+        lexical_score=3.0,
+        embedding_used=True,
+        embedding_score=0.7,
+        retrieval_audit=[{"artifact_id": "aoi:standards", "rank": 1}],
+        retrieval_trace=[{"status": "need_more", "query_type": "data"}],
+    )
+
+    class NeedMorePipeline:
+        def __init__(self, llm_client, layout_vlm_client, config):
+            del llm_client, layout_vlm_client, config
+            self.source_retriever = SimpleNamespace(
+                select_indexed=lambda **kwargs: candidate
+            )
+            self._fit_context = lambda value: value
+
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=NeedMorePipeline,
+    )
+
+    selection = service.select_indexed_artifact(
+        query="AOI inspection tool for pin hole",
+        mode="thinking",
+        artifacts=[
+            {
+                "id": "aoi:standards",
+                "document_id": "doc-aoi",
+                "upload_name": "aoi.xlsx",
+                "sheet": "AOI Standards",
+                "structure_yaml": "table1:\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert selection["status"] == "selected"
+    assert selection["document_id"] == "doc-aoi"
+    assert selection["retrieval"]["selection_fallback"] == (
+        "deterministic_relevance"
+    )
+    assert selection["retrieval"]["audit"][0]["selected"] is True
+
+
+def test_thinking_indexed_retrieval_rejects_weak_candidate_when_reranker_needs_more():
+    candidate = SimpleNamespace(
+        matched_terms=[],
+        missing_terms=["pin", "hole"],
+        lexical_score=0.0,
+        embedding_used=True,
+        embedding_score=0.2,
+    )
+
+    rejection = TableAgentService._indexed_rejection_reason(
+        candidate,
+        {"reranker": {"status": "need_more"}},
+        mode="thinking",
+    )
+
+    assert rejection == (
+        "The TableAgent reranker found no sufficiently relevant indexed table."
+    )
+
+
 def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     FakePipeline.instances = []
     source = _workbook(tmp_path / "book.xlsx")

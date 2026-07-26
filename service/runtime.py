@@ -587,6 +587,13 @@ class TableAgentService:
             retrieval,
             mode=mode,
         )
+        reranker = retrieval.get("reranker")
+        if (
+            rejection_reason is None
+            and isinstance(reranker, dict)
+            and reranker.get("status") == "need_more"
+        ):
+            retrieval["selection_fallback"] = "deterministic_relevance"
         if rejection_reason:
             return {
                 "status": "no_evidence",
@@ -627,20 +634,26 @@ class TableAgentService:
     ) -> str | None:
         reranker = retrieval.get("reranker")
         if isinstance(reranker, dict) and reranker.get("status") == "need_more":
+            if TableAgentService._indexed_candidate_is_relevant(candidate):
+                return None
             return "The TableAgent reranker found no sufficiently relevant indexed table."
         if mode != "instant":
             return None
 
+        if TableAgentService._indexed_candidate_is_relevant(candidate):
+            return None
+        return "No indexed table passed the instant-mode relevance threshold."
+
+    @staticmethod
+    def _indexed_candidate_is_relevant(candidate: Any) -> bool:
         matched_count = len(candidate.matched_terms)
         term_count = matched_count + len(candidate.missing_terms)
         coverage = matched_count / term_count if term_count else 0.0
-        if (
+        return bool(
             candidate.lexical_score >= 2
             or coverage >= 0.5
             or (candidate.embedding_used and candidate.embedding_score >= 0.5)
-        ):
-            return None
-        return "No indexed table passed the instant-mode relevance threshold."
+        )
 
     def _run_indexed_qa_hybrid(
         self,
