@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Configured VLM profile to use instead of the config.yaml default.",
     )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=3636)
     parser.add_argument("--log-level", default="info")
     return parser
 
