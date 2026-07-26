@@ -369,7 +369,7 @@ Run `uv run table-agent --help` for the complete CLI reference.
 Start the HTTP service after configuring the same LLM and VLM profiles:
 
 ```bash
-uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 8000
+uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 3636
 ```
 
 Submit a workbook and receive the end-to-end result directly:

@@ -25,6 +25,7 @@ def test_server_parser_defaults_model_profiles_to_config():
 
     assert args.llm is None
     assert args.vlm is None
+    assert args.port == 3636
 
 
 def test_server_main_passes_model_profile_overrides(monkeypatch):
