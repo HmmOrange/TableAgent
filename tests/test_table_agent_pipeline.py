@@ -230,6 +230,75 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert output.token_usage == {"prompt": 78, "completion": 13}
 
 
+def test_table_agent_repairs_unquoted_colon_text_end_to_end(tmp_path: Path):
+    class ColonTextLayoutVLM(FakeLayoutVLM):
+        def generate_with_image(
+            self,
+            prompt: str,
+            image_path: Path,
+            system_prompt: str | None = None,
+        ) -> LLMResponse:
+            self.calls.append((prompt, Path(image_path), system_prompt))
+            return LLMResponse(
+                content="""structure:
+  table1:
+    id: colon_text
+    name: KPI report: FY2026
+    description: Tracks metrics: current and forecast values
+    sheet: Colon Text
+    headers:
+      - id: metric_name
+        label: Metric: Name
+        description: Metric label: business meaning
+        orientation: column
+        header_range: A1
+        data_range: A2:A3
+        sub_headers: []
+      - id: current_value
+        label: Value: Current
+        description: Current amount: numeric value
+        orientation: column
+        header_range: B1
+        data_range: B2:B3
+        sub_headers: []
+changelog: Added table: colon-rich labels and descriptions.
+remaining_directions: []
+""",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+
+    sample_path = Path(__file__).resolve().parents[1] / "sample" / "colon_text.xlsx"
+    sample = EvalSample(
+        index=0,
+        sample_id="colon-text/1",
+        table_id="Colon Text",
+        table_content="",
+        table_path=str(sample_path),
+        question="What is the current value for Revenue: Actual?",
+        answer=["100"],
+    )
+    layout_vlm = ColonTextLayoutVLM()
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=layout_vlm,
+        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 0},
+    )
+
+    output = pipeline.run(sample)
+    structure = yaml.safe_load(Path(output.metadata["structure_path"]).read_text(encoding="utf-8"))
+
+    assert output.predicted_answer == "100"
+    assert output.metadata["verification"]["status"] == "good"
+    assert structure["table1"]["name"] == "KPI report: FY2026"
+    assert structure["table1"]["description"] == "Tracks metrics: current and forecast values"
+    assert [header["label"] for header in structure["table1"]["headers"]] == [
+        "Metric: Name",
+        "Value: Current",
+    ]
+    assert "quote every free-text scalar" in layout_vlm.calls[0][2]
+
+
 def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     sample = EvalSample(
         index=0,
@@ -1272,6 +1341,8 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
     assert "use the union of the old range and newly visible" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "Do not create separate headers for blank cells inside a merged" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "deterministic verifier" in LAYOUT_MAS_USER_PROMPT_TEMPLATE.lower()
+    assert "quote every free-text scalar" in LAYOUT_MAS_SYSTEM_PROMPT
+    assert "Wrap every free-text scalar in double quotes" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -1423,7 +1494,7 @@ remaining_directions: [right]
     assert structure["table1"]["headers"][0]["data_range"] == "A5:A17"
     assert directions == ["right"]
     assert changelog == "Added headers (sub-headers: All industries and Agriculture)."
-    assert "changelog:" in discarded
+    assert discarded == ""
 
 
 def test_layout_parser_does_not_salvage_malformed_structure_block():
