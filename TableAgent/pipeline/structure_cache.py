@@ -36,7 +36,8 @@ class StructureCacheRecord:
 
     @property
     def valid(self) -> bool:
-        return self.status == "good" and self.structure_path.is_file()
+        # Verification quality is diagnostic; a persisted structure remains usable.
+        return self.structure_path.is_file()
 
 
 class StructureCache:

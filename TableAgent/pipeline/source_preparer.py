@@ -254,6 +254,13 @@ class SourcePreparer:
         workbook_name: str | None = None,
         source_hash: str | None = None,
     ) -> None:
+        existing: dict[str, Any] = {}
+        if metadata_path.is_file():
+            try:
+                loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                existing = loaded if isinstance(loaded, dict) else {}
+            except (json.JSONDecodeError, OSError):
+                pass
         payload = {
             "workbook_path": str(source_path.resolve()),
             "workbook_name": workbook_name or source_path.name,
@@ -265,6 +272,8 @@ class SourcePreparer:
             "used_range": metadata.used_range,
             "merged_ranges": metadata.merged_ranges,
         }
+        if isinstance(existing.get("verification"), dict):
+            payload["verification"] = existing["verification"]
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     def _write_retrieval_cards(

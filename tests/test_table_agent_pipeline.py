@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 from PIL import Image
@@ -366,6 +367,125 @@ def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: 
         pipeline.prepare_samples([sample])
 
 
+def test_table_agent_keeps_not_good_structure_artifact(tmp_path: Path, monkeypatch):
+    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+
+    sample = EvalSample(
+        index=0,
+        sample_id="sample/not-good-cache",
+        table_id="table-1",
+        table_content="Year | Revenue\n2024 | 100",
+        question="What is the 2024 revenue?",
+        answer=["100"],
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=None,
+        layout_vlm_client=FakeLayoutVLM(),
+        config={
+            "artifact_dir": str(tmp_path),
+            "structure_cache_dir": str(tmp_path / "cache"),
+            "phase": "structure",
+        },
+    )
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text("table1:\n  headers:\n    - label: Revenue\n", encoding="utf-8")
+    record = StructureCacheRecord(
+        key="not-good",
+        directory=tmp_path,
+        workbook_path=tmp_path / "workbook.xlsx",
+        sheet_name="Sheet1",
+        structure_path=structure_path,
+        manifest_path=tmp_path / "manifest.json",
+        status="not_good",
+        cache_hit=False,
+    )
+    monkeypatch.setattr(pipeline, "verify_samples", lambda samples, force=True: [record])
+
+    pipeline.prepare_samples([sample])
+
+    assert record.valid
+    assert structure_path.is_file()
+
+
+def test_prepared_source_propagates_not_good_status(tmp_path: Path, monkeypatch):
+    from TableAgent.pipeline.common import SourceCandidate
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    structure_path = source_dir / "structure.yaml"
+    structure_path.write_text("table1:\n  headers:\n    - label: Revenue\n", encoding="utf-8")
+    verification = {"status": "not_good", "feedback": "Retries exhausted."}
+    (source_dir / "metadata.json").write_text(
+        json.dumps({"verification": verification}),
+        encoding="utf-8",
+    )
+    candidate = SourceCandidate(
+        directory=source_dir,
+        workbook_path=tmp_path / "book.xlsx",
+        sheet_name="Sheet1",
+        image_path=source_dir / "table.png",
+        html_path=None,
+        structure_text=structure_path.read_text(encoding="utf-8"),
+        sheet_text="Revenue",
+        score=1.0,
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="siflex/not-good-source",
+        table_id="source",
+        table_content="",
+        question="What is the revenue?",
+        answer=["100"],
+        sample_path="siflex",
+        table_path=str(candidate.workbook_path),
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "structure"},
+    )
+    monkeypatch.setattr(pipeline.source_preparer, "prepare", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline.source_retriever, "load_candidates", lambda sample: [candidate])
+
+    records = pipeline.verify_samples([sample], force=False)
+
+    assert records[0].status == "not_good"
+    assert records[0].valid
+
+
+def test_analyze_source_sheet_persists_verification_status(tmp_path: Path):
+    from TableAgent.perception.metadata import SheetMetadata
+
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts")},
+    )
+    sheet_dir = tmp_path / "sheet"
+    sheet_dir.mkdir()
+    metadata_path = sheet_dir / "metadata.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    verification = {"status": "not_good", "feedback": "Retries exhausted."}
+    pipeline.layout_workflow = SimpleNamespace(
+        run=lambda **kwargs: SimpleNamespace(
+            structure_text="table1:\n  headers:\n    - label: Revenue\n",
+            verification=verification,
+        )
+    )
+    metadata = SheetMetadata("Sheet1", "A1:A2", [])
+
+    pipeline._analyze_source_sheet(tmp_path / "book.xlsx", "Sheet1", metadata, sheet_dir)
+    pipeline.source_preparer._write_metadata_json(
+        metadata_path,
+        tmp_path / "book.xlsx",
+        "Sheet1",
+        metadata,
+    )
+
+    persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert persisted["verification"] == verification
+
+
 def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monkeypatch):
     from TableAgent.pipeline.common import SourceCandidate
 
@@ -374,6 +494,10 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     full_structure = "table1:\n  id: table1\n  name: Sales\ntable2:\n  id: table2\n  name: Costs\n"
     selected_structure = "table2:\n  id: table2\n  name: Costs\n"
     (source_dir / "structure.yaml").write_text(full_structure, encoding="utf-8")
+    (source_dir / "metadata.json").write_text(
+        json.dumps({"verification": {"status": "not_good", "feedback": "Retries exhausted."}}),
+        encoding="utf-8",
+    )
     candidate = SourceCandidate(
         directory=source_dir,
         workbook_path=tmp_path / "book.xlsx",
@@ -415,6 +539,7 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     assert selected_path.read_text(encoding="utf-8") == selected_structure
     assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
     assert output.metadata["retrieval_info"]["table_id"] == "table2"
+    assert output.metadata["verification"]["status"] == "not_good"
     assert "table1:" not in output.structured_table
 
 
