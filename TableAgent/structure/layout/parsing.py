@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -11,6 +12,11 @@ _UNCERTAIN_RANGE_VALUES = {"unknown", "uncertain", "n/a", "none", "null", "?"}
 _YAML_BOOLEAN_TAG = "tag:yaml.org,2002:bool"
 _LAYOUT_STRUCTURE_KEYS = {"structure", "updated_structure"}
 _LAYOUT_DIRECTION_KEYS = {"remaining_directions", "directions"}
+_FREE_TEXT_SCHEMA_FIELDS = {"name", "label", "description", "sheet", "changelog"}
+_FREE_TEXT_SCALAR_LINE = re.compile(
+    r"^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>[A-Za-z_][A-Za-z0-9_-]*):[ \t]*)"
+    r"(?P<value>.*?)(?P<newline>\r?\n)?$"
+)
 
 
 class _Yaml12SafeLoader(yaml.SafeLoader):
@@ -32,6 +38,35 @@ def _load_yaml(content: str) -> Any:
     return yaml.load(content, Loader=_Yaml12SafeLoader)
 
 
+def _load_yaml_with_free_text_retry(content: str) -> Any:
+    try:
+        return _load_yaml(content)
+    except yaml.YAMLError:
+        repaired = _quote_known_free_text_scalars(content)
+        if repaired == content:
+            raise
+        return _load_yaml(repaired)
+
+
+def _quote_known_free_text_scalars(content: str) -> str:
+    repaired_lines = []
+    for line in content.splitlines(keepends=True):
+        match = _FREE_TEXT_SCALAR_LINE.match(line)
+        if match is None or match.group("key") not in _FREE_TEXT_SCHEMA_FIELDS:
+            repaired_lines.append(line)
+            continue
+
+        value = match.group("value").strip()
+        if not value or value.startswith(('"', "'", "|", ">")) or value.lower() in {"null", "~"}:
+            repaired_lines.append(line)
+            continue
+
+        repaired_lines.append(
+            f'{match.group("prefix")}{json.dumps(value, ensure_ascii=False)}{match.group("newline") or ""}'
+        )
+    return "".join(repaired_lines)
+
+
 def _extract_yaml_text(content: str) -> str:
     text = content.strip()
     fenced = _YAML_FENCE.search(text)
@@ -51,7 +86,7 @@ def extract_strict_structure(content: str) -> tuple[str, str]:
 
     for candidate, span in candidates:
         try:
-            parsed = _load_yaml(candidate)
+            parsed = _load_yaml_with_free_text_retry(candidate)
         except yaml.YAMLError:
             continue
         normalized = _normalize_structure(parsed)
@@ -233,7 +268,7 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
 
     for candidate, span in candidates:
         try:
-            parsed = _load_yaml(candidate)
+            parsed = _load_yaml_with_free_text_retry(candidate)
         except yaml.YAMLError:
             recovered = _recover_layout_envelope(candidate)
             if recovered is None:
@@ -281,7 +316,7 @@ def _recover_layout_envelope(
         return None
     block, discarded = structure_block
     try:
-        parsed = _load_yaml(block)
+        parsed = _load_yaml_with_free_text_retry(block)
     except yaml.YAMLError:
         return None
     if not isinstance(parsed, dict):
@@ -312,7 +347,7 @@ def _recover_layout_envelope(
     changelog_block = _extract_top_level_block(candidate, {"changelog"})
     if changelog_block is not None:
         try:
-            changelog_payload = _load_yaml(changelog_block[0])
+            changelog_payload = _load_yaml_with_free_text_retry(changelog_block[0])
         except yaml.YAMLError:
             changelog_payload = None
         if isinstance(changelog_payload, dict):

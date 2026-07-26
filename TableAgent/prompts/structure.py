@@ -2,6 +2,7 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "You are LayoutAgent, a spreadsheet layout VLM. Inspect the coordinate-labelled "
     "viewport and update the supplied structure. Return only YAML. Keep verified "
     "existing information, add or correct only evidence visible in the image, and "
+    "quote every free-text scalar, including names, labels, descriptions, worksheet names, and changelog text. "
     "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
     "when visible cells show a distinct table start. Report a concise changelog and "
@@ -32,6 +33,9 @@ Range rules:
 - Copy header labels from the visible cell text. Preserve multilingual text, but do
   not invent, translate, or add words such as "giám sát". Use spaces for visible line
   breaks in labels; do not write literal backslash-n sequences.
+- Wrap every free-text scalar in double quotes, including table names, labels,
+  descriptions, worksheet names, and changelog text. Escape embedded double quotes.
+  Keep identifiers, orientations, ranges, and direction tokens as structured values.
 - `data_range` is only the cells governed by that header. It must not include the
   header cell, sub-header cells, total/title rows, or unrelated neighboring columns.
 - For column headers, data starts below all header and sub-header rows. For row
@@ -59,20 +63,20 @@ Return only this YAML envelope:
 structure:
   table1:
     id: <unique stable snake_case table identifier>
-    name: <table name>
-    description: <table purpose>
-    sheet: <exact worksheet name from metadata>
+    name: "<table name>"
+    description: "<table purpose>"
+    sheet: "<exact worksheet name from metadata>"
     headers:
       - id: <unique stable snake_case identifier>
-        label: <visible meaningful label>
-        description: <semantic role>
+        label: "<visible meaningful label>"
+        description: "<semantic role>"
         orientation: <row|column>
         header_range: <exact A1 range>
         data_range: <exact A1 range>
         sub_headers: []
   tables2:
     <table details here if exists>
-changelog: <concise changes, or "No change.">
+changelog: "<concise changes, or No change.>"
 remaining_directions: [<right|down|left|up as supported by visible evidence>]
 
 Rules for remaining_directions:
