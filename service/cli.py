@@ -49,10 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--answer-instruction",
+        "--original-context",
         help=(
-            "Additional analytical or answer instructions for indexed QA. "
-            "This does not affect retrieval ranking."
+            "Original user-question context for indexed QA. It is background only "
+            "and does not affect retrieval ranking."
         ),
     )
     parser.add_argument(
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.embed
         or args.sheet
         or args.artifacts
-        or args.answer_instruction
+        or args.original_context
         or args.expected_output
         or args.retrieval_top_k != 1
         or args.max_workers is not None
@@ -137,8 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--sheet cannot be combined with indexed --artifacts")
     if args.artifacts and len([query for query in args.query if query.strip()]) != 1:
         parser.error("Indexed QA with --artifacts requires exactly one non-empty --query")
-    if (args.answer_instruction or args.expected_output) and not args.artifacts:
-        parser.error("--answer-instruction and --expected-output require indexed --artifacts")
+    if (args.original_context or args.expected_output) and not args.artifacts:
+        parser.error("--original-context and --expected-output require indexed --artifacts")
 
     try:
         service = TableAgentService.from_config(
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                 "query": next(query for query in args.query if query.strip()),
                 "workbooks": args.workbook,
                 "artifacts": load_artifacts(args.artifacts),
-                "answer_instruction": args.answer_instruction,
+                "original_context": args.original_context,
                 "expected_output": args.expected_output,
                 "retrieval_top_k": args.retrieval_top_k,
             }

@@ -74,7 +74,7 @@ def test_cli_parser_accepts_repeatable_artifact_files():
             "book.xlsx",
             "--query",
             "What is the answer?",
-            "--answer-instruction",
+            "--original-context",
             "Compare regions",
             "--expected-output",
             "Return a markdown table",
@@ -254,7 +254,7 @@ def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeyp
             "book.xlsx",
             "--query",
             "What is the answer?",
-            "--answer-instruction",
+            "--original-context",
             "Compare regions",
             "--expected-output",
             "Return a markdown table",
@@ -267,7 +267,7 @@ def test_cli_routes_artifacts_to_indexed_qa_and_loads_run_json(tmp_path, monkeyp
 
     assert result == 0
     assert captured["query"] == "What is the answer?"
-    assert captured["answer_instruction"] == "Compare regions"
+    assert captured["original_context"] == "Compare regions"
     assert captured["expected_output"] == "Return a markdown table"
     assert captured["retrieval_top_k"] == 3
     assert captured["workbooks"] == ["book.xlsx"]

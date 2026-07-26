@@ -375,7 +375,7 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
 
     result = service.run_indexed_qa(
         query="question",
-        answer_instruction="Compare regions before answering.",
+        original_context="Compare regions before answering.",
         expected_output="Return a markdown table.",
         workbooks=[source],
         qa_max_replans=2,
@@ -398,11 +398,13 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
     assert FakeIndexedPipeline.instances[0].config["qa_max_replans"] == 2
     assert "indexed_schema_text" not in FakeIndexedPipeline.calls[0]
     assert FakeIndexedPipeline.calls[0]["question"] == (
-        "question\n\nAdditional answer instructions:\nCompare regions before answering."
+        "Sub-query to solve:\nquestion\n\n"
+        "Original question context (background only; do not replace the sub-query):\n"
+        "Compare regions before answering."
     )
     assert FakeIndexedPipeline.calls[0]["expected_output"] == "Return a markdown table."
     assert result["answers"][0]["answer"] == "indexed answer"
-    assert result["answers"][0]["answer_instruction"] == "Compare regions before answering."
+    assert result["answers"][0]["original_context"] == "Compare regions before answering."
     assert result["answers"][0]["expected_output"] == "Return a markdown table."
     assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
 

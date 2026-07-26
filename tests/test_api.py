@@ -65,7 +65,7 @@ class FakeService:
         query,
         workbooks,
         artifacts,
-        answer_instruction,
+        original_context,
         expected_output,
         retrieval_top_k,
         qa_max_replans,
@@ -77,7 +77,7 @@ class FakeService:
                 "query": query,
                 "workbooks": [str(path) for path in workbooks],
                 "artifacts": artifacts,
-                "answer_instruction": answer_instruction,
+                "original_context": original_context,
                 "expected_output": expected_output,
                 "retrieval_top_k": retrieval_top_k,
                 "qa_max_replans": qa_max_replans,
@@ -186,7 +186,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
                 "payload": (
                     '{"stage":"qa","queries":["question"],"qa_max_replans":2,'
                     '"mode":"instant",'
-                    '"answer_instruction":"Compare regions",'
+                    '"original_context":"Compare regions",'
                     '"expected_output":"Return a markdown table",'
                     '"retrieval_top_k":3,'
                     '"qa_enable_final_review":false,"artifacts":'
@@ -200,7 +200,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
     assert response.json()["answers"][0]["answer"] == "indexed"
     assert not service.calls
     assert service.indexed_calls[0]["query"] == "question"
-    assert service.indexed_calls[0]["answer_instruction"] == "Compare regions"
+    assert service.indexed_calls[0]["original_context"] == "Compare regions"
     assert service.indexed_calls[0]["expected_output"] == "Return a markdown table"
     assert service.indexed_calls[0]["retrieval_top_k"] == 3
     assert service.indexed_calls[0]["qa_max_replans"] == 2
