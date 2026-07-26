@@ -685,6 +685,60 @@ def test_thinking_indexed_retrieval_uses_strong_candidate_fallback(tmp_path: Pat
     assert selection["retrieval"]["audit"][0]["selected"] is True
 
 
+def test_thinking_indexed_retrieval_respects_disabled_llm_reranker(tmp_path: Path):
+    captured_config = {}
+    candidate = SimpleNamespace(
+        artifact_id="aoi:standards",
+        workbook_path=Path("aoi.xlsx"),
+        sheet_name="AOI Standards",
+        table_id="aoi_standards",
+        table_name="AOI Standards",
+        matched_terms=["aoi", "inspection"],
+        missing_terms=[],
+        lexical_score=2.0,
+        embedding_used=False,
+        embedding_score=0.0,
+        retrieval_audit=[{"artifact_id": "aoi:standards", "rank": 1}],
+        retrieval_trace=[{"query_type": "data"}],
+    )
+
+    class ConfigCapturePipeline:
+        def __init__(self, llm_client, layout_vlm_client, config):
+            del llm_client, layout_vlm_client
+            captured_config.update(config)
+            self.source_retriever = SimpleNamespace(
+                select_indexed=lambda **kwargs: candidate
+            )
+            self._fit_context = lambda value: value
+
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {"retrieval_rerank_with_llm": False},
+        },
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=ConfigCapturePipeline,
+    )
+
+    selection = service.select_indexed_artifact(
+        query="AOI inspection standards",
+        mode="thinking",
+        artifacts=[
+            {
+                "id": "aoi:standards",
+                "document_id": "doc-aoi",
+                "upload_name": "aoi.xlsx",
+                "sheet": "AOI Standards",
+                "structure_yaml": "table1:\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert selection["status"] == "selected"
+    assert captured_config["retrieval_rerank_with_llm"] is False
+
+
 def test_thinking_indexed_retrieval_rejects_weak_candidate_when_reranker_needs_more():
     candidate = SimpleNamespace(
         matched_terms=[],

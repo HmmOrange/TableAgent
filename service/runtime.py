@@ -554,7 +554,9 @@ class TableAgentService:
                     workspace_dir / "output",
                     workspace_dir / "indexed",
                     embed=False,
-                    retrieval_rerank_with_llm=(mode == "thinking"),
+                    retrieval_rerank_with_llm=(
+                        False if mode == "instant" else None
+                    ),
                 ),
             )
             responses = []
