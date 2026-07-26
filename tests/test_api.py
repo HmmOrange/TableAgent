@@ -85,7 +85,9 @@ def test_health_status_and_upload_job(tmp_path: Path):
     service = FakeService(tmp_path / "service")
     app = create_app(service)
     with TestClient(app) as client:
-        assert client.get("/health").json()["status"] == "ok"
+        health = client.get("/health").json()
+        assert health["status"] == "ok"
+        assert health["version"] == "0.4.5"
         assert client.get("/health/ready").json()["status"] == "ready"
 
         response = client.post(
