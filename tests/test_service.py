@@ -170,7 +170,7 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "structure").exists()
 
 
-def test_service_preserves_not_good_structure_artifacts(tmp_path: Path):
+def test_service_accepts_persisted_not_good_structure_artifacts(tmp_path: Path):
     class NotGoodPipeline(FakePipeline):
         def verify_samples(self, samples, force=False):
             records = super().verify_samples(samples, force=force)
@@ -194,7 +194,8 @@ def test_service_preserves_not_good_structure_artifacts(tmp_path: Path):
     )
 
     structure = result["structures"][0]
-    assert structure["status"] == "not_good"
+    assert structure["status"] == "good"
+    assert structure["verification_status"] == "not_good"
     assert structure["structure"]
     assert structure["artifact"]
     assert (service.root_dir / "not-good-structure" / structure["artifact"]).is_file()

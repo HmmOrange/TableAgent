@@ -1321,11 +1321,16 @@ class TableAgentService:
                     copy_artifact_tree(record.structure_path.parent, target_dir)
                     if include_artifact_paths:
                         artifact = (target_dir / "structure.yaml").relative_to(job_dir).as_posix()
+            verification_status = str(record.status or "not_good")
+            structure_usable = bool(structure_text and structure_text.strip())
             results.append(
                 {
                     "workbook": workbook_name,
                     "sheet": record.sheet_name,
-                    "status": record.status,
+                    # A persisted structure remains usable even when deterministic
+                    # verification reports diagnostics for the sheet.
+                    "status": "good" if structure_usable else verification_status,
+                    "verification_status": verification_status,
                     "structure": structure_text,
                     "artifact": artifact if include_artifact_paths else None,
                 }
@@ -1357,6 +1362,7 @@ class TableAgentService:
                         "workbook": item["name"],
                         "sheet": sheet_name,
                         "status": "not_good",
+                        "verification_status": "not_good",
                         "structure": None,
                         "artifact": None,
                     }
