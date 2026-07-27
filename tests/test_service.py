@@ -381,6 +381,42 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
     assert "indexed_schema_text" not in FakeIndexedPipeline.calls[0]
     assert result["answers"][0]["answer"] == "indexed answer"
     assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
+    workspace_path = Path(result["workspace_path"])
+    assert workspace_path.is_dir()
+    assert result["answers"][0]["qa"]["workspace_retained"] is True
+    assert Path(result["answers"][0]["qa"]["workspace_path"]) == workspace_path
+    assert (workspace_path / "input" / "001" / "book.xlsx").is_file()
+
+
+def test_production_indexed_qa_removes_temporary_workspace(tmp_path: Path, monkeypatch):
+    FakeIndexedPipeline.instances = []
+    FakeIndexedPipeline.calls = []
+    source = _workbook(tmp_path / "book.xlsx")
+    monkeypatch.setenv("TABLE_AGENT_QA_RETAIN_WORKSPACES", "false")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakeIndexedPipeline,
+    )
+
+    result = service.run_indexed_qa(
+        query="question",
+        workbooks=[source],
+        artifacts=[
+            {
+                "id": "book:Sheet:table-1",
+                "upload_name": "book.xlsx",
+                "sheet": "Sheet",
+                "retrieval_card": "Workbook: book.xlsx\nSheet: Sheet",
+                "structure_yaml": "table1:\n  name: Sheet\n  sheet: Sheet\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert result["workspace_path"] is None
+    assert result["answers"][0]["qa"]["workspace_retained"] is False
+    assert result["answers"][0]["qa"]["workspace_path"] is None
 
 
 def test_indexed_qa_forwards_progress_without_changing_answer(tmp_path: Path):

@@ -860,7 +860,9 @@ def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, mo
             config,
             table_retriever=None,
             related_structure_paths=None,
+            progress_callback=None,
         ):
+            del progress_callback
             captured_configs.append(config)
             self.env = _Env()
 

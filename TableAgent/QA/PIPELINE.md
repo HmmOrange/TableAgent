@@ -304,7 +304,16 @@ containing the selected sheet's `structure_yaml`, retrieval cards, and workbook 
   from the verified per-workbook answers.
 - The core planner receives the same inputs as the `v0.4.0` QA pipeline; workbook
   schema text is not added to its prompt.
+- When the verified structure exposes exactly one valid table, the runner activates
+  that table directly. Multi-table structures continue through the `table_inspect`
+  selection layer.
 - Layout extraction and retrieval-card generation are not run during this path.
+
+Indexed QA workspaces are retained under `<service.root_dir>/qa-workspaces/` by
+default so benchmark failures keep the staged workbook, selected structures, and QA
+artifacts. Production deployments should set
+`TABLE_AGENT_QA_RETAIN_WORKSPACES=false`; those runs use an automatically deleted
+temporary directory and omit private artifact paths from the public QA metadata.
 
 ## 9. Pipeline-level fallback
 

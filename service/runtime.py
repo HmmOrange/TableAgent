@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +64,12 @@ class TableAgentService:
         self.allowed_input_roots = tuple(
             Path(value).expanduser().resolve()
             for value in service_config.get("allowed_input_roots", [])
+        )
+        retain_workspaces = os.getenv("TABLE_AGENT_QA_RETAIN_WORKSPACES")
+        self.retain_qa_workspaces = (
+            _bool_value(retain_workspaces)
+            if retain_workspaces is not None
+            else _bool_value(service_config.get("retain_qa_workspaces", True))
         )
         self._llm_client = llm_client
         self._layout_vlm_client = layout_vlm_client
@@ -313,12 +321,18 @@ class TableAgentService:
             )
 
         run_id = new_job_id()
-        with tempfile.TemporaryDirectory(prefix=f"table-agent-indexed-{safe_name(run_id)}-") as workspace_text:
-            workspace_dir = Path(workspace_text)
+        with self._indexed_qa_workspace(run_id) as workspace_dir:
             output_dir = workspace_dir / "output"
             source_dir = workspace_dir / "indexed"
             output_dir.mkdir(parents=True, exist_ok=True)
-            normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
+            staged_workbooks = self._stage_indexed_workbooks(
+                workbook_list,
+                workspace_dir / "input",
+            )
+            normalized = self._normalize_workbooks(
+                staged_workbooks,
+                workspace_dir / "normalized",
+            )
             by_name = {str(item["name"]): item for item in normalized}
 
             grouped: dict[str, list[dict[str, Any]]] = {}
@@ -352,6 +366,8 @@ class TableAgentService:
                     max_workers=worker_count,
                 ),
             )
+            if progress_callback is not None:
+                pipeline.set_progress_callback(progress_callback)
             group_answers: list[dict[str, Any]] = []
             total_prompt_tokens = 0
             total_completion_tokens = 0
@@ -404,7 +420,7 @@ class TableAgentService:
                 total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
                 total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
                 public_qa_info = dict(qa_info)
-                public_qa_info.pop("artifacts", None)
+                self._annotate_workspace_info(public_qa_info, workspace_dir)
                 group_answers.append(
                     {
                         "workbook": workbook_name,
@@ -481,6 +497,8 @@ class TableAgentService:
                             "success": True,
                             "fallback_used": any(item["qa"].get("fallback_used") for item in group_answers),
                             "replan_count": sum(int(item["qa"].get("replan_count", 0) or 0) for item in group_answers),
+                            "workspace_retained": self.retain_qa_workspaces,
+                            "workspace_path": self._public_workspace_path(workspace_dir),
                             "per_workbook": [
                                 {"workbook": item["workbook"], **item["qa"]}
                                 for item in group_answers
@@ -493,6 +511,7 @@ class TableAgentService:
                     }
                 ],
                 "artifacts": [],
+                "workspace_path": self._public_workspace_path(workspace_dir),
             }
 
     def select_indexed_artifact(
@@ -673,15 +692,16 @@ class TableAgentService:
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
-        with tempfile.TemporaryDirectory(
-            prefix=f"table-agent-indexed-{safe_name(run_id)}-"
-        ) as workspace_text:
-            workspace_dir = Path(workspace_text)
+        with self._indexed_qa_workspace(run_id) as workspace_dir:
             output_dir = workspace_dir / "output"
             source_dir = workspace_dir / "indexed"
             output_dir.mkdir(parents=True, exist_ok=True)
-            normalized = self._normalize_workbooks(
+            staged_workbooks = self._stage_indexed_workbooks(
                 workbook_list,
+                workspace_dir / "input",
+            )
+            normalized = self._normalize_workbooks(
+                staged_workbooks,
                 workspace_dir / "normalized",
             )
             workbook_paths = {
@@ -785,7 +805,7 @@ class TableAgentService:
                 ),
             )
             public_qa_info = dict(qa_info)
-            public_qa_info.pop("artifacts", None)
+            self._annotate_workspace_info(public_qa_info, workspace_dir)
             retrieval_payload = self._indexed_retrieval_payload(
                 candidate,
                 eligible_artifacts,
@@ -822,7 +842,48 @@ class TableAgentService:
                     }
                 ],
                 "artifacts": [],
+                "workspace_path": self._public_workspace_path(workspace_dir),
             }
+
+    @contextmanager
+    def _indexed_qa_workspace(self, run_id: str):
+        if not self.retain_qa_workspaces:
+            with tempfile.TemporaryDirectory(
+                prefix=f"table-agent-indexed-{safe_name(run_id)}-"
+            ) as workspace_text:
+                yield Path(workspace_text)
+            return
+
+        workspace_dir = self.root_dir / "qa-workspaces" / safe_name(run_id)
+        workspace_dir.mkdir(parents=True, exist_ok=False)
+        yield workspace_dir
+
+    @staticmethod
+    def _stage_indexed_workbooks(
+        workbook_list: list[Path],
+        input_dir: Path,
+    ) -> list[Path]:
+        staged: list[Path] = []
+        for index, source in enumerate(workbook_list, start=1):
+            target_dir = input_dir / f"{index:03d}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / source.name
+            shutil.copy2(source, target)
+            staged.append(target)
+        return staged
+
+    def _annotate_workspace_info(
+        self,
+        qa_info: dict[str, Any],
+        workspace_dir: Path,
+    ) -> None:
+        qa_info["workspace_retained"] = self.retain_qa_workspaces
+        qa_info["workspace_path"] = self._public_workspace_path(workspace_dir)
+        if not self.retain_qa_workspaces:
+            qa_info.pop("artifacts", None)
+
+    def _public_workspace_path(self, workspace_dir: Path) -> str | None:
+        return str(workspace_dir) if self.retain_qa_workspaces else None
 
     @staticmethod
     def _indexed_retrieval_payload(
@@ -1448,6 +1509,12 @@ def _workbook_name(path: Path, normalized: list[dict[str, Any]]) -> str:
 def new_job_id() -> str:
     """Return a readable, filesystem-safe UTC timestamp for a generated job ID."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 __all__ = ["SUPPORTED_WORKBOOK_EXTENSIONS", "Stage", "TableAgentService", "new_job_id"]

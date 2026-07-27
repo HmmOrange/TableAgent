@@ -230,8 +230,13 @@ class TableQARunner:
         self._progress(f"[qa] run start | artifact_dir={run_dir}")
         start_time = time.time()
         
-        table_id = self.table_id
         all_table_ids = self.env.operators.list_tables()
+        table_id = self.table_id
+        if not table_id and len(all_table_ids) == 1:
+            table_id = all_table_ids[0]
+            self.env.logger.log_event("single_table_auto_selected", {
+                "table_id": table_id,
+            })
         self.env.execution_namespace["all_table_ids"] = all_table_ids
         self.env.execution_namespace["selected_table_ids"] = [table_id] if table_id else []
         if table_id:

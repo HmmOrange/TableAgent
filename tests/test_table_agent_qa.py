@@ -494,6 +494,33 @@ def test_runner_keeps_subtask_retries_separate_from_replans():
     assert result.subtask_retry_count == 2
     assert result.qa_max_retries == 3
 
+
+def test_runner_automatically_selects_the_only_available_table():
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=FakeLLM({"Table Structure": _two_step_plan_json()}),
+        policy=MockActionPolicy(),
+    )
+    planned_table_ids = []
+    original_plan = runner.planner.plan
+
+    def capture_plan(question, *, table_id=None, **kwargs):
+        planned_table_ids.append(table_id)
+        return original_plan(question, table_id=table_id, **kwargs)
+
+    runner.planner.plan = capture_plan
+
+    result = runner.run("What is the average score of all people?")
+
+    assert result.success
+    assert planned_table_ids == ["table1"]
+    assert runner.env.execution_namespace["selected_table_ids"] == ["table1"]
+    assert any(
+        event.get("event_type") == "single_table_auto_selected"
+        for event in result.logs
+    )
+
 def test_full_runner_pipeline():
     # Test 1: Average score question
     runner = TableQARunner(
