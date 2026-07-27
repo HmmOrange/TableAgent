@@ -281,6 +281,7 @@ class TableAgentService:
         qa_enable_final_review: bool | None = None,
         mode: str = "thinking",
         max_workers: int | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Answer from ingestion-time verified structures without running layout extraction."""
         normalized_query = str(query).strip()
@@ -308,6 +309,7 @@ class TableAgentService:
                 qa_enable_final_review=qa_enable_final_review,
                 mode=mode,
                 max_workers=worker_count,
+                progress_callback=progress_callback,
             )
 
         run_id = new_job_id()
@@ -667,6 +669,7 @@ class TableAgentService:
         qa_enable_final_review: bool | None,
         mode: str,
         max_workers: int,
+        progress_callback: Callable[[str], None] | None,
     ) -> dict[str, Any]:
         """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
         run_id = new_job_id()
@@ -713,6 +716,8 @@ class TableAgentService:
                     max_workers=max_workers,
                 ),
             )
+            if progress_callback is not None:
+                pipeline.set_progress_callback(progress_callback)
             responses = []
             candidate = pipeline.source_retriever.select_indexed(
                 question=normalized_query,

@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Any, List
+from typing import TYPE_CHECKING, Optional, Any, Callable, List
 
 from TableAgent.environment.qa_env import QAEnvironment
 from TableAgent.QA.agents.planner import TableQAPlanner
@@ -101,6 +101,7 @@ class TableQARunner:
         max_retries: int = 3,
         table_retriever: TableRetrieverContract | None = None,
         related_structure_paths: Optional[list[str | Path]] = None,
+        progress_callback: Callable[[str], None] | None = None,
     ):
         raw_config = config or {}
         self.settings = raw_config.get("table_agent", raw_config) if isinstance(raw_config, dict) else {}
@@ -133,6 +134,7 @@ class TableQARunner:
             if explicit_artifact_root:
                 artifact_root = Path(str(explicit_artifact_root))
         self.console_progress = bool(config.get("qa_console_progress", False)) if isinstance(config, dict) else False
+        self.progress_callback = progress_callback
         self.enable_final_answer_review = bool(self.settings.get("qa_final_answer_review", False))
         self.env_plan_category_review = bool(self.settings.get("qa_plan_category_review", False))
         self.qa_artifact_root = artifact_root
@@ -236,6 +238,7 @@ class TableQARunner:
             self._set_active_tables([table_id])
             
         # 1. Plan, retrying malformed or failed planning through the same bounded replanning budget.
+        self._progress("[qa] planning start")
         replan_count = 0
         planning_failure = None
         while True:
@@ -323,6 +326,7 @@ class TableQARunner:
                     success = False
                     error_msg = "Synthesis layer completed, but 'final_answer' variable was not set in namespace."
                 elif self.enable_final_answer_review and not self._is_pure_common_info_plan(plan):
+                    self._progress("[qa] final review start")
                     final_review = self.final_answer_review.run(
                         question=question,
                         plan=plan,
@@ -337,6 +341,7 @@ class TableQARunner:
                     if not final_review.accepted:
                         success = False
                         error_msg = f"Final answer review rejected the plan: {final_review.feedback}"
+                    self._progress("[qa] final review done")
 
             if success or replan_count >= self.max_replans:
                 break
@@ -651,6 +656,8 @@ class TableQARunner:
         self.close()
 
     def _progress(self, message: str) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(message)
         if self.console_progress:
             print(message, flush=True)
 

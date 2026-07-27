@@ -703,6 +703,7 @@ class TableAgentPipeline(BasePipeline):
                 },
                 table_retriever=self.table_retriever,
                 related_structure_paths=related_structure_paths,
+                progress_callback=self._progress_callback,
             ) as runner:
             result = runner.run(question)
             qa_token_usage = result.token_usage

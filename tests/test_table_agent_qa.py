@@ -54,6 +54,17 @@ def _two_step_plan_json() -> str:
     })
 
 
+def test_runner_progress_callback_does_not_require_console_output():
+    messages: list[str] = []
+    runner = object.__new__(TableQARunner)
+    runner.progress_callback = messages.append
+    runner.console_progress = False
+
+    runner._progress("[qa] planning start")
+
+    assert messages == ["[qa] planning start"]
+
+
 def test_required_answer_language_ignores_wrappers_and_glosses():
     question = (
         "❓ Câu hỏi: 이 파일의 전체 시트 구성과 각 시트의 시트명(Tên sheet), "
