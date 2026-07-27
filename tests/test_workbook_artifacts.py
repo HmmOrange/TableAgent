@@ -116,3 +116,26 @@ def test_metadata_summarizes_existing_schema(tmp_path: Path):
 
     assert json.loads(output.read_text(encoding="utf-8"))["description"] == "Workbook values."
     assert len(llm.calls) == 1
+
+
+def test_workbook_summary_uses_compact_schema_context():
+    llm = FakeSummaryLLM(['{"description":"Compact workbook."}'])
+    schema_text = yaml.safe_dump(
+        {
+            "Large Sheet": {
+                "id": "large_sheet",
+                "description": "Equipment maintenance records.",
+                "structure": {"table": {"cells": "oversized-detail-" * 10_000}},
+            }
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+    description = SummaryGenerator(llm).workbook_description(schema_text)
+
+    prompt = llm.calls[0][0]
+    assert description == "Compact workbook."
+    assert "Equipment maintenance records." in prompt
+    assert "oversized-detail" not in prompt
+    assert len(prompt) < 25_000

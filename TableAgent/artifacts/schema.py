@@ -16,6 +16,8 @@ Use the dominant language present in the supplied workbook labels and descriptio
 Be concise, factual, and do not invent information that is not present in the structure.
 """
 
+MAX_WORKBOOK_SUMMARY_CONTEXT_CHARS = 24_000
+
 
 class SummaryGenerator:
     def __init__(self, llm: BaseLLM, *, repair_retries: int = 1):
@@ -31,10 +33,11 @@ class SummaryGenerator:
         return self._description(prompt)
 
     def workbook_description(self, schema_text: str) -> str:
+        summary_context = _workbook_summary_context(schema_text)
         prompt = (
             "Summarize the workbook as a whole from this schema YAML. Mention the main "
             "worksheets and subject areas without inventing facts.\n"
-            f"Schema YAML:\n{schema_text}"
+            f"Schema YAML:\n{summary_context}"
         )
         return self._description(prompt)
 
@@ -56,6 +59,33 @@ class SummaryGenerator:
                 if attempt >= self.repair_retries:
                     raise
         raise ValueError("Summary generation failed")
+
+
+def _workbook_summary_context(schema_text: str) -> str:
+    """Keep workbook summaries bounded without changing the persisted full schema."""
+    try:
+        schema = yaml.safe_load(schema_text)
+    except yaml.YAMLError:
+        schema = None
+
+    if isinstance(schema, dict):
+        compact: dict[str, Any] = {}
+        for sheet_name, sheet_payload in schema.items():
+            if isinstance(sheet_payload, dict):
+                compact[str(sheet_name)] = {
+                    key: sheet_payload[key]
+                    for key in ("id", "description")
+                    if key in sheet_payload
+                }
+            else:
+                compact[str(sheet_name)] = {}
+        context = yaml.safe_dump(compact, allow_unicode=True, sort_keys=False)
+    else:
+        context = schema_text
+
+    if len(context) <= MAX_WORKBOOK_SUMMARY_CONTEXT_CHARS:
+        return context
+    return context[:MAX_WORKBOOK_SUMMARY_CONTEXT_CHARS] + "\n...[truncated]"
 
 
 def build_workbook_schema(

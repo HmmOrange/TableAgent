@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import requests
+
 from service.clients import OpenAICompatibleLLM, create_model_client
 
 
@@ -102,3 +105,21 @@ def test_openai_compatible_client_handles_reasoning_only_response():
 
     assert result.content == "reasoning output"
     assert result.token_capped is True
+
+
+def test_openai_compatible_client_includes_error_response_detail():
+    class ErrorResponse(FakeResponse):
+        status_code = 400
+        text = '{"error":"maximum context length exceeded"}'
+
+        def raise_for_status(self):
+            raise requests.HTTPError("400 Client Error", response=self)
+
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        session=FakeSession(ErrorResponse()),
+    )
+
+    with pytest.raises(requests.HTTPError, match="maximum context length exceeded"):
+        client.generate("question")

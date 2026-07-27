@@ -103,14 +103,14 @@ class OpenAICompatibleLLM(BaseLLM):
                 )
                 if response.status_code not in {408, 409, 429} and response.status_code < 500:
                     break
-                response.raise_for_status()
+                _raise_for_status_with_detail(response)
             except requests.RequestException:
                 if attempt >= self.max_retries:
                     raise
                 time.sleep(self.retry_delay_seconds * (attempt + 1))
         if response is None:
             raise RuntimeError("Model request did not produce a response")
-        response.raise_for_status()
+        _raise_for_status_with_detail(response)
         data = response.json()
         try:
             choice = data["choices"][0]
@@ -202,6 +202,21 @@ def _content_text(content: Any) -> str:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _raise_for_status_with_detail(response: requests.Response) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = str(getattr(response, "text", "") or "").strip()
+        if not detail:
+            raise
+        message = f"{exc}; response: {detail[:1000]}"
+        raise requests.HTTPError(
+            message,
+            response=getattr(exc, "response", None) or response,
+            request=getattr(exc, "request", None) or getattr(response, "request", None),
+        ) from exc
 
 
 __all__ = ["OpenAICompatibleLLM", "create_model_client"]
