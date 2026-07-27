@@ -589,7 +589,28 @@ class TableAgentService:
                 fit_context=pipeline._fit_context,
             )
         if candidate is None:
-            raise RuntimeError("TableAgent hybrid retrieval found no usable candidate")
+            return {
+                "status": "no_evidence",
+                "selected_artifact_id": None,
+                "document_id": None,
+                "workbook": None,
+                "sheet": None,
+                "retrieval": {
+                    "mode": "table_agent_hybrid",
+                    "candidate_count": len(eligible_artifacts),
+                    "workbook_count": len(workbook_paths),
+                    "document_id": None,
+                    "workbook": None,
+                    "sheet": None,
+                    "table_id": None,
+                    "table_name": None,
+                    "selected_artifact_id": None,
+                    "embedding_used": False,
+                    "audit": [],
+                    "reranker": responses[-1] if responses else {},
+                    "rejection_reason": "no_usable_candidate",
+                },
+            }
 
         selected_artifact = next(
             (

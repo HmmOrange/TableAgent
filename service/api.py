@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import tempfile
@@ -14,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
 from service.runtime import Stage, TableAgentService
+
+logger = logging.getLogger("service.api")
 
 
 class PathJobRequest(BaseModel):
@@ -189,13 +192,53 @@ def create_app(
 
     @app.post("/v1/retrieval/select")
     def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:
+        artifact_count = len(request.artifacts)
+        document_count = len(
+            {
+                str(artifact.get("document_id") or "").strip()
+                for artifact in request.artifacts
+                if str(artifact.get("document_id") or "").strip()
+            }
+        )
+        usable_structure_count = sum(
+            1
+            for artifact in request.artifacts
+            if str(
+                artifact.get("upload_name")
+                or artifact.get("document_name")
+                or artifact.get("workbook")
+                or ""
+            ).strip()
+            and str(artifact.get("sheet") or artifact.get("sheet_name") or "").strip()
+            and str(artifact.get("structure_yaml") or "").strip()
+        )
         try:
-            return resolved_service.select_indexed_artifact(
+            result = resolved_service.select_indexed_artifact(
                 query=request.query,
                 artifacts=request.artifacts,
                 mode=request.mode,
             )
+            logger.info(
+                "Indexed retrieval selected mode=%s artifacts=%s documents=%s "
+                "usable_structures=%s status=%s",
+                request.mode,
+                artifact_count,
+                document_count,
+                usable_structure_count,
+                str(result.get("status") or "selected"),
+            )
+            return result
         except (RuntimeError, ValueError) as exc:
+            logger.warning(
+                "Indexed retrieval rejected mode=%s artifacts=%s documents=%s "
+                "usable_structures=%s error_type=%s error=%s",
+                request.mode,
+                artifact_count,
+                document_count,
+                usable_structure_count,
+                type(exc).__name__,
+                str(exc),
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),

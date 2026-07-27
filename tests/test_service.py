@@ -707,6 +707,51 @@ def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):
     assert selection["retrieval"]["audit"][0]["selected"] is False
 
 
+def test_indexed_retrieval_without_candidate_returns_no_evidence(tmp_path: Path):
+    config = load_config("config.example.yaml")
+    config["service"]["root_dir"] = str(tmp_path / "service")
+
+    class EmptyRetriever:
+        def select_indexed(self, **_kwargs):
+            return None
+
+    class EmptyPipeline:
+        source_retriever = EmptyRetriever()
+
+        @staticmethod
+        def _fit_context(value):
+            return value
+
+    service = TableAgentService(
+        config,
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=lambda **_kwargs: EmptyPipeline(),
+    )
+
+    selection = service.select_indexed_artifact(
+        query="unmatched question",
+        mode="instant",
+        artifacts=[
+            {
+                "id": "maintenance:plan",
+                "document_id": "doc-maintenance",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "Plan",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Maintenance schedule",
+                "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+            }
+        ],
+    )
+
+    assert selection["status"] == "no_evidence"
+    assert selection["selected_artifact_id"] is None
+    assert selection["retrieval"]["candidate_count"] == 1
+    assert selection["retrieval"]["rejection_reason"] == "no_usable_candidate"
+
+
 def test_thinking_indexed_retrieval_uses_strong_candidate_fallback(tmp_path: Path):
     candidate = SimpleNamespace(
         artifact_id="aoi:standards",
