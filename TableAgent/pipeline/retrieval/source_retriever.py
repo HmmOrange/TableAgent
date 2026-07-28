@@ -29,7 +29,7 @@ from .cards import (
 )
 from .embeddings import MockEmbeddingModel
 from .reranking import choose_from_reranker
-from .scoring import cosine_similarity, hybrid_score, normalize_scores
+from .scoring import bm25_scores, cosine_similarity, hybrid_score, normalize_scores
 
 
 logger = Logger(__name__)
@@ -744,23 +744,52 @@ class SourceRetriever:
             except Exception as exc:
                 logger.warning("Embedding generation failed: %s", exc)
 
-        normalized_lexical = normalize_scores([candidate.lexical_score for candidate in candidates])
-        lexical_weight = getattr(self.settings, "retrieval_lexical_weight", 0.5)
-        embedding_weight = getattr(self.settings, "retrieval_embedding_weight", 0.5)
+        candidate_texts = [
+            " ".join(
+                part
+                for part in (
+                    candidate.retrieval_card,
+                    candidate.table_name,
+                    candidate.table_description,
+                )
+                if part
+            )
+            for candidate in candidates
+        ]
+        raw_bm25 = bm25_scores(query, candidate_texts)
+        bm25_available = any(score > 0 for score in raw_bm25)
+        normalized_bm25 = normalize_scores(raw_bm25)
+        normalized_lexical = normalize_scores(
+            [candidate.lexical_score for candidate in candidates]
+        )
+        bm25_weight = getattr(self.settings, "retrieval_bm25_weight", 0.2)
+        embedding_weight = getattr(self.settings, "retrieval_embedding_weight", 0.8)
         scored = []
-        for candidate, lexical_score in zip(candidates, normalized_lexical):
+        for candidate, raw_bm25_score, bm25_score, lexical_score in zip(
+            candidates,
+            raw_bm25,
+            normalized_bm25,
+            normalized_lexical,
+        ):
+            effective_bm25 = bm25_score if bm25_available else lexical_score
             score = (
                 hybrid_score(
-                    lexical_score,
+                    effective_bm25,
                     candidate.embedding_score,
-                    lexical_weight=lexical_weight,
+                    lexical_weight=bm25_weight,
                     embedding_weight=embedding_weight,
                 )
                 if embedding_used
-                else candidate.lexical_score
+                else effective_bm25
             )
-            score += float(getattr(self.settings, "retrieval_entity_weight", 2.0)) * candidate.entity_score
-            scored.append(replace(candidate, score=score, embedding_used=embedding_used))
+            scored.append(
+                replace(
+                    candidate,
+                    score=score,
+                    bm25_score=raw_bm25_score,
+                    embedding_used=embedding_used,
+                )
+            )
         ranked = sorted(scored, key=lambda candidate: candidate.score, reverse=True)
         audit_top_k = max(1, int(getattr(self.settings, "retrieval_audit_top_k", 10)))
         audit = tuple(self._audit_row(candidate, rank) for rank, candidate in enumerate(ranked[:audit_top_k], start=1))
@@ -1148,6 +1177,7 @@ class SourceRetriever:
             "retrieval_level": candidate.retrieval_level,
             "score": candidate.score,
             "lexical_score": candidate.lexical_score,
+            "bm25_score": candidate.bm25_score,
             "embedding_score": candidate.embedding_score,
             "embedding_used": candidate.embedding_used,
             "entity_score": candidate.entity_score,

@@ -690,12 +690,9 @@ class TableAgentService:
 
     @staticmethod
     def _indexed_candidate_is_relevant(candidate: Any) -> bool:
-        matched_count = len(candidate.matched_terms)
-        term_count = matched_count + len(candidate.missing_terms)
-        coverage = matched_count / term_count if term_count else 0.0
         return bool(
             candidate.lexical_score >= 2
-            or coverage >= 0.5
+            or float(getattr(candidate, "bm25_score", 0.0) or 0.0) >= 0.5
             or (candidate.embedding_used and candidate.embedding_score >= 0.5)
         )
 
@@ -711,7 +708,7 @@ class TableAgentService:
         max_workers: int,
         progress_callback: Callable[[str], None] | None,
     ) -> dict[str, Any]:
-        """Run one QA pass after TableAgent's lexical/entity/embedding selection."""
+        """Run one QA pass after TableAgent's BM25/embedding selection."""
         run_id = new_job_id()
         with self._indexed_qa_workspace(run_id) as workspace_dir:
             output_dir = workspace_dir / "output"

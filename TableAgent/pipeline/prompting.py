@@ -35,6 +35,7 @@ class PromptBuilder:
                 f"table_name: {candidate.table_name}\n"
                 f"score: {candidate.score}\n"
                 f"lexical_score: {candidate.lexical_score}\n"
+                f"bm25_score: {candidate.bm25_score}\n"
                 f"embedding_score: {candidate.embedding_score}\n"
                 f"embedding_used: {candidate.embedding_used}\n"
                 f"entity_score: {candidate.entity_score}\n"

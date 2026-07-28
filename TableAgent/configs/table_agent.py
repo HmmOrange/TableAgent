@@ -48,6 +48,7 @@ class TableAgentConfig:
     retrieval_lexical_weight: float
     retrieval_embedding_weight: float
     retrieval_entity_weight: float
+    retrieval_bm25_weight: float
     retrieval_explicit_sheet_guard: bool
     retrieval_audit_top_k: int
     retrieval_query_type: str
@@ -98,9 +99,15 @@ class TableAgentConfig:
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
             qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
             retrieval_embedding_provider=merged.get("retrieval_embedding_provider"),
-            retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.15)),
-            retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.75)),
-            retrieval_entity_weight=float(merged.get("retrieval_entity_weight", 0.1)),
+            retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.0)),
+            retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.8)),
+            retrieval_entity_weight=float(merged.get("retrieval_entity_weight", 0.0)),
+            retrieval_bm25_weight=float(
+                merged.get(
+                    "retrieval_bm25_weight",
+                    merged.get("retrieval_lexical_weight", 0.2),
+                )
+            ),
             retrieval_explicit_sheet_guard=_bool(
                 merged.get("retrieval_explicit_sheet_guard", True)
             ),

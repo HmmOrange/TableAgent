@@ -71,9 +71,10 @@ table_agent:
   qa_max_error_chars: 2000
   qa_max_value_repr_chars: 800
   retrieval_embedding_provider: "retrieval_embedding_model"
-  retrieval_lexical_weight: 0.15
-  retrieval_embedding_weight: 0.75
-  retrieval_entity_weight: 0.1
+  retrieval_lexical_weight: 0.0
+  retrieval_embedding_weight: 0.8
+  retrieval_entity_weight: 0.0
+  retrieval_bm25_weight: 0.2
   retrieval_explicit_sheet_guard: true
 
 service:

@@ -21,6 +21,7 @@ class SourceCandidate:
     sheet_text: str
     score: float
     lexical_score: float = 0.0
+    bm25_score: float = 0.0
     embedding_score: float = 0.0
     embedding_used: bool = False
     retrieval_card: str = ""

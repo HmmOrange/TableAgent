@@ -17,7 +17,7 @@ from .contracts import (
 from .embeddings import MockEmbeddingModel, OpenAICompatibleEmbeddingClient
 from .models import SourceCandidate, TableCandidate, TableSearchRequest
 from .reranking import choose_from_reranker
-from .scoring import cosine_similarity, hybrid_score, normalize_scores
+from .scoring import bm25_scores, cosine_similarity, hybrid_score, normalize_scores
 from .source_retriever import SourceRetriever
 
 
@@ -34,6 +34,7 @@ __all__ = [
     "build_sheet_metadata_payload",
     "build_source_retrieval_card",
     "build_table_retrieval_cards",
+    "bm25_scores",
     "choose_from_reranker",
     "cosine_similarity",
     "extract_columns",

@@ -8,6 +8,7 @@ from TableAgent.artifacts import write_sheet_retrieval_cards, write_workbook_ret
 from TableAgent.configs import TableAgentConfig
 from TableAgent.pipeline.retrieval import (
     SourceRetriever,
+    bm25_scores,
     build_metadata_retrieval_card,
     build_sheet_metadata_payload,
     build_table_retrieval_cards,
@@ -21,6 +22,18 @@ class FakeLLM(BaseLLM):
 
     def generate(self, prompt: str, system_prompt: str | None = None, **kwargs) -> LLMResponse:
         return LLMResponse(content=self.response_content, prompt_tokens=10, completion_tokens=10)
+
+
+def test_bm25_prefers_rare_exact_terms():
+    scores = bm25_scores(
+        "CF54-08",
+        [
+            "generic maintenance records",
+            "detailed failure record for CF54-08",
+        ],
+    )
+
+    assert scores[1] > scores[0]
 
 
 @pytest.fixture(autouse=True)
@@ -1129,6 +1142,7 @@ def test_candidate_prompt_text_labels(temp_sources_dir):
     assert "score: 0.85" in prompt_text
     assert "lexical_score: 0.7" in prompt_text
     assert "embedding_score: 0.9" in prompt_text
+    assert "bm25_score:" in prompt_text
     assert "embedding_used: True" in prompt_text
     assert "entity_score:" in prompt_text
     assert "matched_terms:" in prompt_text

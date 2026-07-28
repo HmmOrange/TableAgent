@@ -607,6 +607,7 @@ class TableAgentPipeline(BasePipeline):
         retrieval_info = {
             "score": candidate.score,
             "lexical_score": getattr(candidate, "lexical_score", candidate.score),
+            "bm25_score": getattr(candidate, "bm25_score", 0.0),
             "embedding_score": getattr(candidate, "embedding_score", 0.0),
             "embedding_used": getattr(candidate, "embedding_used", False),
             "fallback_used": getattr(candidate, "fallback_used", False),
