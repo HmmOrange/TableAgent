@@ -41,7 +41,7 @@ table_agent:
   shared_dir_name: "shared"
   artifact_dir: "outputs/table_agent"
   max_refinement_rounds: 3
-  max_context_chars: 60000
+  max_context_chars: 240000
   render_timeout_seconds: 60
   libreoffice_path: null
   libreoffice_image_resolution: 600

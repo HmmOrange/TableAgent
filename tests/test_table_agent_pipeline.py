@@ -1270,9 +1270,9 @@ def test_table_agent_default_applies_generation_cap_and_early_breaks(tmp_path: P
     assert layout_vlm.max_tokens == 8192
 
     # Test fit_context truncation
-    long_content = "X" * 70000
+    long_content = "X" * 250000
     fitted = pipeline._fit_context(long_content)
-    assert len(fitted) <= 60000 + 50
+    assert len(fitted) <= 240000 + 50
     assert "...TRUNCATED..." in fitted
 
 
