@@ -723,6 +723,215 @@ def test_indexed_retrieval_reuses_qdrant_scores_without_reembedding(
     assert candidate.embedding_used is True
     assert candidate.embedding_score == 0.92
 
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Show the maintenance records in sheet PRESS",
+        "Show the maintenance records in the PRESS sheet",
+    ],
+)
+def test_indexed_retrieval_restricts_to_one_explicit_sheet(
+    tmp_path,
+    question,
+):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    workbook_path = tmp_path / "maintenance.xlsx"
+
+    candidate = retriever.select_indexed(
+        question=question,
+        workbook_paths={"maintenance.xlsx": workbook_path},
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "press:parts",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "PRESS",
+                "table_id": "parts",
+                "score": 0.10,
+                "retrieval_card": "Press spare parts",
+                "structure_yaml": "parts:\n  sheet: PRESS\n  headers: []\n",
+            },
+            {
+                "id": "press:history",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "PRESS",
+                "table_id": "history",
+                "score": 0.05,
+                "retrieval_card": "Press maintenance history",
+                "structure_yaml": "history:\n  sheet: PRESS\n  headers: []\n",
+            },
+            {
+                "id": "plasma:plan",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "PLASMA",
+                "score": 0.99,
+                "retrieval_card": "Maintenance plan",
+                "structure_yaml": "plan:\n  sheet: PLASMA\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.sheet_name == "PRESS"
+    assert {row["artifact_id"] for row in candidate.retrieval_audit} == {
+        "press:parts",
+        "press:history",
+    }
+    guard = candidate.retrieval_trace[-1]["explicit_sheet_guard"]
+    assert guard["applied"] is True
+    assert guard["match_type"] == "exact"
+    assert guard["candidate_count_before"] == 3
+    assert guard["candidate_count_after"] == 2
+
+
+def test_indexed_retrieval_accepts_close_explicit_sheet_alias(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    workbook_path = tmp_path / "maintenance.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="Show the February records from sheet HP F1",
+        workbook_paths={"maintenance.xlsx": workbook_path},
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "hp1",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "HP 1",
+                "score": 0.10,
+                "retrieval_card": "February records",
+                "structure_yaml": "table1:\n  sheet: HP 1\n  headers: []\n",
+            },
+            {
+                "id": "plasma",
+                "upload_name": "maintenance.xlsx",
+                "sheet": "PLASMA",
+                "score": 0.99,
+                "retrieval_card": "February records",
+                "structure_yaml": "table1:\n  sheet: PLASMA\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.sheet_name == "HP 1"
+    assert candidate.retrieval_trace[-1]["explicit_sheet_guard"]["applied"] is True
+
+
+def test_indexed_retrieval_does_not_treat_filter_values_as_sheet_names(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    workbook_path = tmp_path / "students.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="Filter students where criterion A = B",
+        workbook_paths={"students.xlsx": workbook_path},
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "sheet-a",
+                "upload_name": "students.xlsx",
+                "sheet": "A",
+                "score": 0.10,
+                "retrieval_card": "Student criteria",
+                "structure_yaml": "table1:\n  sheet: A\n  headers: []\n",
+            },
+            {
+                "id": "sheet-b",
+                "upload_name": "students.xlsx",
+                "sheet": "B",
+                "score": 0.90,
+                "retrieval_card": "Student criteria",
+                "structure_yaml": "table1:\n  sheet: B\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.sheet_name == "B"
+    guard = candidate.retrieval_trace[-1]["explicit_sheet_guard"]
+    assert guard["applied"] is False
+    assert guard["reason"] == "not_detected"
+
+
+def test_indexed_retrieval_leaves_duplicate_sheet_names_ambiguous(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    first_path = tmp_path / "first.xlsx"
+    second_path = tmp_path / "second.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="Show records from sheet PRESS",
+        workbook_paths={
+            "first.xlsx": first_path,
+            "second.xlsx": second_path,
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "first-press",
+                "upload_name": "first.xlsx",
+                "sheet": "PRESS",
+                "score": 0.10,
+                "retrieval_card": "Press records",
+                "structure_yaml": "table1:\n  sheet: PRESS\n  headers: []\n",
+            },
+            {
+                "id": "second-press",
+                "upload_name": "second.xlsx",
+                "sheet": "PRESS",
+                "score": 0.90,
+                "retrieval_card": "Press records",
+                "structure_yaml": "table1:\n  sheet: PRESS\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.artifact_id == "second-press"
+    guard = candidate.retrieval_trace[-1]["explicit_sheet_guard"]
+    assert guard["applied"] is False
+    assert guard["reason"] == "ambiguous"
+
+
 def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
     config = TableAgentConfig.from_config({
         "artifact_dir": str(temp_sources_dir.parent),

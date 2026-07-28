@@ -54,7 +54,7 @@ table_agent:
   run_retrieval: true
   perfect_retrieval: false
   retrieval_rerank_with_llm: true
-  retrieval_top_k: 5
+  retrieval_top_k: 8
   retrieval_candidate_max_chars: 4000
   exstruct_mode: "light"
   viewport_rows: 50
@@ -71,8 +71,10 @@ table_agent:
   qa_max_error_chars: 2000
   qa_max_value_repr_chars: 800
   retrieval_embedding_provider: "retrieval_embedding_model"
-  retrieval_lexical_weight: 0.5
-  retrieval_embedding_weight: 0.5
+  retrieval_lexical_weight: 0.15
+  retrieval_embedding_weight: 0.75
+  retrieval_entity_weight: 0.1
+  retrieval_explicit_sheet_guard: true
 
 service:
   root_dir: "outputs"

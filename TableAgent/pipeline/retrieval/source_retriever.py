@@ -41,6 +41,9 @@ _QUERY_STOPWORDS = {
     "trong", "và", "với",
 }
 
+_EXPLICIT_SHEET_CLOSE_SCORE = 500.0
+_EXPLICIT_SHEET_EXACT_SCORE = 1000.0
+
 
 class SourceRetriever:
     """Workbook/sheet/table retriever over prepared TableAgent source artifacts."""
@@ -153,6 +156,13 @@ class SourceRetriever:
             else:
                 data_candidates.append(candidate)
 
+        data_candidates, metadata_candidates, sheet_guard = (
+            self._restrict_to_explicit_indexed_sheet(
+                question,
+                data_candidates,
+                metadata_candidates,
+            )
+        )
         query_type = self._resolve_query_type(question, responses)
         candidates = self._rank_candidates(
             self._candidates_for_query_type(
@@ -167,14 +177,16 @@ class SourceRetriever:
         if not candidates:
             return None
         if not self.settings.retrieval_rerank_with_llm or len(candidates) == 1 or self.llm is None:
-            return candidates[0]
-        return self._select_from_batches(
-            question,
-            candidates,
-            responses,
-            fit_context,
-            query_type=query_type,
-        )
+            selected = candidates[0]
+        else:
+            selected = self._select_from_batches(
+                question,
+                candidates,
+                responses,
+                fit_context,
+                query_type=query_type,
+            )
+        return self._with_explicit_sheet_trace(selected, sheet_guard)
 
     def select_perfect(self, sample: EvalSample) -> SourceCandidate:
         """Select the best prepared source deterministically, without embeddings or LLM reranking."""
@@ -397,11 +409,13 @@ class SourceRetriever:
             return 0.0
         score = float(len(sheet_name)) if cls._question_explicitly_names_sheet(question, sheet_name) else 0.0
         sheet_alias = cls._sheet_alias(sheet_name)
-        marker_pattern = re.compile(r"(?:sheet|worksheet|tab|ph[oò]ng|시트)\s+([^,;:()]+)", re.IGNORECASE)
-        for marker in marker_pattern.finditer(str(question)):
-            words = re.findall(r"\w+", marker.group(1), flags=re.UNICODE)[:4]
+        marker = r"(?:sheet|worksheet|tab|ph[oò]ng|시트)"
+
+        def reward(words: list[str], *, prefixes: bool) -> None:
+            nonlocal score
             for length in range(1, len(words) + 1):
-                candidate = cls._sheet_alias(" ".join(words[:length]))
+                selected_words = words[:length] if prefixes else words[-length:]
+                candidate = cls._sheet_alias(" ".join(selected_words))
                 if not candidate:
                     continue
                 similarity = SequenceMatcher(None, candidate, sheet_alias).ratio()
@@ -409,6 +423,20 @@ class SourceRetriever:
                     score = max(score, 1000.0 + len(sheet_alias))
                 elif similarity >= 0.8:
                     score = max(score, 500.0 + similarity)
+
+        marker_before = re.compile(rf"{marker}\s+([^,;:()]+)", re.IGNORECASE)
+        for match in marker_before.finditer(str(question)):
+            reward(
+                re.findall(r"\w+", match.group(1), flags=re.UNICODE)[:4],
+                prefixes=True,
+            )
+
+        marker_after = re.compile(rf"([^,;:()]+?)\s+{marker}(?!\w)", re.IGNORECASE)
+        for match in marker_after.finditer(str(question)):
+            reward(
+                re.findall(r"\w+", match.group(1), flags=re.UNICODE)[-4:],
+                prefixes=False,
+            )
         return score
 
     @classmethod
@@ -422,6 +450,97 @@ class SourceRetriever:
             if token:
                 normalized.append(token)
         return "".join(normalized)
+
+    @classmethod
+    def _indexed_sheet_identity(cls, candidate: SourceCandidate) -> tuple[str, str]:
+        return (
+            str(candidate.workbook_path.resolve()).casefold(),
+            cls._sheet_alias(candidate.sheet_name),
+        )
+
+    def _restrict_to_explicit_indexed_sheet(
+        self,
+        question: str,
+        data_candidates: list[SourceCandidate],
+        metadata_candidates: list[SourceCandidate],
+    ) -> tuple[list[SourceCandidate], list[SourceCandidate], dict[str, Any]]:
+        all_candidates = [*data_candidates, *metadata_candidates]
+        before_count = len(all_candidates)
+        base_trace: dict[str, Any] = {
+            "applied": False,
+            "match_type": None,
+            "score": None,
+            "workbook": None,
+            "sheet": None,
+            "reason": "disabled",
+            "candidate_count_before": before_count,
+            "candidate_count_after": before_count,
+        }
+        if not getattr(self.settings, "retrieval_explicit_sheet_guard", True):
+            return data_candidates, metadata_candidates, base_trace
+
+        grouped: dict[tuple[str, str], list[SourceCandidate]] = {}
+        for candidate in all_candidates:
+            identity = self._indexed_sheet_identity(candidate)
+            if identity[1]:
+                grouped.setdefault(identity, []).append(candidate)
+
+        scored = [
+            (
+                self._sheet_reference_score(question, group[0].sheet_name),
+                identity,
+                group[0],
+            )
+            for identity, group in grouped.items()
+        ]
+        exact_matches = [item for item in scored if item[0] >= _EXPLICIT_SHEET_EXACT_SCORE]
+        close_matches = [
+            item
+            for item in scored
+            if _EXPLICIT_SHEET_CLOSE_SCORE <= item[0] < _EXPLICIT_SHEET_EXACT_SCORE
+        ]
+        matches = exact_matches if exact_matches else close_matches
+        match_type = "exact" if exact_matches else "close_alias"
+
+        if len(matches) != 1:
+            reason = "not_detected" if not matches else "ambiguous"
+            return data_candidates, metadata_candidates, {
+                **base_trace,
+                "reason": reason,
+                "match_count": len(matches),
+            }
+
+        score, selected_identity, representative = matches[0]
+
+        def selected(candidate: SourceCandidate) -> bool:
+            return self._indexed_sheet_identity(candidate) == selected_identity
+
+        filtered_data = [candidate for candidate in data_candidates if selected(candidate)]
+        filtered_metadata = [
+            candidate for candidate in metadata_candidates if selected(candidate)
+        ]
+        after_count = len(filtered_data) + len(filtered_metadata)
+        return filtered_data, filtered_metadata, {
+            **base_trace,
+            "applied": True,
+            "match_type": match_type,
+            "score": score,
+            "workbook": representative.workbook_path.name,
+            "sheet": representative.sheet_name,
+            "reason": None,
+            "match_count": 1,
+            "candidate_count_after": after_count,
+        }
+
+    @staticmethod
+    def _with_explicit_sheet_trace(
+        candidate: SourceCandidate,
+        sheet_guard: dict[str, Any],
+    ) -> SourceCandidate:
+        trace = dict(candidate.retrieval_trace[-1]) if candidate.retrieval_trace else {}
+        trace["explicit_sheet_guard"] = dict(sheet_guard)
+        previous = candidate.retrieval_trace[:-1] if candidate.retrieval_trace else ()
+        return replace(candidate, retrieval_trace=(*previous, trace))
 
     def load_perfect_candidates(self, sample: EvalSample) -> list[SourceCandidate]:
         try:
