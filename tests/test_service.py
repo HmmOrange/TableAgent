@@ -979,3 +979,36 @@ def test_service_uses_explicit_model_profiles(monkeypatch, tmp_path: Path):
         ("llm", "alternate_answer"),
         ("vlm", "alternate_layout"),
     ]
+
+
+def test_service_uses_explicit_embedding_profile(monkeypatch, tmp_path: Path):
+    calls = []
+
+    class FakeEmbeddingClient:
+        model = "alternate-embedding-model"
+
+    class FakeEmbeddingFactory:
+        @staticmethod
+        def from_config(config, provider):
+            calls.append(provider)
+            return FakeEmbeddingClient()
+
+    monkeypatch.setattr(
+        "service.runtime.OpenAICompatibleEmbeddingClient",
+        FakeEmbeddingFactory,
+    )
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        embedding_profile="alternate_embedding",
+    )
+
+    pipeline_config = service._pipeline_config(
+        "qa",
+        tmp_path / "output",
+        tmp_path / "source",
+    )
+    _, model = service._retrieval_embedding_backend()
+
+    assert pipeline_config["retrieval_embedding_provider"] == "alternate_embedding"
+    assert calls == ["alternate_embedding"]
+    assert model == "alternate-embedding-model"

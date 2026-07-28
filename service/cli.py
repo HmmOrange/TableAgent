@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Configured VLM profile to use instead of the config.yaml default.",
     )
     parser.add_argument(
+        "-em",
+        "--embedding",
+        help="Configured embedding profile to use instead of the config.yaml default.",
+    )
+    parser.add_argument(
         "--workers",
         "--max-workers",
         dest="max_workers",
@@ -122,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             llm_profile=args.llm,
             vlm_profile=args.vlm,
+            embedding_profile=args.embedding,
         )
         if cleanup_requested:
             result = service.delete_runs(args.delete_job, all_runs=args.delete_all_jobs)

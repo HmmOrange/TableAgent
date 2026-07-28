@@ -187,6 +187,7 @@ Summary:
 | `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
 | `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
 | `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
+| `-em NAME` / `--embedding NAME` | Overrides the configured retrieval embedding profile for this run. |
 | `--workers N` | Overrides `service.max_workers` for this run; `--max-workers` is an alias. |
 | `--delete-job ID` | Deletes one saved run directory. Repeat for multiple run IDs. |
 | `--delete-all-jobs` | Deletes every saved run directory under `service.root_dir`. |
@@ -312,6 +313,7 @@ run directory.
 | `--artifacts PATH` | Runs indexed QA from `run.json`, JSON/JSONL records, or a trusted `retrieval_cards.pkl`. Repeat for multiple files; requires `--stage qa`. |
 | `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
 | `--llm NAME` | Overrides the configured answer LLM profile. |
+| `-em NAME` / `--embedding NAME` | Overrides the configured retrieval embedding profile for this run. |
 
 The `--vlm` option selects the layout VLM used to generate structures for QA.
 

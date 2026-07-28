@@ -52,6 +52,7 @@ class TableAgentService:
         layout_vlm_client: Any | None = None,
         llm_profile: str | None = None,
         vlm_profile: str | None = None,
+        embedding_profile: str | None = None,
         embedding_client: Any | None = None,
         root_dir: str | Path | None = None,
         pipeline_factory: Callable[..., TableAgentPipeline] = TableAgentPipeline,
@@ -78,6 +79,7 @@ class TableAgentService:
         self._embedding_model: str | None = None
         self.llm_profile = llm_profile or "table_agent"
         self.vlm_profile = vlm_profile or "table_agent"
+        self.embedding_profile = embedding_profile
         self.pipeline_factory = pipeline_factory
 
     @classmethod
@@ -1107,6 +1109,8 @@ class TableAgentService:
         max_workers: int | None = None,
     ) -> dict[str, Any]:
         agent_config = dict(self.config.get("table_agent") or {})
+        if self.embedding_profile:
+            agent_config["retrieval_embedding_provider"] = self.embedding_profile
         agent_config.update(
             {
                 "phase": phase,
@@ -1149,7 +1153,7 @@ class TableAgentService:
             return self._embedding_client, model
 
         table_agent_config = self.config.get("table_agent") or {}
-        provider = (
+        provider = self.embedding_profile or (
             table_agent_config.get("retrieval_embedding_provider")
             if isinstance(table_agent_config, dict)
             else None

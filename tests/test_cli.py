@@ -27,6 +27,8 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
             "alternate_answer",
             "--vlm",
             "alternate_layout",
+            "-em",
+            "alternate_embedding",
             "--workers",
             "6",
         ]
@@ -41,6 +43,7 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.sheet == []
     assert args.llm == "alternate_answer"
     assert args.vlm == "alternate_layout"
+    assert args.embedding == "alternate_embedding"
     assert args.max_workers == 6
     assert args.delete_job == []
     assert args.delete_all_jobs is False
@@ -162,6 +165,8 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
             "alternate_answer",
             "--vlm",
             "alternate_layout",
+            "-em",
+            "alternate_embedding",
         ]
     )
 
@@ -170,6 +175,7 @@ def test_cli_runs_structure_stage_and_prints_json(monkeypatch, capsys):
         "config": "private.yaml",
         "llm_profile": "alternate_answer",
         "vlm_profile": "alternate_layout",
+        "embedding_profile": "alternate_embedding",
         "stage": "structure",
         "workbooks": ["sales.xlsx", "costs.xlsx"],
         "queries": [],
