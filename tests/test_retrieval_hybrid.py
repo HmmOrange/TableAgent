@@ -737,7 +737,7 @@ def test_indexed_retrieval_reuses_qdrant_scores_without_reembedding(
     assert candidate.embedding_score == 0.92
 
 
-def test_indexed_retrieval_restricts_to_uniquely_referenced_workbook(tmp_path):
+def test_indexed_retrieval_boosts_uniquely_referenced_workbook_without_filtering(tmp_path):
     config = TableAgentConfig.from_config({
         "artifact_dir": str(tmp_path / "artifacts"),
         "source_artifact_dir": str(tmp_path / "sources"),
@@ -795,13 +795,72 @@ def test_indexed_retrieval_restricts_to_uniquely_referenced_workbook(tmp_path):
 
     assert candidate is not None
     assert candidate.workbook_path.name == maintenance_name
+    assert candidate.retrieval_level == "workbook"
+    assert candidate.sheet_names == ("2026년 설비유지보수 계획", "Sheet3")
     assert candidate.retrieval_trace[-1]["query_type"] == "metadata"
     guard = candidate.retrieval_trace[-1]["explicit_workbook_guard"]
-    assert guard["applied"] is True
-    assert guard["match_type"] == "unique_terms"
+    assert guard["applied"] is False
+    assert guard["match_type"] == "unique_identifier_terms"
     assert set(guard["matched_terms"]) >= {"2026년", "ver", "1.0"}
+    assert guard["reason"] == "ranking_boost"
+    assert guard["score_boost"] == 1.0
     assert guard["candidate_count_before"] == 3
-    assert guard["candidate_count_after"] == 2
+    assert guard["candidate_count_after"] == 3
+    multi_sheet = candidate.retrieval_trace[-1]["multi_sheet_metadata"]
+    assert multi_sheet["applied"] is True
+    assert multi_sheet["sheets"] == ["2026년 설비유지보수 계획", "Sheet3"]
+
+
+def test_indexed_retrieval_does_not_treat_generic_question_words_as_workbook_identity(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    inventory_name = "LV01_설비_REPORT Quản Lý Thiết bị Tháng 02.2025.xlsx"
+    failure_name = "LV01_설비_REPORT 각공정 고장 설비 수리 진행 현황 20260316.xlsx"
+
+    candidate = retriever.select_indexed(
+        question=(
+            "Ngày 01/01/2026, ca đêm, những thiết bị nào bị hỏng tại Nhà máy 2? "
+            "Liệt kê công đoạn, tên thiết bị, vị trí hỏng và nội dung hỏng."
+        ),
+        workbook_paths={
+            inventory_name: tmp_path / inventory_name,
+            failure_name: tmp_path / failure_name,
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "inventory:export",
+                "upload_name": inventory_name,
+                "sheet": "Xuất T8",
+                "score": 0.20,
+                "retrieval_card": "Equipment inventory export",
+                "structure_yaml": "inventory:\n  sheet: Xuất T8\n  headers: []\n",
+            },
+            {
+                "id": "failure:report",
+                "upload_name": failure_name,
+                "sheet": "Bao_cao_F2",
+                "score": 0.90,
+                "retrieval_card": "Night shift factory 2 failure report with detailed fault content",
+                "structure_yaml": "failures:\n  sheet: Bao_cao_F2\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.artifact_id == "failure:report"
+    guard = candidate.retrieval_trace[-1]["explicit_workbook_guard"]
+    assert guard["applied"] is False
+    assert guard["reason"] == "not_detected"
 
 
 def test_indexed_retrieval_does_not_guess_workbook_from_one_filename_token(tmp_path):

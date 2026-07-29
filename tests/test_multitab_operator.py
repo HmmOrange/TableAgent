@@ -95,7 +95,10 @@ def test_question_header_hints_preserve_detailed_fault_column(tmp_path: Path):
     try:
         hints = get_question_header_hints(
             env,
-            "Liệt kê vị trí hỏng và Nội dung hỏng.",
+            (
+                "Ngày 01/01/2026, ca đêm, những thiết bị nào bị hỏng tại Nhà máy 2? "
+                "Liệt kê công đoạn, tên thiết bị, vị trí hỏng và nội dung hỏng."
+            ),
             ["bao_cao_f2"],
         )
     finally:

@@ -628,6 +628,9 @@ class TableAgentPipeline(BasePipeline):
             retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
             retrieval_info["reranker_rationale"] = getattr(candidate, "reranker_rationale", "")
         verification = self._prepared_verification(candidate.directory)
+        workbook_sheets = list(getattr(candidate, "sheet_names", ()) or ())
+        if not workbook_sheets:
+            workbook_sheets = [candidate.sheet_name]
 
         return PipelineOutput(
             sample_id=sample.sample_id,
@@ -644,7 +647,7 @@ class TableAgentPipeline(BasePipeline):
                 "image_path": display_path(candidate.image_path),
                 "html_path": display_path(candidate.html_path) if candidate.html_path else None,
                 "workbook_source_format": "xlsx",
-                "workbook_sheets": [candidate.sheet_name],
+                "workbook_sheets": workbook_sheets,
                 "verification": verification,
                 "artifact_dir": display_path(candidate.directory),
                 "image_tiles": read_image_tiles(candidate.directory),

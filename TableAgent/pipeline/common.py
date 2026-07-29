@@ -37,6 +37,8 @@ class SourceCandidate:
     retrieval_trace: tuple[dict[str, Any], ...] = ()
     retrieval_audit: tuple[dict[str, Any], ...] = ()
     artifact_id: str = ""
+    sheet_names: tuple[str, ...] = ()
+    workbook_reference_score: float = 0.0
 
 
 def safe_name(value: str) -> str:

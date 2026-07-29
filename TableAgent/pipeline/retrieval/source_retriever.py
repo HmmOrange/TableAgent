@@ -194,6 +194,11 @@ class SourceRetriever:
                 fit_context,
                 query_type=query_type,
             )
+        selected = self._expand_metadata_sheet_selection(
+            selected,
+            candidates,
+            sheet_guard=sheet_guard,
+        )
         selected = self._with_explicit_sheet_trace(selected, sheet_guard)
         return self._with_explicit_workbook_trace(selected, workbook_guard)
 
@@ -552,15 +557,33 @@ class SourceRetriever:
             }
 
         _, _, selected_identity, matched_terms, representative = scored[0]
-        return cls._filter_indexed_workbook_candidates(
-            data_candidates,
-            metadata_candidates,
-            selected_identity=selected_identity,
-            representative=representative,
-            trace={
+        if not any(cls._identifier_workbook_reference_token(token) for token in matched_terms):
+            return data_candidates, metadata_candidates, base_trace
+
+        score_boost = 1.0
+
+        def boost(candidate: SourceCandidate) -> SourceCandidate:
+            identity = str(candidate.workbook_path.resolve()).casefold()
+            if identity != selected_identity:
+                return candidate
+            return replace(
+                candidate,
+                workbook_reference_score=max(
+                    candidate.workbook_reference_score,
+                    score_boost,
+                ),
+            )
+
+        return (
+            [boost(candidate) for candidate in data_candidates],
+            [boost(candidate) for candidate in metadata_candidates],
+            {
                 **base_trace,
-                "match_type": "unique_terms",
+                "match_type": "unique_identifier_terms",
                 "matched_terms": matched_terms,
+                "workbook": representative.workbook_path.name,
+                "reason": "ranking_boost",
+                "score_boost": score_boost,
             },
         )
 
@@ -603,6 +626,93 @@ class SourceRetriever:
             len(token) >= 3
             or "." in token
             or (len(token) >= 2 and any(ord(character) > 127 for character in token))
+        )
+
+    @staticmethod
+    def _identifier_workbook_reference_token(token: str) -> bool:
+        normalized = str(token or "").casefold()
+        return normalized in {"ver", "version"} or any(
+            character.isdigit() for character in normalized
+        )
+
+    @staticmethod
+    def _expand_metadata_sheet_selection(
+        selected: SourceCandidate,
+        ranked_candidates: list[SourceCandidate],
+        *,
+        sheet_guard: dict[str, Any],
+    ) -> SourceCandidate:
+        if (
+            selected.retrieval_type != "metadata"
+            or selected.retrieval_level != "sheet"
+            or sheet_guard.get("applied")
+        ):
+            return selected
+
+        workbook_identity = str(selected.workbook_path.resolve()).casefold()
+        selected_sheets: list[SourceCandidate] = []
+        seen_sheet_names: set[str] = set()
+        for candidate in ranked_candidates:
+            if (
+                candidate.retrieval_type != "metadata"
+                or candidate.retrieval_level != "sheet"
+            ):
+                continue
+            if str(candidate.workbook_path.resolve()).casefold() != workbook_identity:
+                continue
+            sheet_identity = candidate.sheet_name.casefold()
+            if not sheet_identity or sheet_identity in seen_sheet_names:
+                continue
+            seen_sheet_names.add(sheet_identity)
+            selected_sheets.append(candidate)
+            if len(selected_sheets) >= 3:
+                break
+
+        if len(selected_sheets) < 2:
+            return selected
+
+        sheet_names = tuple(candidate.sheet_name for candidate in selected_sheets)
+        sheet_payloads = [
+            {
+                "name": candidate.sheet_name,
+                "summary": candidate.retrieval_card,
+            }
+            for candidate in selected_sheets
+        ]
+        workbook_payload = {
+            "metadata": {
+                "type": "workbook",
+                "workbook": selected.workbook_path.name,
+                "selected_sheet_count": len(sheet_names),
+                "sheets": sheet_payloads,
+            }
+        }
+        combined_card = "\n\n".join(
+            f"Sheet: {candidate.sheet_name}\n{candidate.retrieval_card}"
+            for candidate in selected_sheets
+        )
+        trace = dict(selected.retrieval_trace[-1]) if selected.retrieval_trace else {}
+        trace["multi_sheet_metadata"] = {
+            "applied": True,
+            "sheet_count": len(sheet_names),
+            "sheets": list(sheet_names),
+        }
+        previous = selected.retrieval_trace[:-1] if selected.retrieval_trace else ()
+        return replace(
+            selected,
+            sheet_name="; ".join(sheet_names),
+            sheet_names=sheet_names,
+            structure_text=yaml.safe_dump(
+                workbook_payload,
+                allow_unicode=True,
+                sort_keys=False,
+            ).strip(),
+            sheet_text=combined_card,
+            retrieval_card=combined_card,
+            retrieval_level="workbook",
+            artifact_id="multi-sheet:"
+            + ":".join(candidate.artifact_id for candidate in selected_sheets),
+            retrieval_trace=(*previous, trace),
         )
 
     def _restrict_to_explicit_indexed_sheet(
@@ -939,6 +1049,7 @@ class SourceRetriever:
                 if embedding_used
                 else effective_bm25
             )
+            score += candidate.workbook_reference_score
             scored.append(
                 replace(
                     candidate,
@@ -1338,11 +1449,13 @@ class SourceRetriever:
             "bm25_score": candidate.bm25_score,
             "embedding_score": candidate.embedding_score,
             "embedding_used": candidate.embedding_used,
+            "workbook_reference_score": candidate.workbook_reference_score,
             "entity_score": candidate.entity_score,
             "matched_terms": list(candidate.matched_terms),
             "missing_terms": list(candidate.missing_terms),
             "workbook": candidate.workbook_path.name,
             "sheet": candidate.sheet_name,
+            "sheets": list(candidate.sheet_names),
             "table_id": candidate.table_id,
             "table_name": candidate.table_name,
             "table_description": candidate.table_description,
