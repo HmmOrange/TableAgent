@@ -5,7 +5,11 @@ import pandas as pd
 import pytest
 
 from TableAgent.environment.qa_env import QAEnvironment
-from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
+from TableAgent.QA.actions.llm_code_generation import (
+    get_question_header_hints,
+    get_structure_summary,
+    get_table_catalog_summary,
+)
 from TableAgent.prompts.planner import PLANNER_SYSTEM_PROMPT
 from TableAgent.prompts.react import REACT_SYSTEM_PROMPT
 from TableAgent.prompts.synthesis import SYNTHESIS_SYSTEM_PROMPT
@@ -52,6 +56,53 @@ def test_prompts_require_relation_backed_formula_evaluation():
     assert "calls `evaluate_formula` with the mutation" in PLANNER_SYSTEM_PROMPT
     assert "operators.evaluate_formula(...)" in REACT_SYSTEM_PROMPT
     assert "deterministic `value`" in SYNTHESIS_SYSTEM_PROMPT
+
+
+def test_question_header_hints_preserve_detailed_fault_column(tmp_path: Path):
+    workbook_path = tmp_path / "faults.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Bao_cao_F2"
+    worksheet.append(["Tên Lỗi 이상 불량", "고장 내용 Nội dung hỏng"])
+    worksheet.append(["Lỗi sensor", "Đứt dây sensor"])
+    workbook.save(workbook_path)
+    workbook.close()
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text(
+        """table1:
+  id: bao_cao_f2
+  name: Báo cáo F2
+  sheet: Bao_cao_F2
+  headers:
+  - id: fault
+    label: Tên Lỗi 이상 불량
+    description: Generic fault category
+    orientation: column
+    header_range: A1
+    data_range: A2:A2
+    sub_headers: []
+  - id: repair
+    label: 고장 내용 Nội dung hỏng
+    description: Detailed failure content
+    orientation: column
+    header_range: B1
+    data_range: B2:B2
+    sub_headers: []
+""",
+        encoding="utf-8",
+    )
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        hints = get_question_header_hints(
+            env,
+            "Liệt kê vị trí hỏng và Nội dung hỏng.",
+            ["bao_cao_f2"],
+        )
+    finally:
+        env.workbook.close()
+
+    assert "header_id=repair" in hints
+    assert "header_id=fault" not in hints
 
 
 def test_evaluate_formula_applies_salary_mutation_without_changing_workbook(multitab_env):

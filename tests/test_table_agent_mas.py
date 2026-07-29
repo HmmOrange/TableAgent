@@ -643,6 +643,61 @@ def test_verifier_repairs_header_label_and_ranges_from_workbook(tmp_path: Path):
     assert header["data_range"] == "A2:B2"
 
 
+def test_verifier_restores_omitted_vertical_merged_header(tmp_path: Path):
+    workbook_path = tmp_path / "missing-header.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    for column, label in (("A", "이상내용"), ("B", "고장구분"), ("C", "조치내용")):
+        worksheet.merge_cells(f"{column}1:{column}2")
+        worksheet[f"{column}1"] = label
+        worksheet[f"{column}3"] = f"{label} 값"
+    workbook.save(workbook_path)
+    workbook.close()
+    structure = {
+        "table1": {
+            "name": "Maintenance",
+            "description": "Maintenance records",
+            "headers": [
+                {
+                    "id": "fault_detail",
+                    "label": "이상내용",
+                    "description": "Detailed fault",
+                    "orientation": "column",
+                    "header_range": "A1:A2",
+                    "data_range": "A3:A3",
+                    "sub_headers": [],
+                },
+                {
+                    "id": "action",
+                    "label": "조치내용",
+                    "description": "Action",
+                    "orientation": "column",
+                    "header_range": "C1:C2",
+                    "data_range": "C3:C3",
+                    "sub_headers": [],
+                },
+            ],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    restored = repaired["table1"]["headers"][1]
+
+    assert report["status"] == "good"
+    assert restored == {
+        "id": "column_b",
+        "label": "고장구분",
+        "description": "Source column 고장구분",
+        "orientation": "column",
+        "header_range": "B1:B2",
+        "data_range": "B3:B3",
+        "sub_headers": [],
+    }
+    assert any("restored uncovered workbook header" in item for item in report["actions"])
+
+
 def test_verifier_moves_blank_merged_follower_to_next_matching_header(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     _adjacent_merged_header_workbook(workbook_path)

@@ -119,6 +119,70 @@ def get_selected_structure_summary(env: Any, table_ids: list[str]) -> str:
     return "\n\n".join(get_structure_summary(env, table_id) for table_id in table_ids)
 
 
+def get_question_header_hints(env: Any, question: str, table_ids: list[str]) -> str:
+    """Expose exact multilingual label matches so code generation preserves ownership."""
+    question_tokens = _match_tokens(question)
+    matches: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for table_id in table_ids:
+        struct = env.get_table_structure(str(table_id))
+        if not struct:
+            continue
+        for header in _flatten_header_objects(struct.get("headers", [])):
+            label = str(getattr(header, "label", "") or "").strip()
+            if not label:
+                continue
+            matched_phrase = _longest_question_label_phrase(
+                question_tokens,
+                _match_tokens(label),
+            )
+            if not matched_phrase:
+                continue
+            key = (str(table_id), str(getattr(header, "id", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                f"- question phrase {matched_phrase!r} -> "
+                f"table_id={table_id}, header_id={getattr(header, 'id', '')}, "
+                f"label={label!r}. Use this header's values; do not substitute a neighboring field."
+            )
+    return "\n".join(matches) if matches else "(no exact label matches; inspect headers before selecting fields)"
+
+
+def _flatten_header_objects(headers: Any):
+    for header in headers or []:
+        yield header
+        yield from _flatten_header_objects(getattr(header, "sub_headers", []))
+
+
+def _match_tokens(value: str) -> list[str]:
+    return re.findall(r"[^\W_]+", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _longest_question_label_phrase(
+    question_tokens: list[str],
+    label_tokens: list[str],
+) -> str:
+    best: list[str] = []
+    for start in range(len(label_tokens)):
+        for end in range(start + 1, len(label_tokens) + 1):
+            candidate = label_tokens[start:end]
+            if len(candidate) < len(best):
+                continue
+            width = len(candidate)
+            if any(
+                question_tokens[index : index + width] == candidate
+                for index in range(len(question_tokens) - width + 1)
+            ):
+                best = candidate
+    if len(best) >= 2:
+        return " ".join(best)
+    if len(best) == 1 and len(best[0]) >= 4:
+        return best[0]
+    return ""
+
+
 def get_prior_outcomes(env: Any) -> str:
     if not hasattr(env, "notebook") or not env.notebook.cells:
         return "No code has been executed yet."
@@ -256,7 +320,13 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 if not table_ids:
                     table_ids = [self.env.default_table_id()]
 
-                struct_summary = get_selected_structure_summary(self.env, [str(table_id) for table_id in table_ids])
+                normalized_table_ids = [str(table_id) for table_id in table_ids]
+                struct_summary = get_selected_structure_summary(self.env, normalized_table_ids)
+                header_hints = get_question_header_hints(
+                    self.env,
+                    request.question,
+                    normalized_table_ids,
+                )
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
@@ -271,6 +341,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
                         f"Table structure:\n{struct_summary}\n\n"
+                        f"Exact question-to-header matches (authoritative):\n{header_hints}\n\n"
                         f"Experience:\n{formatted_experience}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",
@@ -306,6 +377,25 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             inspection_variables = get_dependency_variable_summary(self.env, request.subtask)
 
             if request.round_num == 1:
+                table_ids = []
+                if request.subtask and isinstance(getattr(request.subtask, "metadata", None), dict):
+                    raw_table_ids = request.subtask.metadata.get("table_ids") or request.subtask.metadata.get("table_id")
+                    if isinstance(raw_table_ids, list):
+                        table_ids = [str(item) for item in raw_table_ids]
+                    elif raw_table_ids:
+                        table_ids = [str(raw_table_ids)]
+                if not table_ids:
+                    selected_table_ids = self.env.execution_namespace.get("selected_table_ids") or []
+                    if isinstance(selected_table_ids, str):
+                        selected_table_ids = [selected_table_ids]
+                    table_ids = [str(item) for item in selected_table_ids]
+                if not table_ids:
+                    table_ids = [self.env.default_table_id()]
+                header_hints = get_question_header_hints(
+                    self.env,
+                    request.question,
+                    table_ids,
+                )
                 prompt = SYNTHESIS_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     answer_language=required_answer_language(request.question),
@@ -313,6 +403,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     inspection_variables=inspection_variables,
                     prior_outcomes=prior_outcomes,
                 )
+                prompt += f"\n\nExact question-to-header matches (authoritative):\n{header_hints}\n"
             else:
                 last_cell = self.env.notebook.cells[-1] if self.env.notebook.cells else None
                 failed_code = last_cell.code if last_cell else ""

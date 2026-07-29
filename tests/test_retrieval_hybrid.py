@@ -737,6 +737,120 @@ def test_indexed_retrieval_reuses_qdrant_scores_without_reembedding(
     assert candidate.embedding_score == 0.92
 
 
+def test_indexed_retrieval_restricts_to_uniquely_referenced_workbook(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    maintenance_name = "LV01_설비_REPORT 2026년 설비유지보수 계획 VER 1.0_KR_202603.26.xlsx"
+    monthly_name = "LV02_MFG_REPORT_FPCBMonthly Report 2026.03월.xlsx"
+
+    candidate = retriever.select_indexed(
+        question="이 파일(2026년 VER 1.0)의 전체 시트 구성과 각 시트의 시트명, 역할 및 내용?",
+        workbook_paths={
+            maintenance_name: tmp_path / maintenance_name,
+            monthly_name: tmp_path / monthly_name,
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "maintenance:plan",
+                "upload_name": maintenance_name,
+                "sheet": "2026년 설비유지보수 계획",
+                "retrieval_type": "metadata",
+                "retrieval_level": "sheet",
+                "score": 0.10,
+                "retrieval_card": "Maintenance workbook sheet metadata",
+                "structure_yaml": "plan:\n  sheet: 2026년 설비유지보수 계획\n  headers: []\n",
+            },
+            {
+                "id": "maintenance:statistics",
+                "upload_name": maintenance_name,
+                "sheet": "Sheet3",
+                "retrieval_type": "metadata",
+                "retrieval_level": "sheet",
+                "score": 0.05,
+                "retrieval_card": "Maintenance statistics sheet metadata",
+                "structure_yaml": "statistics:\n  sheet: Sheet3\n  headers: []\n",
+            },
+            {
+                "id": "monthly:2026",
+                "upload_name": monthly_name,
+                "sheet": "2026",
+                "retrieval_type": "metadata",
+                "retrieval_level": "sheet",
+                "score": 0.99,
+                "retrieval_card": "Monthly production report metadata",
+                "structure_yaml": "monthly:\n  sheet: '2026'\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.workbook_path.name == maintenance_name
+    assert candidate.retrieval_trace[-1]["query_type"] == "metadata"
+    guard = candidate.retrieval_trace[-1]["explicit_workbook_guard"]
+    assert guard["applied"] is True
+    assert guard["match_type"] == "unique_terms"
+    assert set(guard["matched_terms"]) >= {"2026년", "ver", "1.0"}
+    assert guard["candidate_count_before"] == 3
+    assert guard["candidate_count_after"] == 2
+
+
+def test_indexed_retrieval_does_not_guess_workbook_from_one_filename_token(tmp_path):
+    config = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "sources"),
+        "retrieval_rerank_with_llm": False,
+        "retrieval_embedding_provider": None,
+        "retrieval_lexical_weight": 0.0,
+        "retrieval_embedding_weight": 1.0,
+        "retrieval_entity_weight": 0.0,
+    })
+    retriever = SourceRetriever(config, FakeLLM(), None, None)
+
+    candidate = retriever.select_indexed(
+        question="Show the 2026 results",
+        workbook_paths={
+            "production-2026.xlsx": tmp_path / "production-2026.xlsx",
+            "maintenance-2025.xlsx": tmp_path / "maintenance-2025.xlsx",
+        },
+        responses=[],
+        fit_context=lambda value: value,
+        artifacts=[
+            {
+                "id": "production",
+                "upload_name": "production-2026.xlsx",
+                "sheet": "Data",
+                "score": 0.10,
+                "retrieval_card": "Production results",
+                "structure_yaml": "data:\n  sheet: Data\n  headers: []\n",
+            },
+            {
+                "id": "maintenance",
+                "upload_name": "maintenance-2025.xlsx",
+                "sheet": "Data",
+                "score": 0.90,
+                "retrieval_card": "Maintenance results",
+                "structure_yaml": "data:\n  sheet: Data\n  headers: []\n",
+            },
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.artifact_id == "maintenance"
+    guard = candidate.retrieval_trace[-1]["explicit_workbook_guard"]
+    assert guard["applied"] is False
+    assert guard["reason"] == "not_detected"
+
+
 @pytest.mark.parametrize(
     "question",
     [

@@ -18,6 +18,7 @@ def verify_structure(workbook_path: str | Path, sheet_name: str, structure_path:
     try:
         worksheet = workbook[sheet_name]
         used_box = _range_box(worksheet.calculate_dimension())
+        _repair_missing_vertical_headers(worksheet, structure, actions)
         for path, value in _walk_ranges(structure):
             try:
                 min_col, min_row, max_col, max_row = _range_box(value)
@@ -182,6 +183,116 @@ def _walk_headers(structure: dict[str, Any]):
             continue
         for index, header in enumerate(headers):
             yield from _walk_header(header, f"{table_key}.headers[{index}]")
+
+
+def _repair_missing_vertical_headers(
+    worksheet: Any,
+    structure: dict[str, Any],
+    actions: list[str],
+) -> None:
+    """Restore workbook-backed single-column headers omitted by layout extraction."""
+    for table_key, table in structure.items():
+        if not isinstance(table, dict):
+            continue
+        headers = table.get("headers")
+        if not isinstance(headers, list) or not headers:
+            continue
+
+        header_boxes: list[tuple[int, int, int, int]] = []
+        data_boxes: list[tuple[int, int, int, int]] = []
+        for _, header in _walk_header_list(headers):
+            header_range = header.get("header_range") or header.get("range")
+            data_range = header.get("data_range")
+            try:
+                if header_range is not None:
+                    header_boxes.append(_range_box(header_range))
+                if data_range is not None:
+                    data_boxes.append(_range_box(data_range))
+            except (TypeError, ValueError):
+                continue
+        if not header_boxes or not data_boxes:
+            continue
+
+        header_start_row = min(box[1] for box in header_boxes)
+        header_end_row = max(box[3] for box in header_boxes)
+        table_min_col = min(box[0] for box in data_boxes)
+        table_max_col = max(box[2] for box in data_boxes)
+        data_end_row = max(box[3] for box in data_boxes)
+        existing_ids = {
+            str(header.get("id") or "").strip()
+            for _, header in _walk_header_list(headers)
+            if str(header.get("id") or "").strip()
+        }
+
+        additions: list[dict[str, Any]] = []
+        for merged in worksheet.merged_cells.ranges:
+            box = (merged.min_col, merged.min_row, merged.max_col, merged.max_row)
+            if (
+                merged.min_col != merged.max_col
+                or merged.min_row != header_start_row
+                or merged.max_row != header_end_row
+                or merged.min_col < table_min_col
+                or merged.max_col > table_max_col
+                or any(_contains(existing_box, box) for existing_box in header_boxes)
+            ):
+                continue
+            texts = _cell_texts(worksheet, box)
+            if len(texts) != 1:
+                continue
+            label = texts[0]
+            column = get_column_letter(merged.min_col)
+            header_id = _unique_header_id(existing_ids, f"column_{column.casefold()}")
+            additions.append(
+                {
+                    "id": header_id,
+                    "label": label,
+                    "description": f"Source column {label}",
+                    "orientation": "column",
+                    "header_range": _box_to_range(box),
+                    "data_range": f"{column}{header_end_row + 1}:{column}{data_end_row}",
+                    "sub_headers": [],
+                }
+            )
+            existing_ids.add(header_id)
+            header_boxes.append(box)
+            actions.append(
+                f"{table_key}.headers restored uncovered workbook header "
+                f"{_box_to_range(box)}={label!r}"
+            )
+
+        if additions:
+            headers.extend(additions)
+            headers.sort(key=_header_sort_key)
+
+
+def _walk_header_list(headers: list[Any]):
+    for index, header in enumerate(headers):
+        if not isinstance(header, dict):
+            continue
+        yield f"headers[{index}]", header
+        sub_headers = header.get("sub_headers") or []
+        if isinstance(sub_headers, list):
+            yield from _walk_header_list(sub_headers)
+
+
+def _unique_header_id(existing_ids: set[str], base: str) -> str:
+    candidate = base
+    suffix = 2
+    while candidate in existing_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _header_sort_key(header: Any) -> tuple[int, int, str]:
+    if not isinstance(header, dict):
+        return (10**9, 10**9, "")
+    header_range = header.get("header_range") or header.get("range")
+    try:
+        box = _range_box(header_range)
+    except (TypeError, ValueError):
+        return (10**9, 10**9, str(header.get("id") or ""))
+    return (box[0], box[1], str(header.get("id") or ""))
 
 
 def _walk_header(header: Any, path: str):

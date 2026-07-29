@@ -44,6 +44,8 @@ Observation policy:
 - Treat each verified header as the authoritative meaning of the values in its column or range. Preserve header-to-value
   ownership when selecting and naming fields. Never use text from a different header merely because it sounds like the
   requested concept; inspect and return the value under the requested header first.
+- If the task prompt supplies an exact question-to-header match, use that header ID and its values rather than a
+  semantically similar neighboring field.
 - `read_table_as_dataframe(..., has_headers=True)` returns one logical column per verified header, combining distinct
   values when that header spans several physical worksheet columns. Use the complete logical value; do not select only
   the first physical component.

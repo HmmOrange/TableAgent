@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import unicodedata
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from difflib import SequenceMatcher
@@ -156,6 +157,13 @@ class SourceRetriever:
             else:
                 data_candidates.append(candidate)
 
+        data_candidates, metadata_candidates, workbook_guard = (
+            self._restrict_to_explicit_indexed_workbook(
+                question,
+                data_candidates,
+                metadata_candidates,
+            )
+        )
         data_candidates, metadata_candidates, sheet_guard = (
             self._restrict_to_explicit_indexed_sheet(
                 question,
@@ -186,7 +194,8 @@ class SourceRetriever:
                 fit_context,
                 query_type=query_type,
             )
-        return self._with_explicit_sheet_trace(selected, sheet_guard)
+        selected = self._with_explicit_sheet_trace(selected, sheet_guard)
+        return self._with_explicit_workbook_trace(selected, workbook_guard)
 
     def select_perfect(self, sample: EvalSample) -> SourceCandidate:
         """Select the best prepared source deterministically, without embeddings or LLM reranking."""
@@ -458,6 +467,144 @@ class SourceRetriever:
             cls._sheet_alias(candidate.sheet_name),
         )
 
+    @classmethod
+    def _restrict_to_explicit_indexed_workbook(
+        cls,
+        question: str,
+        data_candidates: list[SourceCandidate],
+        metadata_candidates: list[SourceCandidate],
+    ) -> tuple[list[SourceCandidate], list[SourceCandidate], dict[str, Any]]:
+        all_candidates = [*data_candidates, *metadata_candidates]
+        before_count = len(all_candidates)
+        base_trace: dict[str, Any] = {
+            "applied": False,
+            "match_type": None,
+            "matched_terms": [],
+            "workbook": None,
+            "reason": "not_detected",
+            "candidate_count_before": before_count,
+            "candidate_count_after": before_count,
+        }
+        grouped: dict[str, list[SourceCandidate]] = {}
+        for candidate in all_candidates:
+            identity = str(candidate.workbook_path.resolve()).casefold()
+            grouped.setdefault(identity, []).append(candidate)
+        if len(grouped) <= 1:
+            return data_candidates, metadata_candidates, {
+                **base_trace,
+                "reason": "single_workbook",
+            }
+
+        compact_question = cls._normalized_name(question)
+        exact_matches = [
+            (identity, group[0])
+            for identity, group in grouped.items()
+            if cls._normalized_name(group[0].workbook_path.stem) in compact_question
+        ]
+        if len(exact_matches) == 1:
+            selected_identity, representative = exact_matches[0]
+            return cls._filter_indexed_workbook_candidates(
+                data_candidates,
+                metadata_candidates,
+                selected_identity=selected_identity,
+                representative=representative,
+                trace={**base_trace, "match_type": "exact_name"},
+            )
+        if len(exact_matches) > 1:
+            return data_candidates, metadata_candidates, {
+                **base_trace,
+                "reason": "ambiguous",
+            }
+
+        query_tokens = set(cls._workbook_reference_tokens(question))
+        workbook_tokens = {
+            identity: set(cls._workbook_reference_tokens(group[0].workbook_path.stem))
+            for identity, group in grouped.items()
+        }
+        frequencies = Counter(
+            token
+            for tokens in workbook_tokens.values()
+            for token in tokens
+        )
+        scored: list[tuple[int, int, str, list[str], SourceCandidate]] = []
+        for identity, tokens in workbook_tokens.items():
+            matched = sorted(
+                token
+                for token in query_tokens & tokens
+                if frequencies[token] == 1 and cls._strong_workbook_reference_token(token)
+            )
+            if len(matched) < 2:
+                continue
+            scored.append((
+                len(matched),
+                sum(len(token) for token in matched),
+                identity,
+                matched,
+                grouped[identity][0],
+            ))
+        if not scored:
+            return data_candidates, metadata_candidates, base_trace
+        scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        if len(scored) > 1 and scored[0][:2] == scored[1][:2]:
+            return data_candidates, metadata_candidates, {
+                **base_trace,
+                "reason": "ambiguous",
+            }
+
+        _, _, selected_identity, matched_terms, representative = scored[0]
+        return cls._filter_indexed_workbook_candidates(
+            data_candidates,
+            metadata_candidates,
+            selected_identity=selected_identity,
+            representative=representative,
+            trace={
+                **base_trace,
+                "match_type": "unique_terms",
+                "matched_terms": matched_terms,
+            },
+        )
+
+    @staticmethod
+    def _filter_indexed_workbook_candidates(
+        data_candidates: list[SourceCandidate],
+        metadata_candidates: list[SourceCandidate],
+        *,
+        selected_identity: str,
+        representative: SourceCandidate,
+        trace: dict[str, Any],
+    ) -> tuple[list[SourceCandidate], list[SourceCandidate], dict[str, Any]]:
+        def selected(candidate: SourceCandidate) -> bool:
+            return str(candidate.workbook_path.resolve()).casefold() == selected_identity
+
+        filtered_data = [candidate for candidate in data_candidates if selected(candidate)]
+        filtered_metadata = [
+            candidate for candidate in metadata_candidates if selected(candidate)
+        ]
+        return filtered_data, filtered_metadata, {
+            **trace,
+            "applied": True,
+            "workbook": representative.workbook_path.name,
+            "reason": None,
+            "candidate_count_after": len(filtered_data) + len(filtered_metadata),
+        }
+
+    @staticmethod
+    def _workbook_reference_tokens(value: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return [
+            token
+            for token in re.findall(r"[^\W_]+(?:\.[^\W_]+)*", normalized, flags=re.UNICODE)
+            if token not in {"xlsx", "xls", "xlsm", "csv"}
+        ]
+
+    @staticmethod
+    def _strong_workbook_reference_token(token: str) -> bool:
+        return (
+            len(token) >= 3
+            or "." in token
+            or (len(token) >= 2 and any(ord(character) > 127 for character in token))
+        )
+
     def _restrict_to_explicit_indexed_sheet(
         self,
         question: str,
@@ -539,6 +686,16 @@ class SourceRetriever:
     ) -> SourceCandidate:
         trace = dict(candidate.retrieval_trace[-1]) if candidate.retrieval_trace else {}
         trace["explicit_sheet_guard"] = dict(sheet_guard)
+        previous = candidate.retrieval_trace[:-1] if candidate.retrieval_trace else ()
+        return replace(candidate, retrieval_trace=(*previous, trace))
+
+    @staticmethod
+    def _with_explicit_workbook_trace(
+        candidate: SourceCandidate,
+        workbook_guard: dict[str, Any],
+    ) -> SourceCandidate:
+        trace = dict(candidate.retrieval_trace[-1]) if candidate.retrieval_trace else {}
+        trace["explicit_workbook_guard"] = dict(workbook_guard)
         previous = candidate.retrieval_trace[:-1] if candidate.retrieval_trace else ()
         return replace(candidate, retrieval_trace=(*previous, trace))
 
@@ -849,6 +1006,7 @@ class SourceRetriever:
             "workbook", "file", "metadata", "structure", "cấu trúc", "vai trò", "ghi chú",
             "description", "table nào", "sheet nào", "tên sheet", "tên bảng", "danh sách sheet",
             "có những sheet", "chứa sheet", "sheet list", "available sheets", "sheet names", "table names",
+            "전체 시트", "시트 구성", "시트명", "각 시트", "파일 구성", "통합 문서",
         )
         return any(term in lowered for term in metadata_terms)
 

@@ -5,7 +5,11 @@ import re
 from typing import Any, List, Optional
 
 from TableAgent.QA.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
-from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
+from TableAgent.QA.actions.llm_code_generation import (
+    get_question_header_hints,
+    get_structure_summary,
+    get_table_catalog_summary,
+)
 from TableAgent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.schema.subtask import SubTask
 
@@ -229,6 +233,17 @@ class WriteQAPlanAction(BasePlanAction):
             workbook_sheets=", ".join(self.env.workbook.sheetnames),
             table_catalog=table_catalog,
             table_structure=struct_summary,
+        )
+        table_ids_for_hints = (
+            [request.table_id]
+            if request.table_id
+            else list(self.env.operators.list_tables())
+        )
+        prompt += (
+            "\n\nExact question-to-header matches (authoritative):\n"
+            f"{get_question_header_hints(self.env, request.question, table_ids_for_hints)}\n"
+            "When a requested phrase matches a header label, preserve that header ID "
+            "in every inspect and synthesis subtask.\n"
         )
         if request.failure_context:
             previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)
