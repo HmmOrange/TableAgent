@@ -95,7 +95,7 @@ def test_health_status_and_upload_job(tmp_path: Path):
     with TestClient(app) as client:
         health = client.get("/health").json()
         assert health["status"] == "ok"
-        assert health["version"] == "0.4.12"
+        assert health["version"] == "0.4.13"
         assert client.get("/health/ready").json()["status"] == "ready"
 
         response = client.post(
