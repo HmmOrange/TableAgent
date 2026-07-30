@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import email.utils
+import json
 import mimetypes
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,29 @@ OPENAI_COMPATIBLE_PROVIDERS = {
     "openai_compatible",
     "openrouter",
 }
+
+
+class ModelGatewayRequestError(requests.HTTPError):
+    """Structured Model Gateway failure preserved for worker retry decisions."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        category: str | None = None,
+        retryable: bool | None = None,
+        message_key: str | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.category = category
+        self.retryable = retryable
+        self.message_key = message_key
+        self.retry_after_seconds = retry_after_seconds
 
 
 class OpenAICompatibleLLM(BaseLLM):
@@ -104,9 +130,9 @@ class OpenAICompatibleLLM(BaseLLM):
                 if response.status_code not in {408, 409, 429} and response.status_code < 500:
                     break
                 _raise_for_status_with_detail(response)
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 if attempt >= self.max_retries:
-                    raise
+                    raise _model_gateway_error(exc) from exc
                 time.sleep(self.retry_delay_seconds * (attempt + 1))
         if response is None:
             raise RuntimeError("Model request did not produce a response")
@@ -208,15 +234,135 @@ def _raise_for_status_with_detail(response: requests.Response) -> None:
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
-        detail = str(getattr(response, "text", "") or "").strip()
-        if not detail:
-            raise
-        message = f"{exc}; response: {detail[:1000]}"
-        raise requests.HTTPError(
-            message,
-            response=getattr(exc, "response", None) or response,
-            request=getattr(exc, "request", None) or getattr(response, "request", None),
-        ) from exc
+        raise _model_gateway_error(exc, response=response) from exc
 
 
-__all__ = ["OpenAICompatibleLLM", "create_model_client"]
+def _model_gateway_error(
+    exc: requests.RequestException,
+    *,
+    response: requests.Response | None = None,
+) -> ModelGatewayRequestError:
+    if isinstance(exc, ModelGatewayRequestError):
+        return exc
+    resolved_response = response if response is not None else getattr(exc, "response", None)
+    status_code = getattr(resolved_response, "status_code", None)
+    payload: dict[str, Any] = {}
+    if resolved_response is not None:
+        try:
+            parsed = resolved_response.json()
+            if isinstance(parsed, dict):
+                payload = parsed
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        if not _has_gateway_error_detail(payload):
+            try:
+                parsed = json.loads(str(getattr(resolved_response, "text", "") or ""))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        payload = detail
+    error_code = _optional_text(payload.get("code") or payload.get("error_code"))
+    category = _optional_text(payload.get("category"))
+    message_key = _optional_text(payload.get("message_key"))
+    retryable = payload.get("retryable")
+    if not isinstance(retryable, bool):
+        retryable = None
+    fallback = _fallback_error_metadata(status_code, exc)
+    error_code = error_code or fallback[0]
+    category = category or fallback[1]
+    message_key = message_key or fallback[3]
+    if retryable is None:
+        retryable = fallback[2]
+    message = _optional_text(payload.get("message") or payload.get("error")) or _safe_gateway_message(
+        status_code,
+        exc,
+    )
+    headers = getattr(resolved_response, "headers", {}) or {}
+    return ModelGatewayRequestError(
+        message,
+        status_code=status_code,
+        error_code=error_code,
+        category=category,
+        retryable=retryable,
+        message_key=message_key,
+        retry_after_seconds=_parse_retry_after(headers.get("Retry-After")),
+    )
+
+
+def _safe_gateway_message(status_code: int | None, exc: BaseException) -> str:
+    if status_code:
+        return f"Model gateway request failed with HTTP {status_code}"
+    if isinstance(exc, requests.Timeout):
+        return "Model gateway request timed out"
+    return "Model gateway connection failed"
+
+
+def _fallback_error_metadata(
+    status_code: int | None,
+    exc: BaseException,
+) -> tuple[str | None, str | None, bool | None, str | None]:
+    if status_code == 429:
+        return (
+            "MODEL_QUEUE_OVERLOADED",
+            "capacity",
+            True,
+            "errors.model.queueOverloaded",
+        )
+    if status_code in {408, 504} or isinstance(exc, requests.Timeout):
+        return (
+            "MODEL_RESPONSE_TIMEOUT",
+            "timeout",
+            True,
+            "errors.model.responseTimeout",
+        )
+    if status_code in {502, 503}:
+        return (
+            "MODEL_PROVIDER_UNAVAILABLE",
+            "provider",
+            True,
+            "errors.model.providerUnavailable",
+        )
+    if isinstance(exc, requests.ConnectionError):
+        return (
+            "MODEL_UPSTREAM_DISCONNECTED",
+            "provider",
+            True,
+            "errors.model.upstreamDisconnected",
+        )
+    return (None, None, None, None)
+
+
+def _parse_retry_after(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(str(value).strip()))
+    except ValueError:
+        try:
+            retry_at = email.utils.parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _has_gateway_error_detail(payload: dict[str, Any]) -> bool:
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        payload = detail
+    return any(
+        key in payload
+        for key in ("code", "error_code", "category", "message", "error")
+    )
+
+
+__all__ = ["ModelGatewayRequestError", "OpenAICompatibleLLM", "create_model_client"]

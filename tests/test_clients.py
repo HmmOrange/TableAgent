@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 import requests
 
-from service.clients import OpenAICompatibleLLM, create_model_client
+from service.clients import ModelGatewayRequestError, OpenAICompatibleLLM, create_model_client
 
 
 class FakeResponse:
@@ -24,7 +25,7 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, response=None):
         self.calls = []
-        self.response = response or FakeResponse()
+        self.response = response if response is not None else FakeResponse()
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
@@ -123,3 +124,99 @@ def test_openai_compatible_client_includes_error_response_detail():
 
     with pytest.raises(requests.HTTPError, match="maximum context length exceeded"):
         client.generate("question")
+
+
+def test_openai_compatible_client_preserves_gateway_error_metadata():
+    response = requests.Response()
+    response.status_code = 503
+    response.headers["Retry-After"] = "7"
+    response._content = json.dumps(
+        {
+            "detail": {
+                "code": "MODEL_PROVIDER_UNAVAILABLE",
+                "category": "provider",
+                "retryable": True,
+                "message_key": "errors.model.providerUnavailable",
+                "message": "Model provider is temporarily unavailable",
+            }
+        }
+    ).encode("utf-8")
+    response.request = requests.Request(
+        "POST", "http://model.test/v1/chat/completions"
+    ).prepare()
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        max_retries=0,
+        session=FakeSession(response),
+    )
+
+    with pytest.raises(ModelGatewayRequestError) as raised:
+        client.generate("question")
+
+    assert raised.value.status_code == 503
+    assert raised.value.error_code == "MODEL_PROVIDER_UNAVAILABLE"
+    assert raised.value.category == "provider"
+    assert raised.value.retryable is True
+    assert raised.value.message_key == "errors.model.providerUnavailable"
+    assert raised.value.retry_after_seconds == 7
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code"),
+    [
+        (408, "MODEL_RESPONSE_TIMEOUT"),
+        (429, "MODEL_QUEUE_OVERLOADED"),
+        (502, "MODEL_PROVIDER_UNAVAILABLE"),
+        (503, "MODEL_PROVIDER_UNAVAILABLE"),
+        (504, "MODEL_RESPONSE_TIMEOUT"),
+    ],
+)
+def test_openai_compatible_client_classifies_unstructured_temporary_http_errors(
+    status_code,
+    expected_code,
+):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = b"upstream unavailable"
+    response.request = requests.Request(
+        "POST", "http://model.test/v1/chat/completions"
+    ).prepare()
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        max_retries=0,
+        session=FakeSession(response),
+    )
+
+    with pytest.raises(ModelGatewayRequestError) as raised:
+        client.generate("question")
+
+    assert raised.value.error_code == expected_code
+    assert raised.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (requests.Timeout("timed out"), "MODEL_RESPONSE_TIMEOUT"),
+        (requests.ConnectionError("disconnected"), "MODEL_UPSTREAM_DISCONNECTED"),
+    ],
+)
+def test_openai_compatible_client_classifies_transport_errors(failure, expected_code):
+    class FailingSession(FakeSession):
+        def post(self, url, **kwargs):
+            raise failure
+
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        max_retries=0,
+        session=FailingSession(),
+    )
+
+    with pytest.raises(ModelGatewayRequestError) as raised:
+        client.generate("question")
+
+    assert raised.value.error_code == expected_code
+    assert raised.value.retryable is True
