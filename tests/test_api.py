@@ -65,8 +65,16 @@ class FakeService:
         )
         return {"answers": [{"query": query, "answer": "indexed"}], "artifacts": []}
 
-    def select_indexed_artifact(self, *, query, artifacts, mode):
+    def select_indexed_artifact(
+        self,
+        *,
+        query,
+        artifacts,
+        mode,
+        max_selected_sheets=1,
+    ):
         self.selection_mode = mode
+        self.max_selected_sheets = max_selected_sheets
         return {
             "selected_artifact_id": artifacts[0]["id"],
             "document_id": artifacts[0].get("document_id", ""),

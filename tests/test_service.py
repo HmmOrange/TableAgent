@@ -617,6 +617,41 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert selection["document_id"] == "doc-sales"
     assert selection["retrieval"]["candidate_count"] == 3
 
+    multi_selection = service.select_indexed_artifact(
+        query="regional revenue score",
+        mode="instant",
+        max_selected_sheets=2,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+                "score": 0.95,
+            },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+                "score": 0.7,
+            },
+        ],
+    )
+    assert multi_selection["selected_artifact_ids"] == [
+        "sales:summary",
+        "sales:archive",
+    ]
+    assert multi_selection["sheets"] == ["Sheet", "Archive"]
+
     result = service.run_indexed_qa(
         query="regional revenue score",
         workbooks=[sales, maintenance],
@@ -671,6 +706,45 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert answer["retrieval"]["candidate_count"] == 3
     assert answer["retrieval"]["workbook_count"] == 2
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
+
+    qa_calls.clear()
+    multi_result = service.run_indexed_qa(
+        query="regional revenue score",
+        workbooks=[sales],
+        qa_enable_final_review=False,
+        artifacts=[
+            {
+                "id": "sales:summary",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Sheet",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Regional revenue score and quarterly sales results",
+                "structure_yaml": "table1:\n  sheet: Sheet\n  headers: []\n",
+                "preselected": True,
+                "selection_rank": 1,
+            },
+            {
+                "id": "sales:archive",
+                "document_id": "doc-sales",
+                "upload_name": "sales.xlsx",
+                "sheet": "Archive",
+                "retrieval_type": "data",
+                "retrieval_level": "table",
+                "retrieval_card": "Historical discontinued products",
+                "structure_yaml": "table1:\n  sheet: Archive\n  headers: []\n",
+                "preselected": True,
+                "selection_rank": 2,
+            },
+        ],
+    )
+    assert len(qa_calls[0]["related_structure_paths"]) == 1
+    assert multi_result["answers"][0]["sheets"] == ["Sheet", "Archive"]
+    assert multi_result["answers"][0]["retrieval"]["selected_artifact_ids"] == [
+        "sales:summary",
+        "sales:archive",
+    ]
 
 
 def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):

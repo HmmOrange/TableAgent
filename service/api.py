@@ -61,6 +61,7 @@ class IndexedRetrievalRequest(BaseModel):
     query: str = Field(min_length=1)
     artifacts: list[dict[str, Any]] = Field(min_length=1)
     mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
+    max_selected_sheets: int = Field(default=1, ge=1, le=3)
 
 
 def create_app(
@@ -217,6 +218,7 @@ def create_app(
                 query=request.query,
                 artifacts=request.artifacts,
                 mode=request.mode,
+                max_selected_sheets=request.max_selected_sheets,
             )
             logger.info(
                 "Indexed retrieval selected mode=%s artifacts=%s documents=%s "

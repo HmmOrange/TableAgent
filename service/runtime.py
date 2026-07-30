@@ -520,6 +520,7 @@ class TableAgentService:
         query: str,
         artifacts: Iterable[dict[str, Any]],
         mode: str = "thinking",
+        max_selected_sheets: int = 1,
     ) -> dict[str, Any]:
         """Select an indexed artifact before the caller downloads any workbook."""
         normalized_query = str(query).strip()
@@ -530,6 +531,8 @@ class TableAgentService:
             raise ValueError("Indexed retrieval requires at least one artifact")
         if mode not in {"instant", "thinking"}:
             raise ValueError("Indexed retrieval mode must be instant or thinking")
+        if not 1 <= max_selected_sheets <= 3:
+            raise ValueError("max_selected_sheets must be between 1 and 3")
 
         workbook_names = list(
             dict.fromkeys(
@@ -612,19 +615,17 @@ class TableAgentService:
                 },
             }
 
-        selected_artifact = next(
-            (
-                artifact
-                for artifact in eligible_artifacts
-                if str(artifact.get("id") or "") == candidate.artifact_id
-            ),
-            None,
+        selected_artifacts = self._selected_indexed_artifacts(
+            candidate,
+            eligible_artifacts,
+            max_selected_sheets=max_selected_sheets,
         )
-        if selected_artifact is None:
+        if not selected_artifacts:
             raise RuntimeError("Selected TableAgent artifact is missing from the candidate set")
         retrieval = self._indexed_retrieval_payload(
             candidate,
             eligible_artifacts,
+            selected_artifacts=selected_artifacts,
         )
         rejection_reason = self._indexed_rejection_reason(
             candidate,
@@ -662,10 +663,14 @@ class TableAgentService:
             }
         return {
             "status": "selected",
-            "selected_artifact_id": candidate.artifact_id,
-            "document_id": str(selected_artifact.get("document_id") or ""),
+            "selected_artifact_id": str(selected_artifacts[0].get("id") or ""),
+            "selected_artifact_ids": [
+                str(artifact.get("id") or "") for artifact in selected_artifacts
+            ],
+            "document_id": str(selected_artifacts[0].get("document_id") or ""),
             "workbook": candidate.workbook_path.name,
-            "sheet": candidate.sheet_name,
+            "sheet": str(selected_artifacts[0].get("sheet") or ""),
+            "sheets": [str(artifact.get("sheet") or "") for artifact in selected_artifacts],
             "retrieval": retrieval,
         }
 
@@ -770,11 +775,11 @@ class TableAgentService:
                 )
 
             selected_workbook = candidate.workbook_path.name
-            selected_artifact = next(
-                (
+            preselected_artifacts = sorted(
+                [
                     artifact
                     for artifact in eligible_artifacts
-                    if str(artifact.get("id") or "") == candidate.artifact_id
+                    if bool(artifact.get("preselected"))
                     and str(
                         artifact.get("upload_name")
                         or artifact.get("document_name")
@@ -782,40 +787,61 @@ class TableAgentService:
                         or ""
                     ).strip()
                     == selected_workbook
-                    and str(
-                        artifact.get("sheet") or artifact.get("sheet_name") or ""
-                    ).strip()
-                    == candidate.sheet_name
-                ),
-                None,
+                ],
+                key=lambda artifact: int(artifact.get("selection_rank") or 9999),
             )
-            if selected_artifact is None:
+            selected_artifacts = preselected_artifacts or self._selected_indexed_artifacts(
+                candidate,
+                eligible_artifacts,
+                max_selected_sheets=1,
+            )
+            if not selected_artifacts:
                 raise RuntimeError(
                     "The selected indexed sheet artifact is missing from the QA request"
                 )
 
-            structure_path = source_dir / f"001-{safe_name(candidate.sheet_name)}.yaml"
-            structure_path.parent.mkdir(parents=True, exist_ok=True)
-            structure_path.write_text(
-                str(selected_artifact.get("structure_yaml") or "").strip() + "\n",
-                encoding="utf-8",
-            )
+            structure_paths: list[tuple[str, Path]] = []
+            seen_sheets: set[str] = set()
+            for index, selected_artifact in enumerate(selected_artifacts, start=1):
+                sheet_name = str(
+                    selected_artifact.get("sheet")
+                    or selected_artifact.get("sheet_name")
+                    or ""
+                ).strip()
+                if not sheet_name or sheet_name.casefold() in seen_sheets:
+                    continue
+                seen_sheets.add(sheet_name.casefold())
+                structure_path = (
+                    source_dir / f"{index:03d}-{safe_name(sheet_name)}.yaml"
+                )
+                structure_path.parent.mkdir(parents=True, exist_ok=True)
+                structure_path.write_text(
+                    str(selected_artifact.get("structure_yaml") or "").strip() + "\n",
+                    encoding="utf-8",
+                )
+                structure_paths.append((sheet_name, structure_path))
+            if not structure_paths:
+                raise RuntimeError("Selected indexed artifacts have no usable structures")
 
-            selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
+            selected_cards = "\n\n".join(
+                str(artifact.get("retrieval_card") or "").strip()
+                for artifact in selected_artifacts
+                if str(artifact.get("retrieval_card") or "").strip()
+            )
             fallback_prompt = (
                 "Answer the spreadsheet question using only the indexed, verified "
                 "TableAgent context. Do not invent values absent from the context.\n\n"
                 f"Question: {normalized_query}\n\n"
-                f"Selected retrieval card:\n{selected_card}"
+                f"Selected retrieval cards:\n{selected_cards}"
             )
             answer_response, qa_info = pipeline._run_verified_qa(
                 question=normalized_query,
-                structure_path=structure_path,
+                structure_path=structure_paths[0][1],
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=output_dir / "qa",
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=[],
+                related_structure_paths=[path for _, path in structure_paths[1:]],
                 enable_final_answer_review=(
                     True
                     if qa_enable_final_review is None
@@ -827,6 +853,7 @@ class TableAgentService:
             retrieval_payload = self._indexed_retrieval_payload(
                 candidate,
                 eligible_artifacts,
+                selected_artifacts=selected_artifacts,
             )
             prompt_tokens = sum(
                 int(getattr(response, "prompt_tokens", 0) or 0)
@@ -850,7 +877,7 @@ class TableAgentService:
                         "answer": answer_response.content,
                         "workbook": selected_workbook,
                         "workbooks": [selected_workbook],
-                        "sheets": [candidate.sheet_name],
+                        "sheets": [sheet for sheet, _ in structure_paths],
                         "retrieval": retrieval_payload,
                         "qa": public_qa_info,
                         "token_usage": {
@@ -907,16 +934,21 @@ class TableAgentService:
     def _indexed_retrieval_payload(
         candidate: Any,
         eligible_artifacts: list[dict[str, Any]],
+        *,
+        selected_artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         retrieval_trace = candidate.retrieval_trace[-1] if candidate.retrieval_trace else {}
-        selected_artifact = next(
-            (
+        resolved_selected = selected_artifacts or []
+        if not resolved_selected:
+            resolved_selected = [
                 item
                 for item in eligible_artifacts
                 if str(item.get("id") or "") == candidate.artifact_id
-            ),
-            {},
-        )
+            ][:1]
+        selected_artifact = resolved_selected[0] if resolved_selected else {}
+        selected_ids = {
+            str(item.get("id") or "") for item in resolved_selected
+        }
         return {
             "mode": "table_agent_hybrid",
             "query_type": retrieval_trace.get("query_type", "data"),
@@ -934,20 +966,88 @@ class TableAgentService:
             ),
             "document_id": str(selected_artifact.get("document_id") or ""),
             "workbook": candidate.workbook_path.name,
-            "sheet": candidate.sheet_name,
+            "sheet": str(selected_artifact.get("sheet") or candidate.sheet_name),
+            "sheets": [str(item.get("sheet") or "") for item in resolved_selected],
             "table_id": candidate.table_id,
             "table_name": candidate.table_name,
-            "selected_artifact_id": candidate.artifact_id,
+            "selected_artifact_id": str(selected_artifact.get("id") or candidate.artifact_id),
+            "selected_artifact_ids": [
+                str(item.get("id") or "") for item in resolved_selected
+            ],
             "embedding_used": candidate.embedding_used,
             "audit": [
                 {
                     **row,
-                    "selected": row.get("artifact_id") == candidate.artifact_id,
+                    "selected": str(row.get("artifact_id") or "") in selected_ids,
                 }
                 for row in candidate.retrieval_audit
             ],
             "reranker": retrieval_trace,
         }
+
+    @staticmethod
+    def _selected_indexed_artifacts(
+        candidate: Any,
+        eligible_artifacts: list[dict[str, Any]],
+        *,
+        max_selected_sheets: int,
+    ) -> list[dict[str, Any]]:
+        workbook_name = candidate.workbook_path.name
+        same_workbook = [
+            artifact
+            for artifact in eligible_artifacts
+            if str(
+                artifact.get("upload_name")
+                or artifact.get("document_name")
+                or artifact.get("workbook")
+                or ""
+            ).strip()
+            == workbook_name
+        ]
+        preferred_sheets = tuple(getattr(candidate, "sheet_names", ()) or ())
+        selected: list[dict[str, Any]] = []
+        seen_sheets: set[str] = set()
+
+        def add(artifact: dict[str, Any]) -> None:
+            sheet = str(artifact.get("sheet") or artifact.get("sheet_name") or "").strip()
+            if not sheet or sheet.casefold() in seen_sheets:
+                return
+            seen_sheets.add(sheet.casefold())
+            selected.append(artifact)
+
+        exact = next(
+            (
+                artifact
+                for artifact in same_workbook
+                if str(artifact.get("id") or "") == candidate.artifact_id
+            ),
+            None,
+        )
+        if exact is not None:
+            add(exact)
+        for sheet_name in preferred_sheets or (candidate.sheet_name,):
+            match = next(
+                (
+                    artifact
+                    for artifact in same_workbook
+                    if str(artifact.get("sheet") or artifact.get("sheet_name") or "").strip()
+                    == sheet_name
+                ),
+                None,
+            )
+            if match is not None:
+                add(match)
+            if len(selected) >= max_selected_sheets:
+                return selected
+        for artifact in sorted(
+            same_workbook,
+            key=lambda item: float(item.get("score") or 0.0),
+            reverse=True,
+        ):
+            add(artifact)
+            if len(selected) >= max_selected_sheets:
+                break
+        return selected
 
     def delete_runs(
         self,
