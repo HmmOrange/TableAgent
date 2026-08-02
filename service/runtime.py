@@ -31,6 +31,7 @@ from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
 from TableAgent.schema import EvalSample
+from service.artifact_rebuild import rebuild_artifacts as rebuild_table_agent_artifacts
 
 
 Stage = Literal["structure", "qa", "all"]
@@ -278,6 +279,26 @@ class TableAgentService:
             if persist and run_dir.exists():
                 shutil.rmtree(run_dir)
             raise
+
+    def rebuild_artifacts(
+        self,
+        *,
+        workbook: str | Path,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate patched structures and rebuild derived artifacts without models."""
+        source = Path(workbook).expanduser().resolve()
+        with tempfile.TemporaryDirectory(prefix="table-agent-artifact-rebuild-") as temp_text:
+            normalized = self._normalize_workbooks([source], Path(temp_text) / "normalized")
+            if len(normalized) != 1:
+                raise ValueError("Exactly one workbook is required for artifact rebuilding")
+            item = normalized[0]
+            return rebuild_table_agent_artifacts(
+                workbook_path=Path(item["path"]),
+                workbook_name=str(item["name"]),
+                workbook_sha256=str(item["sha256"]),
+                result=result,
+            )
 
     def run_indexed_qa(
         self,

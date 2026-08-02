@@ -64,6 +64,10 @@ class IndexedRetrievalRequest(BaseModel):
     max_selected_sheets: int = Field(default=1, ge=1, le=3)
 
 
+class ArtifactRebuildRequest(BaseModel):
+    result: dict[str, Any]
+
+
 def create_app(
     service: TableAgentService | None = None,
     *,
@@ -246,6 +250,47 @@ def create_app(
                 detail=str(exc),
             ) from exc
 
+    @app.post("/v1/artifacts/validate-and-rebuild")
+    async def validate_and_rebuild_artifacts(
+        payload: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        try:
+            request = ArtifactRebuildRequest.model_validate_json(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid payload JSON: {exc}",
+            ) from exc
+
+        with tempfile.TemporaryDirectory(prefix="table-agent-rebuild-upload-") as upload_text:
+            filename = safe_name(Path(file.filename or "workbook.xlsx").name)
+            target = Path(upload_text) / filename
+            size = 0
+            try:
+                with target.open("wb") as handle:
+                    while chunk := await file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > resolved_service.max_upload_bytes:
+                            raise ValueError(
+                                f"Upload '{filename}' exceeds the "
+                                f"{resolved_service.max_upload_bytes // (1024 * 1024)} MB limit"
+                            )
+                        handle.write(chunk)
+                resolved_service._validate_workbook(target)
+                return await asyncio.to_thread(
+                    resolved_service.rebuild_artifacts,
+                    workbook=target,
+                    result=request.result,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
+            finally:
+                await file.close()
+
     return app
 
 
@@ -270,6 +315,7 @@ def _require_queries(stage: Stage, queries: list[str]) -> None:
 
 
 __all__ = [
+    "ArtifactRebuildRequest",
     "IndexedRetrievalRequest",
     "PathJobRequest",
     "UploadJobRequest",

@@ -215,6 +215,10 @@ uv run table-agent --config config.yaml --delete-job 2026-07-22T16-05-54.123456Z
 uv run table-agent --config config.yaml --delete-all-jobs
 ```
 
+### Rebuild Patched Artifacts
+
+`POST /v1/artifacts/validate-and-rebuild` accepts one workbook upload and an existing TableAgent result in the multipart `payload`. It validates supplied structures against the workbook and deterministically rebuilds schema and retrieval-card artifacts. This endpoint does not invoke the layout VLM, answer LLM, or embedding model.
+
 ### QA
 
 #### Description and requirements

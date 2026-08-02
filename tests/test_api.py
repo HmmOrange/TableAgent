@@ -16,6 +16,7 @@ class FakeService:
         self.calls = []
         self.accept_local_paths = False
         self.indexed_calls = []
+        self.rebuild_calls = []
 
     def run(self, *, stage, queries, workbooks, embed, sheets, qa_max_replans, persist):
         self.calls.append(
@@ -83,6 +84,12 @@ class FakeService:
             "retrieval": {"mode": "table_agent_hybrid"},
         }
 
+    def rebuild_artifacts(self, *, workbook, result):
+        self.rebuild_calls.append(
+            {"workbook": str(workbook), "result": result}
+        )
+        return {**result, "rebuilt": True}
+
     @staticmethod
     def _validate_workbook(path: Path):
         if path.suffix.lower() != ".xlsx":
@@ -136,6 +143,30 @@ def test_server_side_paths_are_forbidden_by_default(tmp_path: Path):
         )
 
     assert response.status_code == 403
+
+
+def test_artifact_rebuild_endpoint_uses_uploaded_workbook_without_running_pipeline(
+    tmp_path: Path,
+):
+    service = FakeService(tmp_path / "service")
+    app = create_app(service)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/artifacts/validate-and-rebuild",
+            data={"payload": '{"result":{"structures":[{"sheet":"Sales"}]}}'},
+            files={
+                "file": (
+                    "book.xlsx",
+                    b"workbook-bytes",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["rebuilt"] is True
+    assert service.rebuild_calls[0]["result"]["structures"][0]["sheet"] == "Sales"
+    assert not service.calls
 
 
 def test_indexed_retrieval_select_endpoint(tmp_path: Path):
