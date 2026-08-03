@@ -20,3 +20,5 @@ Vite proxies `/v1` to `http://127.0.0.1:3636`. Set `VITE_API_PROXY_TARGET` to
 use another API URL. If the service requires a key, set
 `TABLE_AGENT_SERVICE_API_KEY` before starting Vite so the development proxy adds
 the header without exposing the key to browser code.
+
+Users can upload any files to process, then TableAgent will answer questions based on the generated structure
