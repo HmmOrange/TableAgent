@@ -6,6 +6,7 @@ import pickle
 import pytest
 
 from service import cli
+from TableAgent.configs import DEFAULT_CONFIG_PATH
 
 
 def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
@@ -47,6 +48,12 @@ def test_cli_parser_accepts_repeatable_workbooks_queries_and_profiles():
     assert args.max_workers == 6
     assert args.delete_job == []
     assert args.delete_all_jobs is False
+
+
+def test_cli_parser_defaults_to_repository_root_config():
+    args = cli.build_parser().parse_args([])
+
+    assert args.config == str(DEFAULT_CONFIG_PATH)
 
 
 def test_cli_parser_accepts_embed_and_sheet_flags():

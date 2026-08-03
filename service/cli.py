@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from service.runtime import TableAgentService
+from TableAgent.configs import DEFAULT_CONFIG_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run TableAgent or delete saved CLI runs.")
-    parser.add_argument("--config", default="config.yaml", help="Path to the private service configuration.")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to the shared repository configuration.")
     parser.add_argument(
         "--stage",
         choices=("structure", "qa", "all"),

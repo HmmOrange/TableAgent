@@ -3,7 +3,7 @@
 Start the API from the repository root:
 
 ```powershell
-uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 3636
+uv run table-agent-api --host 127.0.0.1 --port 3636
 ```
 
 Then start the Vite app:

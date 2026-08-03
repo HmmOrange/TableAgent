@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
+from TableAgent.configs import DEFAULT_CONFIG_PATH
 from service.runtime import Stage, TableAgentService
 
 
@@ -208,8 +209,7 @@ def _default_config_path() -> Path:
     configured = os.environ.get("TABLE_AGENT_CONFIG")
     if configured:
         return Path(configured)
-    private_config = Path("config.yaml")
-    return private_config if private_config.is_file() else Path("config.example.yaml")
+    return DEFAULT_CONFIG_PATH if DEFAULT_CONFIG_PATH.is_file() else Path("config.example.yaml")
 
 
 def _package_version() -> str:

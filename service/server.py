@@ -6,11 +6,12 @@ import uvicorn
 
 from service.api import create_app
 from service.runtime import TableAgentService
+from TableAgent.configs import DEFAULT_CONFIG_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the TableAgent HTTP API.")
-    parser.add_argument("--config", default="config.yaml", help="Path to the private service configuration.")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to the shared repository configuration.")
     parser.add_argument(
         "--llm",
         help="Configured LLM profile to use instead of the config.yaml default.",
