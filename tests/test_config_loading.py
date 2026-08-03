@@ -26,6 +26,7 @@ def test_root_config_contains_pipeline_and_dataset_settings():
     assert "service" in root_payload
     assert "table_agent" in root_payload
     assert config["table_agent"]["generation_max_tokens"] == 8192
+    assert TableAgentConfig.from_config(config).max_cell_width == 50
 
     provider_name, _ = resolve_vlm_config(config, "table_agent")
     assert provider_name == "layout_model"
