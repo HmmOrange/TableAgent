@@ -1193,7 +1193,7 @@ def legacy_table_agent_fallback_invalid_structure_marked_not_good(tmp_path: Path
     assert "invalid" in output.metadata["verification"]["feedback"].lower() or "empty" in output.metadata["verification"]["feedback"].lower()
 
 
-def test_answer_prompt_ignores_benchmark_answer_types(tmp_path: Path):
+def test_siflex_answer_prompt_formatting(tmp_path: Path):
     pipeline = TableAgentPipeline(
         llm_client=FakeLLM(),
         layout_vlm_client=FakeLayoutVLM(),
@@ -1224,6 +1224,9 @@ def test_answer_prompt_ignores_benchmark_answer_types(tmp_path: Path):
         raw={"answer_type": "table"},
     )
     table_prompt = pipeline._answer_prompt(siflex_table_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" in table_prompt
+    assert "CRITICAL EXPECTED FORMAT: TABLE" in table_prompt
+    assert "Format your final answer as a markdown table" in table_prompt
 
     siflex_list_sample = EvalSample(
         index=0,
@@ -1236,6 +1239,9 @@ def test_answer_prompt_ignores_benchmark_answer_types(tmp_path: Path):
         raw={"answer_type": "list"},
     )
     list_prompt = pipeline._answer_prompt(siflex_list_sample, "Content", "headers: []")
+    assert "FORMAT INSTRUCTIONS" in list_prompt
+    assert "CRITICAL EXPECTED FORMAT: LIST" in list_prompt
+    assert "Format your final answer as a bulleted list" in list_prompt
 
     siflex_form_sample = EvalSample(
         index=0,
@@ -1248,11 +1254,9 @@ def test_answer_prompt_ignores_benchmark_answer_types(tmp_path: Path):
         raw={"answer_type": "form"},
     )
     form_prompt = pipeline._answer_prompt(siflex_form_sample, "Content", "headers: []")
-
-    assert table_prompt == prompt
-    assert list_prompt == prompt
-    assert form_prompt == prompt
-    assert "answer_type" not in prompt
+    assert "FORMAT INSTRUCTIONS" in form_prompt
+    assert "CRITICAL EXPECTED FORMAT: FORM/DOCUMENT" in form_prompt
+    assert "Organize your final answer in a clear document structure" in form_prompt
 
 
 def test_table_agent_default_applies_generation_cap_and_early_breaks(tmp_path: Path):
