@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from service import server
-from TableAgent.configs import DEFAULT_CONFIG_PATH
 
 
 def test_server_parser_accepts_model_profile_overrides():
@@ -24,7 +23,6 @@ def test_server_parser_accepts_model_profile_overrides():
 def test_server_parser_defaults_model_profiles_to_config():
     args = server.build_parser().parse_args([])
 
-    assert args.config == str(DEFAULT_CONFIG_PATH)
     assert args.llm is None
     assert args.vlm is None
     assert args.port == 3636

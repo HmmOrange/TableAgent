@@ -21,8 +21,7 @@ Install the dependencies:
 uv sync
 ```
 
-TableAgent uses the parent repository's shared configuration. Create it from the
-parent repository root if needed:
+Create the local configuration:
 
 ```bash
 cp config.example.yaml config.yaml
@@ -36,7 +35,7 @@ Copy-Item config.example.yaml config.yaml
 
 ### Fill In The Configuration
 
-Edit `../config.yaml` before running TableAgent. The important sections are:
+Edit `config.yaml` before running TableAgent. The important sections are:
 
 | Configuration | What to fill in |
 | --- | --- |
@@ -54,7 +53,7 @@ The profile names must match. For example, `llm.provider: answer_model` selects
 
 The checked-in example reads model values from these environment variables, so you
 can either keep those references and set the variables or replace them with values
-directly in `../config.yaml`:
+directly in `config.yaml`:
 
 | Variable | Value |
 | --- | --- |
@@ -70,7 +69,7 @@ Model base URLs should include the API prefix, for example
 `http://localhost:8000/v1`. TableAgent appends `/chat/completions`. The VLM endpoint
 must accept images in OpenAI-compatible message content.
 
-See [`../config.example.yaml`](../config.example.yaml) for the remaining pipeline,
+See [`config.example.yaml`](config.example.yaml) for the remaining pipeline,
 retrieval, rendering, and service settings.
 
 ## Run From The CLI
@@ -103,7 +102,7 @@ Ingestion always generates `schema.yaml`, `metadata.json`, and retrieval card
 artifacts:
 
 ```bash
-uv run table-agent --stage structure --workbook sample/QA_sample.xlsx
+uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
 ```
 
 With `service.root_dir: outputs`, a saved run is stored at:
@@ -181,7 +180,7 @@ Summary:
 
 | Flag | Description |
 | --- | --- |
-| `--config PATH` | Configuration file to load. Defaults to the parent repository's `config.yaml`. |
+| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
 | `--stage structure` | Runs ingestion only. |
 | `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
 | `--embed` | Also writes `retrieval_cards.pkl` with retrieval card embeddings. |
@@ -206,7 +205,7 @@ isolated in one subprocess per concurrent render because its API is not thread-s
 Use `--workers 1` to retain serial execution.
 
 ```bash
-uv run table-agent --stage all \
+uv run table-agent --config config.yaml --stage all \
   --workbook sample/QA_sample.xlsx \
   --query "What is the total revenue?" \
   --query "Which region is largest?" \
@@ -216,7 +215,7 @@ uv run table-agent --stage all \
 For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
 
 ```bash
-uv run table-agent --stage structure \
+uv run table-agent --config config.yaml --stage structure \
   --workbook sample/QA_sample.xlsx \
   --sheet "Summary,Detail" --sheet Archive
 ```
@@ -224,8 +223,8 @@ uv run table-agent --stage structure \
 To remove selected or all saved CLI output:
 
 ```bash
-uv run table-agent --delete-job 2026-07-22T16-05-54.123456Z
-uv run table-agent --delete-all-jobs
+uv run table-agent --config config.yaml --delete-job 2026-07-22T16-05-54.123456Z
+uv run table-agent --config config.yaml --delete-all-jobs
 ```
 
 ### QA
@@ -242,7 +241,7 @@ on a previous ingestion run.
 #### Example: One workbook and one query
 
 ```bash
-uv run table-agent --stage qa \
+uv run table-agent --config config.yaml --stage qa \
   --workbook sample/QA_sample.xlsx \
   --query "What is the total revenue?"
 ```
@@ -307,7 +306,7 @@ run directory.
 
 | Flag | Description |
 | --- | --- |
-| `--config PATH` | Configuration file to load. Defaults to the parent repository's `config.yaml`. |
+| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
 | `--stage qa` | Generates structures and runs QA in one invocation. |
 | `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
 | `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
@@ -321,7 +320,7 @@ The `--vlm` option selects the layout VLM used to generate structures for QA.
 To query ingestion artifacts directly from the CLI without rerunning layout extraction:
 
 ```bash
-uv run table-agent --stage qa \
+uv run table-agent --config config.yaml --stage qa \
   --workbook sample/QA_sample.xlsx \
   --query "What is the total revenue?" \
   --artifacts outputs/<ingestion-run>/run.json
@@ -337,7 +336,7 @@ Run the `all` stage to ingest the workbook when needed and answer the question i
 one command:
 
 ```bash
-uv run table-agent --stage all --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
+uv run table-agent --config config.yaml --stage all --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
 ```
 
 This stage requires both the layout VLM and answer LLM.
@@ -349,7 +348,7 @@ Run `uv run table-agent --help` for the complete CLI reference.
 Start the HTTP service after configuring the same LLM and VLM profiles:
 
 ```bash
-uv run table-agent-api --host 127.0.0.1 --port 3636
+uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 3636
 ```
 
 Submit a workbook and receive the end-to-end result directly:

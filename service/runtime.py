@@ -24,7 +24,7 @@ from TableAgent.artifacts import (
     write_workbook_retrieval_cards,
     workbook_artifact_dir,
 )
-from TableAgent.configs import DEFAULT_CONFIG_PATH, load_config
+from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
@@ -85,7 +85,7 @@ class TableAgentService:
     @classmethod
     def from_config(
         cls,
-        path: str | Path = DEFAULT_CONFIG_PATH,
+        path: str | Path = "config.yaml",
         **kwargs: Any,
     ) -> "TableAgentService":
         return cls(load_config(path), **kwargs)

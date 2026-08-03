@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.yaml"
+DEFAULT_CONFIG_PATH = Path("config.yaml")
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 
