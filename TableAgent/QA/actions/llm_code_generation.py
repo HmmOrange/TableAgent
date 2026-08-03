@@ -9,6 +9,7 @@ from TableAgent.QA.actions.base_action import (
     CodeGenerationRequest,
     CodeGenerationResult,
 )
+from TableAgent.QA.header_hints import question_header_hints
 from TableAgent.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
@@ -256,6 +257,11 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     table_ids = [self.env.default_table_id()]
 
                 struct_summary = get_selected_structure_summary(self.env, [str(table_id) for table_id in table_ids])
+                header_hints = question_header_hints(
+                    self.env,
+                    request.question,
+                    [str(table_id) for table_id in table_ids],
+                )
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
@@ -270,6 +276,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
                         f"Table structure:\n{struct_summary}\n\n"
+                        f"Exact question-to-header matches:\n{header_hints}\n\n"
                         f"Experience:\n{formatted_experience}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",

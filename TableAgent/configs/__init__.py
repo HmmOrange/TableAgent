@@ -2,6 +2,7 @@ from TableAgent.configs.config import DEFAULT_CONFIG_PATH, load_config
 from TableAgent.configs.embedding_config import resolve_embedding_config
 from TableAgent.configs.llm_config import resolve_llm_config
 from TableAgent.configs.models_config import resolve_model_config
+from TableAgent.configs.routing import QARoutingConfig, RetrievalRoutingConfig, RoutingConfig
 from TableAgent.configs.table_agent import (
     TableAgentConfig,
     TableAgentSettings,
@@ -15,6 +16,9 @@ __all__ = [
     "DEFAULT_CONFIG_PATH",
     "TableAgentConfig",
     "TableAgentSettings",
+    "QARoutingConfig",
+    "RetrievalRoutingConfig",
+    "RoutingConfig",
     "load_config",
     "resolve_embedding_config",
     "resolve_llm_config",

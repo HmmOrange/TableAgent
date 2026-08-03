@@ -67,7 +67,7 @@ class SuccessfulQALLM(FakeLLM):
                 prompt_tokens=4,
                 completion_tokens=2,
             )
-        if system_prompt and "expert spreadsheet data planner" in system_prompt:
+        if system_prompt and "spreadsheet QA planner" in system_prompt:
             return LLMResponse(
                 content=json.dumps(
                     {

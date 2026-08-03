@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from TableAgent.configs.routing import RoutingConfig
+
 
 @dataclass(frozen=True)
 class TableAgentConfig:
@@ -28,11 +30,7 @@ class TableAgentConfig:
     max_image_pixels: int | None
     image_tile_size: int | None
     image_tile_overlap: int
-    run_retrieval: bool
-    perfect_retrieval: bool
-    retrieval_rerank_with_llm: bool
-    retrieval_top_k: int
-    retrieval_candidate_max_chars: int
+    routing: RoutingConfig
     exstruct_mode: str
     viewport_rows: int
     viewport_columns: int
@@ -45,13 +43,6 @@ class TableAgentConfig:
     qa_max_observation_chars: int
     qa_max_error_chars: int
     qa_max_value_repr_chars: int
-    retrieval_embedding_provider: str | None
-    retrieval_lexical_weight: float
-    retrieval_embedding_weight: float
-    retrieval_entity_weight: float
-    retrieval_audit_top_k: int
-    retrieval_query_type: str
-    retrieval_max_batches: int
     embed_retrieval_cards: bool
 
     @classmethod
@@ -81,11 +72,7 @@ class TableAgentConfig:
             max_image_pixels=_optional_int(merged.get("max_image_pixels")),
             image_tile_size=_optional_int(merged.get("image_tile_size")),
             image_tile_overlap=int(_required(merged, "image_tile_overlap")),
-            run_retrieval=_bool(merged.get("run_retrieval", True)),
-            perfect_retrieval=_bool(merged.get("perfect_retrieval", False)),
-            retrieval_rerank_with_llm=_bool(_required(merged, "retrieval_rerank_with_llm")),
-            retrieval_top_k=int(_required(merged, "retrieval_top_k")),
-            retrieval_candidate_max_chars=int(_required(merged, "retrieval_candidate_max_chars")),
+            routing=RoutingConfig.from_config(merged),
             exstruct_mode=str(merged.get("exstruct_mode", "light")),
             viewport_rows=int(merged.get("viewport_rows", 20)),
             viewport_columns=int(merged.get("viewport_columns", 20)),
@@ -98,15 +85,79 @@ class TableAgentConfig:
             qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
             qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
-            retrieval_embedding_provider=merged.get("retrieval_embedding_provider"),
-            retrieval_lexical_weight=float(merged.get("retrieval_lexical_weight", 0.5)),
-            retrieval_embedding_weight=float(merged.get("retrieval_embedding_weight", 0.5)),
-            retrieval_entity_weight=float(merged.get("retrieval_entity_weight", 2.0)),
-            retrieval_audit_top_k=int(merged.get("retrieval_audit_top_k", 10)),
-            retrieval_query_type=str(merged.get("retrieval_query_type", "auto")),
-            retrieval_max_batches=int(merged.get("retrieval_max_batches", 3)),
             embed_retrieval_cards=_bool(merged.get("embed_retrieval_cards", False)),
         )
+
+    @property
+    def run_retrieval(self) -> bool:
+        return self.routing.retrieval.enabled
+
+    @property
+    def perfect_retrieval(self) -> bool:
+        return self.routing.retrieval.perfect
+
+    @property
+    def retrieval_rerank_with_llm(self) -> bool:
+        return self.routing.retrieval.rerank_with_llm
+
+    @property
+    def retrieval_top_k(self) -> int:
+        return self.routing.retrieval.top_k
+
+    @property
+    def retrieval_candidate_max_chars(self) -> int:
+        return self.routing.retrieval.candidate_max_chars
+
+    @property
+    def retrieval_embedding_provider(self) -> str | None:
+        return self.routing.retrieval.embedding_provider
+
+    @property
+    def retrieval_bm25_weight(self) -> float:
+        return self.routing.retrieval.bm25_weight
+
+    @property
+    def retrieval_embedding_weight(self) -> float:
+        return self.routing.retrieval.embedding_weight
+
+    @property
+    def retrieval_audit_top_k(self) -> int:
+        return self.routing.retrieval.audit_top_k
+
+    @property
+    def retrieval_query_type(self) -> str:
+        return self.routing.retrieval.query_type
+
+    @property
+    def retrieval_max_batches(self) -> int:
+        return self.routing.retrieval.max_batches
+
+    @property
+    def qa_routing_mode(self) -> str:
+        return self.routing.qa.mode
+
+    @property
+    def qa_common_info_enabled(self) -> bool:
+        return self.routing.qa.common_info_enabled
+
+    @property
+    def qa_common_info_fallback(self) -> str:
+        return self.routing.qa.common_info_fallback
+
+    def should_retrieve(self, sample: Any) -> bool:
+        """Decide source selection independently from the downstream QA route."""
+        mode = self.routing.retrieval.mode
+        if mode in {"off", "indexed"}:
+            return False
+        if mode != "auto":
+            return True
+        raw = sample.raw if isinstance(getattr(sample, "raw", None), dict) else {}
+        selected_sheets = raw.get("selected_sheets") or []
+        if isinstance(selected_sheets, str):
+            selected_sheets = [selected_sheets]
+        if len([name for name in selected_sheets if str(name).strip()]) == 1:
+            return False
+        return not bool(raw.get("selected_table_id"))
 
 
 TableAgentSettings = TableAgentConfig

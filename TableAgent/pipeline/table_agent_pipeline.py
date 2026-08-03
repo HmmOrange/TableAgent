@@ -2,38 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import openpyxl
-import yaml
 from TableAgent.prompts.answer import ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT_TEMPLATE
 from TableAgent.prompts.reranker import RERANKER_SYSTEM_PROMPT, RERANKER_USER_PROMPT_TEMPLATE
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.configs.models_config import available_models
-from TableAgent.llm import BaseLLM, LLMResponse
-from TableAgent.pipeline.base import BasePipeline, PipelineOutput
+from TableAgent.llm import BaseLLM
+from TableAgent.pipeline.base import BasePipeline
 from TableAgent.QA.agents.answer_agent import QAAgent
 from TableAgent.QA.runner import TableQARunner
 from TableAgent.perception.metadata import SheetMetadata
-from TableAgent.rendering.converter import sample_to_xlsx
 from TableAgent.run_logging import Logger
 from TableAgent.schema import EvalSample
 from TableAgent.structure.layout.agent import LayoutAgent
-from TableAgent.structure.layout.parsing import _is_valid_structure, _parse_yaml_mapping
-from TableAgent.pipeline.common import (
-    SourceCandidate,
-    display_path,
-    has_workbook_sources,
-    read_image_tiles,
-    safe_name,
-    token_usage,
-)
+from TableAgent.pipeline.common import has_workbook_sources
 from TableAgent.pipeline.prompting import PromptBuilder
 from TableAgent.pipeline.retrieval import SourceRetriever
 from TableAgent.pipeline.retrieval.embeddings import OpenAICompatibleEmbeddingClient
+from TableAgent.pipeline.pipeline_qa import PipelineQAMixin
+from TableAgent.pipeline.pipeline_run import PipelineRunMixin
+from TableAgent.pipeline.pipeline_source_qa import PipelineSourceQAMixin
 from TableAgent.pipeline.source_preparer import SourcePreparer
 from TableAgent.structure.layout.workflow import TableLayoutWorkflow
 from TableAgent.pipeline.structure_cache import StructureCache, StructureCacheRecord
@@ -45,7 +37,12 @@ if TYPE_CHECKING:
 
 logger = Logger(__name__)
 
-class TableAgentPipeline(BasePipeline):
+class TableAgentPipeline(
+    PipelineRunMixin,
+    PipelineSourceQAMixin,
+    PipelineQAMixin,
+    BasePipeline,
+):
     name = "table_agent"
     prepare_samples_before_run = True
     answer_system_prompt = ANSWER_SYSTEM_PROMPT
@@ -133,7 +130,7 @@ class TableAgentPipeline(BasePipeline):
             missing = []
             for sample in samples:
                 if (
-                    self.settings.run_retrieval
+                    self.settings.should_retrieve(sample)
                     and has_workbook_sources(sample)
                     and (
                         self.source_retriever.load_perfect_candidates(sample)
@@ -160,7 +157,7 @@ class TableAgentPipeline(BasePipeline):
             self._prepared_source_samples.update(
                 sample.sample_id
                 for sample in samples
-                if has_workbook_sources(sample)
+                if has_workbook_sources(sample) and self.settings.should_retrieve(sample)
             )
 
     def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
@@ -180,9 +177,15 @@ class TableAgentPipeline(BasePipeline):
         return filtered
 
     def verify_samples(self, samples: list[EvalSample], *, force: bool = True) -> list[StructureCacheRecord]:
-        source_samples = [sample for sample in samples if has_workbook_sources(sample) and self.settings.run_retrieval]
+        source_samples = [
+            sample
+            for sample in samples
+            if has_workbook_sources(sample) and self.settings.should_retrieve(sample)
+        ]
         standard_samples = [
-            sample for sample in samples if not has_workbook_sources(sample) or not self.settings.run_retrieval
+            sample
+            for sample in samples
+            if not has_workbook_sources(sample) or not self.settings.should_retrieve(sample)
         ]
         records = []
         for sample in standard_samples:
@@ -332,176 +335,6 @@ class TableAgentPipeline(BasePipeline):
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         return self._artifact_dir
 
-    def run(self, sample: EvalSample) -> PipelineOutput:
-        if self.settings.phase == "structure":
-            raise RuntimeError("structure phase does not run question answering")
-        if has_workbook_sources(sample) and self.settings.run_retrieval:
-            if (
-                self.settings.phase == "all"
-                and not self.settings.perfect_retrieval
-            ):
-                if sample.sample_id in self._prepared_source_samples:
-                    self._prepared_source_samples.discard(sample.sample_id)
-                else:
-                    self.source_preparer.prepare(
-                        [sample],
-                        regenerate_invalid=True,
-                        force=True,
-                    )
-            responses: list[LLMResponse] = []
-            candidate = (
-                self.source_retriever.select_perfect(sample)
-                if self.settings.perfect_retrieval
-                else self.source_retriever.select(sample, responses, self._fit_context)
-            )
-            if candidate is None:
-                raise RuntimeError(
-                    f"Missing or stale structure cache for sample {sample.sample_id!r}; "
-                    "run structure or all first"
-                )
-            return self._run_prepared_source(sample, candidate, responses, self.start_timer())
-        if self.settings.phase == "all":
-            record = self._verified_samples.get(sample.sample_id)
-            if record is None:
-                record = self.structure_cache.prepare(sample, force=True)
-                self._verified_samples[sample.sample_id] = record
-        else:
-            record = self.structure_cache.load(sample)
-        if record is None or not record.valid:
-            raise RuntimeError(
-                f"Missing or stale structure cache for sample {sample.sample_id!r}; "
-                "run structure or all first"
-            )
-        return self._run_cached_qa(sample, record)
-
-    def _run_legacy(self, sample: EvalSample) -> PipelineOutput:
-        start_time = self.start_timer()
-        responses: list[LLMResponse] = []
-
-        self._progress("prepare", sample=sample.sample_id)
-        self.source_preparer.prepare([sample], regenerate_invalid=False)
-        self._progress("retrieval", sample=sample.sample_id)
-        candidate = self.source_retriever.select(sample, responses, self._fit_context)
-        if candidate is not None:
-            return self._run_prepared_source(sample, candidate, responses, start_time)
-
-        sample_dir = self._sample_dir(sample)
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        workbook = sample_to_xlsx(sample, sample_dir / "table.xlsx")
-        sheet_name = workbook.sheet_names[0]
-        metadata = self._metadata_for_workbook_sheet(workbook.path, sheet_name)
-        workflow_result = self.layout_workflow.run(
-            workbook_path=workbook.path,
-            sheet_name=sheet_name,
-            metadata=metadata,
-            output_dir=sample_dir,
-        )
-        responses.extend(workflow_result.responses)
-        structure_text = workflow_result.structure_text
-        verification = workflow_result.verification
-
-        structure_path = sample_dir / "structure.yaml"
-        if _is_valid_structure(structure_text):
-            structure_path.write_text(structure_text, encoding="utf-8")
-        else:
-            structure_path.unlink(missing_ok=True)
-        image_path = sample_dir / "table.png"
-        html_path = sample_dir / "table.html"
-        table_context = self._fit_context(sample.table_content)
-        self._progress("qa", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
-        answer_response, qa_info = self._run_verified_qa(
-            question=sample.question,
-            structure_path=structure_path,
-            workbook_path=workbook.path,
-            qa_artifact_dir=sample_dir / "qa",
-            fallback_prompt=self.prompts.answer_prompt(sample, table_context, structure_text),
-        )
-        responses.append(answer_response)
-        predicted_answer = answer_response.content
-        self._progress("done", sample=sample.sample_id, workbook=workbook.path.name, sheet=sheet_name)
-
-        return PipelineOutput(
-            sample_id=sample.sample_id,
-            structured_table=structure_text,
-            predicted_answer=predicted_answer,
-            latency=self.stop_timer(start_time),
-            token_usage=token_usage(responses),
-            metadata={
-                "structure_path": display_path(structure_path),
-                "workbook_path": str(workbook.path),
-                "image_path": display_path(image_path if image_path.is_file() else workflow_result.image_path)
-                if workflow_result.image_path
-                else None,
-                "html_path": display_path(html_path) if html_path.is_file() else None,
-                "workbook_source_format": workbook.source_format,
-                "workbook_sheets": workbook.sheet_names,
-                "verification": verification,
-                "artifact_dir": display_path(sample_dir),
-                "image_tiles": read_image_tiles(sample_dir),
-                "metadata_yaml_path": display_path(sample_dir / "metadata.yaml"),
-                "render_metadata_path": display_path(sample_dir / "table.metadata.json")
-                if (sample_dir / "table.metadata.json").is_file()
-                else None,
-                "changelog_path": display_path(workflow_result.changelog_path),
-                "events_path": display_path(workflow_result.events_path),
-                "iteration_artifact_dir": display_path(sample_dir / "iterations"),
-                "qa": qa_info,
-            },
-        )
-
-    def _run_cached_qa(self, sample: EvalSample, record: StructureCacheRecord) -> PipelineOutput:
-        start_time = self.start_timer()
-        structure_text = record.structure_path.read_text(encoding="utf-8")
-        answer_response, qa_info = self._run_verified_qa(
-            question=sample.question,
-            structure_path=record.structure_path,
-            workbook_path=record.workbook_path,
-            qa_artifact_dir=self._sample_dir(sample) / "qa",
-            fallback_prompt=self.prompts.answer_prompt(sample, self._fit_context(sample.table_content), structure_text),
-        )
-        responses = [answer_response]
-        predicted_answer = answer_response.content
-        return PipelineOutput(
-            sample_id=sample.sample_id,
-            structured_table=structure_text,
-            predicted_answer=predicted_answer,
-            latency=self.stop_timer(start_time),
-            token_usage=token_usage(responses),
-            metadata={
-                "structure_path": display_path(record.structure_path),
-                "workbook_path": str(record.workbook_path),
-                "workbook_source_format": "verification-cache",
-                "workbook_sheets": [record.sheet_name],
-                "artifact_dir": display_path(record.directory),
-                "image_path": display_path(record.directory / "table.png"),
-                "html_path": display_path(record.directory / "table.html") if (record.directory / "table.html").is_file() else None,
-                "metadata_yaml_path": display_path(record.directory / "metadata.yaml"),
-                "changelog_path": display_path(record.directory / "changelog.md"),
-                "events_path": display_path(record.directory / "events.jsonl"),
-                "iteration_artifact_dir": display_path(record.directory / "iterations"),
-                "cache_key": record.key,
-                "cache_dir": display_path(record.directory),
-                "cache_hit": record.cache_hit,
-                "verification": {"status": record.status},
-                "qa": qa_info,
-            },
-        )
-
-    def get_config(self) -> dict[str, Any]:
-        return {
-            "pipeline_type": self.name,
-            "llm": self._client_config(self.llm),
-            "layout_vlm": self._client_config(self.layout_vlm),
-            "agent": {
-                **{key: str(value) if isinstance(value, Path) else value for key, value in vars(self.settings).items()},
-                "active_artifact_dir": str(self._artifact_dir),
-            },
-            "prompt": {
-                "answer_system_prompt": self.answer_system_prompt,
-                "answer_user_prompt_template": self.answer_user_prompt_template,
-            },
-        }
-
     def _analyze_source_sheet(
         self,
         source_path: Path,
@@ -524,421 +357,6 @@ class TableAgentPipeline(BasePipeline):
             metadata_payload["verification"] = result.verification
             metadata_path.write_text(json.dumps(metadata_payload, ensure_ascii=False), encoding="utf-8")
         return result.structure_text
-
-    def _run_prepared_source(
-        self,
-        sample: EvalSample,
-        candidate: SourceCandidate,
-        responses: list[LLMResponse],
-        start_time: float,
-    ) -> PipelineOutput:
-        is_metadata_retrieval = getattr(candidate, "retrieval_type", "data") == "metadata"
-        image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]", candidate.structure_text)
-        fallback_prompt = self.prompts.answer_prompt(sample, self._fit_context(candidate.sheet_text), candidate.structure_text)
-        structure_path = candidate.directory / "structure.yaml"
-        if candidate.table_id or is_metadata_retrieval:
-            structure_path = self._sample_dir(sample) / (
-                "retrieved_metadata.yaml" if is_metadata_retrieval else "retrieved_structure.yaml"
-            )
-            structure_path.parent.mkdir(parents=True, exist_ok=True)
-            structure_path.write_text(candidate.structure_text, encoding="utf-8")
-        related_structure_paths = self._related_structure_paths(candidate)
-        self._progress(
-            "qa",
-            sample=sample.sample_id,
-            workbook=candidate.workbook_path.name,
-            sheet=candidate.sheet_name,
-            table=candidate.table_id,
-        )
-        if is_metadata_retrieval:
-            answer_response = self.qa_agent.run(
-                prompt=fallback_prompt,
-                image_path=None,
-                fallback_prompt=fallback_prompt,
-            )
-            qa_info = {
-                "success": True,
-                "error": None,
-                "execution_time": 0,
-                "token_usage": {
-                    "prompt": int(getattr(answer_response, "prompt_tokens", 0) or 0),
-                    "completion": int(getattr(answer_response, "completion_tokens", 0) or 0),
-                },
-                "artifacts": {},
-                "fallback_used": True,
-                "mode": "metadata_context",
-            }
-        else:
-            answer_response, qa_info = self._run_verified_qa(
-                question=sample.question,
-                structure_path=structure_path,
-                workbook_path=candidate.workbook_path,
-                qa_artifact_dir=self._sample_dir(sample) / "qa",
-                fallback_prompt=image_prompt,
-                fallback_image_path=candidate.image_path,
-                fallback_text_prompt=fallback_prompt,
-                related_structure_paths=related_structure_paths,
-                excluded_sheet_names=self._perfect_retrieval_excluded_sheets(candidate.workbook_path),
-                enable_final_answer_review=True,
-            )
-        responses.append(answer_response)
-        predicted_answer = answer_response.content
-        self._progress(
-            "done",
-            sample=sample.sample_id,
-            workbook=candidate.workbook_path.name,
-            sheet=candidate.sheet_name,
-        )
-        retrieval_info = {
-            "score": candidate.score,
-            "lexical_score": getattr(candidate, "lexical_score", candidate.score),
-            "embedding_score": getattr(candidate, "embedding_score", 0.0),
-            "embedding_used": getattr(candidate, "embedding_used", False),
-            "fallback_used": getattr(candidate, "fallback_used", False),
-            "retrieval_type": getattr(candidate, "retrieval_type", "data"),
-            "retrieval_level": getattr(candidate, "retrieval_level", ""),
-            "retrieval_trace": list(getattr(candidate, "retrieval_trace", ())),
-            "entity_score": getattr(candidate, "entity_score", 0.0),
-            "matched_terms": list(getattr(candidate, "matched_terms", ())),
-            "missing_terms": list(getattr(candidate, "missing_terms", ())),
-            "retrieval_rank": getattr(candidate, "retrieval_rank", 0),
-            "table_id": getattr(candidate, "table_id", ""),
-            "table_name": getattr(candidate, "table_name", ""),
-            "table_description": getattr(candidate, "table_description", ""),
-            "perfect_retrieval": self.settings.perfect_retrieval,
-            "retrieval_audit": list(getattr(candidate, "retrieval_audit", ())),
-        }
-        if hasattr(candidate, "reranker_selected_index"):
-            retrieval_info["reranker_selected_index"] = getattr(candidate, "reranker_selected_index")
-            retrieval_info["reranker_rationale"] = getattr(candidate, "reranker_rationale", "")
-        verification = self._prepared_verification(candidate.directory)
-
-        return PipelineOutput(
-            sample_id=sample.sample_id,
-            structured_table=candidate.structure_text,
-            predicted_answer=predicted_answer,
-            latency=self.stop_timer(start_time),
-            token_usage=token_usage(responses),
-            metadata={
-                "structure_path": display_path(structure_path),
-                "thinking_trace_path": display_path(candidate.directory / "thinking_trace.txt")
-                if (candidate.directory / "thinking_trace.txt").is_file()
-                else None,
-                "workbook_path": str(candidate.workbook_path.resolve()),
-                "image_path": display_path(candidate.image_path),
-                "html_path": display_path(candidate.html_path) if candidate.html_path else None,
-                "workbook_source_format": "xlsx",
-                "workbook_sheets": [candidate.sheet_name],
-                "verification": verification,
-                "artifact_dir": display_path(candidate.directory),
-                "image_tiles": read_image_tiles(candidate.directory),
-                "retrieval_info": retrieval_info,
-                "metadata_yaml_path": display_path(candidate.directory / "metadata.yaml"),
-                "render_metadata_path": display_path(candidate.directory / "table.metadata.json")
-                if (candidate.directory / "table.metadata.json").is_file()
-                else None,
-                "changelog_path": display_path(candidate.directory / "changelog.md"),
-                "events_path": display_path(candidate.directory / "events.jsonl"),
-                "iteration_artifact_dir": display_path(candidate.directory / "iterations"),
-                "qa": qa_info,
-            },
-        )
-
-    @staticmethod
-    def _prepared_verification(directory: Path) -> dict[str, Any]:
-        metadata_path = directory / "metadata.json"
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            metadata = {}
-        verification = metadata.get("verification") if isinstance(metadata, dict) else None
-        if isinstance(verification, dict):
-            return dict(verification)
-        return {"status": "good", "feedback": "Retrieved from encoded source"}
-
-    def _run_verified_qa(
-        self,
-        *,
-        question: str,
-        structure_path: Path,
-        workbook_path: Path,
-        qa_artifact_dir: Path,
-        fallback_prompt: str,
-        fallback_image_path: Path | None = None,
-        fallback_text_prompt: str | None = None,
-        related_structure_paths: list[Path] | None = None,
-        excluded_sheet_names: list[str] | None = None,
-        enable_final_answer_review: bool = False,
-    ) -> tuple[LLMResponse, dict[str, Any]]:
-        """Run the notebook QA phase against the persisted verified structure."""
-        structure_error: str | None = None
-        structure_failure_source = "missing_structure"
-        try:
-            structure_text = structure_path.read_text(encoding="utf-8")
-        except OSError:
-            structure_error = "Missing structure.yaml: no usable structure was supplied"
-        else:
-            parsed_structure = _parse_yaml_mapping(structure_text)
-            if not structure_text.strip():
-                structure_error = "Missing structure.yaml: the supplied structure is empty"
-            elif (
-                not parsed_structure
-                or parsed_structure.get("status") == "not_good"
-                or "error" in parsed_structure
-            ):
-                structure_error = "Invalid structure.yaml: the supplied structure is not usable YAML"
-                structure_failure_source = "invalid_structure"
-
-        if structure_error is not None:
-            response = self.qa_agent.run(
-                prompt=fallback_prompt,
-                image_path=fallback_image_path,
-                fallback_prompt=fallback_text_prompt,
-            )
-            return response, {
-                "success": False,
-                "error": structure_error,
-                "execution_time": 0,
-                "token_usage": {
-                    "prompt": int(getattr(response, "prompt_tokens", 0) or 0),
-                    "completion": int(
-                        getattr(response, "completion_tokens", 0) or 0
-                    ),
-                },
-                "artifacts": {},
-                "fallback_used": True,
-                "fallback_source": structure_failure_source,
-                "replan_count": 0,
-                "subtask_retry_count": 0,
-                "qa_max_retries": self.settings.qa_max_retries,
-                "llm_call_count": 1,
-                "token_capped_call_count": int(
-                    bool(getattr(response, "token_capped", False))
-                ),
-                "llm_total_ms": 0,
-                "llm_calls": [],
-                "generation_max_tokens": self.settings.generation_max_tokens,
-                "thinking_enabled": self._qa_thinking_enabled(),
-                "answer_route": "fallback",
-            }
-
-        qa_token_usage = {"prompt": 0, "completion": 0}
-        with TableQARunner(
-                structure_path=str(structure_path),
-                workbook_path=str(workbook_path),
-                llm_client=self.llm,
-                config={
-                    "table_agent": {
-                        **vars(self.settings),
-                        "artifact_dir": str(qa_artifact_dir),
-                        "qa_excluded_sheet_names": list(excluded_sheet_names or []),
-                        "qa_final_answer_review": enable_final_answer_review,
-                    },
-                    "qa_artifact_dir": str(qa_artifact_dir),
-                },
-                table_retriever=self.table_retriever,
-                related_structure_paths=related_structure_paths,
-            ) as runner:
-            result = runner.run(question)
-            qa_token_usage = result.token_usage
-            llm_calls = list(getattr(result, "llm_calls", []) or [])
-            capped_call_count = sum(
-                1 for call in llm_calls if bool(call.get("token_capped"))
-            )
-            qa_info = {
-                "success": result.success,
-                "error": result.error,
-                "execution_time": result.execution_time,
-                "token_usage": result.token_usage,
-                "artifacts": result.artifacts,
-                "fallback_used": not result.success,
-                "replan_count": int(getattr(result, "replan_count", 0) or 0),
-                "subtask_retry_count": int(
-                    getattr(result, "subtask_retry_count", 0) or 0
-                ),
-                "qa_max_retries": int(getattr(result, "qa_max_retries", 0) or 0),
-                "llm_call_count": len(llm_calls),
-                "token_capped_call_count": capped_call_count,
-                "llm_total_ms": sum(
-                    int(call.get("duration_ms", 0) or 0) for call in llm_calls
-                ),
-                "llm_calls": llm_calls,
-                "generation_max_tokens": self.settings.generation_max_tokens,
-                "thinking_enabled": self._qa_thinking_enabled(),
-                "answer_route": "qa",
-            }
-            if result.success and result.final_answer is not None:
-                return LLMResponse(
-                    content=result.final_answer,
-                    prompt_tokens=int(result.token_usage.get("prompt", 0) or 0),
-                    completion_tokens=int(result.token_usage.get("completion", 0) or 0),
-                ), qa_info
-
-        if result.success:
-            raise RuntimeError("TableQARunner returned success without a final answer")
-        verified_fallback_prompt = self._verified_observation_fallback_prompt(question, result)
-        if verified_fallback_prompt:
-            response = self.qa_agent.run(prompt=verified_fallback_prompt)
-            qa_info["fallback_source"] = "verified_inspection_observations"
-        else:
-            response = self.qa_agent.run(
-                prompt=fallback_prompt,
-                image_path=fallback_image_path,
-                fallback_prompt=fallback_text_prompt,
-            )
-            qa_info["fallback_source"] = "source_context"
-        response.prompt_tokens += int(qa_token_usage.get("prompt", 0) or 0)
-        response.completion_tokens += int(qa_token_usage.get("completion", 0) or 0)
-        return response, qa_info
-
-    def _qa_thinking_enabled(self) -> bool:
-        extra_body = getattr(self.llm, "extra_body", {})
-        if not isinstance(extra_body, dict):
-            return True
-        template_kwargs = extra_body.get("chat_template_kwargs")
-        if not isinstance(template_kwargs, dict):
-            return True
-        return bool(template_kwargs.get("enable_thinking", True))
-
-    def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
-        """Find prepared structures for sibling sheets of the selected workbook."""
-        source_root = candidate.directory.parent
-        workbook_path = candidate.workbook_path.resolve()
-        paths = []
-        if not source_root.is_dir():
-            return paths
-        for source_dir in sorted(source_root.iterdir()):
-            metadata_path = source_dir / "metadata.json"
-            structure_path = source_dir / "structure.yaml"
-            if not metadata_path.is_file() or not structure_path.is_file():
-                continue
-            try:
-                metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-            except (OSError, yaml.YAMLError):
-                continue
-            candidate_workbook_text = str(metadata.get("workbook_path", ""))
-            candidate_workbook = Path(candidate_workbook_text)
-            same_path = candidate_workbook.resolve() == workbook_path
-            same_name = safe_name(PureWindowsPath(candidate_workbook_text).name) == safe_name(workbook_path.name)
-            if candidate_workbook_text and (same_path or same_name):
-                sheet_name = str(metadata.get("sheet_name", ""))
-                if (
-                    self.settings.perfect_retrieval
-                    and self.source_retriever.is_perfect_retrieval_excluded(workbook_path, sheet_name)
-                ):
-                    continue
-                paths.append(structure_path)
-        return paths
-
-    def _perfect_retrieval_excluded_sheets(self, workbook_path: Path) -> list[str]:
-        if not self.settings.perfect_retrieval:
-            return []
-        workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
-        try:
-            return [
-                sheet_name
-                for sheet_name in workbook.sheetnames
-                if self.source_retriever.is_perfect_retrieval_excluded(workbook_path, sheet_name)
-            ]
-        finally:
-            workbook.close()
-
-    def _verified_observation_fallback_prompt(self, question: str, result: Any) -> str | None:
-        failure_text = "\n".join(
-            [str(getattr(result, "error", "") or "")]
-            + [
-                str(getattr(output, "observation", "") or "")
-                for output in getattr(result, "subtask_outputs", [])
-                if not getattr(output, "success", False)
-            ]
-        ).casefold()
-        unsafe_markers = (
-            "wrong table",
-            "wrong sheet",
-            "wrong header",
-            "wrong column",
-            "incorrect header",
-            "incorrect column",
-            "filter drift",
-            "incomplete coverage",
-            "wrong date",
-            "wrong target",
-            "unfiltered aggregate",
-            "incorrect count",
-            "incorrect value",
-        )
-        if any(marker in failure_text for marker in unsafe_markers):
-            return None
-
-        subtasks = {subtask.id: subtask for subtask in getattr(result, "plan", [])}
-        observations = []
-        for output in getattr(result, "subtask_outputs", []):
-            subtask = subtasks.get(output.subtask_id)
-            layer = getattr(output, "layer", "") or getattr(subtask, "layer", "")
-            if not output.success or layer != "inspect":
-                continue
-            observation = str(output.observation or "").strip()
-            if observation:
-                observations.append(f"## Verified inspection: {output.description}\n{observation}")
-        if not observations:
-            return None
-        evidence = "\n\n".join(observations)
-        if len(evidence) > self.settings.max_context_chars:
-            evidence = evidence[: self.settings.max_context_chars] + "\n...[truncated]"
-        return (
-            f"Question:\n{question}\n\n"
-            "The QA synthesis failed, but the following observations were successfully computed from the "
-            "verified spreadsheet structure and workbook. Answer using only these observations. Preserve exact "
-            "header-to-value ownership and every label explicitly enumerated in the question, apply every constraint "
-            "stated in the question, and do not add fields that were not requested. If the observations contain "
-            "multiple records, select only records matching all question constraints.\n\n"
-            f"{evidence}\n\nAnswer:"
-        )
-
-    @staticmethod
-    def _select_table_id(structure_path: Path, question: str) -> str | None:
-        """Choose the most question-relevant table in a multi-table structure."""
-        try:
-            payload = yaml.safe_load(structure_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        query_terms = set(re.findall(r"[a-z0-9]+", question.lower()))
-        best: tuple[int, str] | None = None
-        for key, table in payload.items():
-            if not isinstance(table, dict):
-                continue
-            table_id = str(table.get("id") or key)
-            searchable = " ".join(
-                [table_id, str(table.get("name") or ""), str(table.get("description") or "")]
-                + [
-                    " ".join(str(header.get(field) or "") for field in ("id", "label", "description"))
-                    for header in table.get("headers") or []
-                    if isinstance(header, dict)
-                ]
-            )
-            score = len(query_terms & set(re.findall(r"[a-z0-9]+", searchable.lower())))
-            candidate = (score, table_id)
-            if best is None or candidate > best:
-                best = candidate
-        return best[1] if best else None
-
-    def _generate_answer_with_image(self, *, prompt: str, image_path: Path, fallback_prompt: str | None = None) -> LLMResponse:
-        return self.qa_agent.run(prompt=prompt, image_path=image_path, fallback_prompt=fallback_prompt)
-
-    def _fit_context(self, table_content: str) -> str:
-        if len(table_content) <= self.settings.max_context_chars:
-            return table_content
-        return table_content[: self.settings.max_context_chars] + "\n...TRUNCATED..."
-
-    def _answer_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
-        return self.prompts.answer_prompt(sample, table_context, structure_text)
-
-    def _sample_dir(self, sample: EvalSample) -> Path:
-        raw = f"{sample.sample_id}:{sample.table_id}:{sample.question}"
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-        return self._artifact_dir / safe_name(sample.sample_id)[:80] / digest
 
     @staticmethod
     def _metadata_for_workbook_sheet(workbook_path: Path, sheet_name: str) -> SheetMetadata:

@@ -34,11 +34,8 @@ table_agent:
   phase: "all"
   structure_cache_dir: "cache/table_agent/structure"
   artifact_root: "outputs/table_agent/artifacts"
-  evaluation_output_dir: "outputs"
-  log_dir: "outputs/table_agent/logs"
   run_dir_template: "{run_name}"
   repeat_dir_template: "repeat_{run_id}"
-  shared_dir_name: "shared"
   artifact_dir: "outputs/table_agent"
   max_refinement_rounds: 3
   max_context_chars: 240000
@@ -52,11 +49,30 @@ table_agent:
   max_image_pixels: 33554432
   image_tile_size: null
   image_tile_overlap: 256
-  run_retrieval: true
-  perfect_retrieval: false
-  retrieval_rerank_with_llm: true
-  retrieval_top_k: 5
-  retrieval_candidate_max_chars: 4000
+  routing:
+    retrieval:
+      # off: use the supplied workbook/structure without source retrieval.
+      # auto: skip retrieval for an explicit single sheet/table; retrieve otherwise.
+      # lexical: BM25/keyword retrieval only; hybrid also uses embeddings when available.
+      # indexed: do not prepare/select local sources; use incoming indexed artifacts.
+      # perfect: deterministic/oracle source selection for controlled evaluations.
+      mode: "auto"
+      rerank_with_llm: true
+      top_k: 8
+      candidate_max_chars: 4000
+      bm25_weight: 0.3
+      embedding_weight: 0.7
+      explicit_workbook_guard: true
+      explicit_sheet_guard: true
+      audit_top_k: 10
+      query_type: "auto"
+      max_batches: 3
+    qa:
+      # auto lets the planner route common-info questions; normal disables that route.
+      # common_info forces the deterministic common-info route when enabled.
+      mode: "auto"
+      common_info_enabled: true
+      common_info_fallback: "normal"
   exstruct_mode: "light"
   viewport_rows: 50
   viewport_columns: 50
@@ -71,10 +87,10 @@ table_agent:
   qa_max_observation_chars: 2000
   qa_max_error_chars: 2000
   qa_max_value_repr_chars: 800
-  # Required by --embed. Mock embeddings are intentionally rejected by ingestion.
+  # Shared by query-time hybrid retrieval and optional ingestion embedding export.
   retrieval_embedding_provider: "retrieval_embedding_model"
-  retrieval_lexical_weight: 0.5
-  retrieval_embedding_weight: 0.5
+  # Ingestion only: add embeddings to exported retrieval cards when requested.
+  embed_retrieval_cards: false
 
 service:
   root_dir: "outputs"

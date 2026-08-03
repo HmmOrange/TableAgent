@@ -13,6 +13,7 @@ from TableAgent.QA.actions.base_action import (
     ReviewRequest,
     ReviewResult,
 )
+from TableAgent.QA.actions.common_info import CommonInfoSubtaskAction
 from TableAgent.QA.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.QA.actions.llm_code_generation import LLMCodeGenerationAction
 from TableAgent.QA.actions.review import ReviewSubtaskAction
@@ -24,6 +25,7 @@ __all__ = [
     "BaseCodeGenerationAction",
     "BasePlanAction",
     "BaseReviewAction",
+    "CommonInfoSubtaskAction",
     "CodeExecutionRequest",
     "CodeExecutionResult",
     "CodeGenerationRequest",

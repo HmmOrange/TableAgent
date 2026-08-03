@@ -21,6 +21,7 @@ class SourceCandidate:
     sheet_text: str
     score: float
     lexical_score: float = 0.0
+    bm25_score: float = 0.0
     embedding_score: float = 0.0
     embedding_used: bool = False
     retrieval_card: str = ""
@@ -39,6 +40,8 @@ class SourceCandidate:
     embedding_vector: tuple[float, ...] = ()
     embedding_model: str = ""
     embedding_source: str = ""
+    sheet_names: tuple[str, ...] = ()
+    workbook_reference_score: float = 0.0
 
 
 def safe_name(value: str) -> str:
