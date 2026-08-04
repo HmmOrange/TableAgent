@@ -7,6 +7,7 @@ class SubTask:
     id: str
     description: str
     layer: Literal["table_inspect", "inspect", "synthesis"]
+    category: Literal["normal", "common_info"] = "normal"
     depends_on: List[str] = field(default_factory=list)
     status: Literal["pending", "running", "success", "failed"] = "pending"
     code_attempt: Optional[str] = None
@@ -16,6 +17,6 @@ class SubTask:
 
     def __repr__(self) -> str:
         return (
-            f"SubTask(id='{self.id}', layer='{self.layer}', depends_on={self.depends_on}, "
+            f"SubTask(id='{self.id}', layer='{self.layer}', category='{self.category}', depends_on={self.depends_on}, "
             f"status='{self.status}', metadata={self.metadata})"
         )

@@ -13,6 +13,7 @@ class AgentOutput:
     reasoning: str = ""
     namespace_updates: Dict[str, Any] = field(default_factory=dict)
     layer: str = ""
+    category: str = "normal"
     attempt_count: int = 1
 
 @dataclass

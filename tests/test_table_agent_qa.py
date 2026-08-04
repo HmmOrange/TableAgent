@@ -979,7 +979,7 @@ def test_group_header_mask_resolves_leaf_columns():
         env.workbook.close()
 
 
-def test_planner_extracts_trailing_json_and_preserves_metadata():
+def test_planner_extracts_trailing_json_and_common_info_metadata():
     trailing = parse_planner_output(
         "I would inspect the workbook first.\n"
         '[{"id":"inspect","layer":"inspect","depends_on":[],"description":"Read data"},'
@@ -990,15 +990,18 @@ def test_planner_extracts_trailing_json_and_preserves_metadata():
             {
                 "id": "inspect_sheet_info",
                 "layer": "inspect",
+                "category": "common_info",
                 "depends_on": [],
                 "description": "Describe the OIL sheet structure.",
                 "metadata": {
+                    "common_info_scope": "sheet",
                     "target_names": ["OIL"],
                 },
             },
             {
                 "id": "synthesize_sheet_info",
                 "layer": "synthesis",
+                "category": "common_info",
                 "depends_on": ["inspect_sheet_info"],
                 "description": "Return the verified sheet summary.",
             },
@@ -1007,7 +1010,8 @@ def test_planner_extracts_trailing_json_and_preserves_metadata():
 
     assert [subtask.id for subtask in trailing] == ["inspect", "finish"]
     assert descriptive_plan[0].metadata["target_names"] == ["OIL"]
-    assert not hasattr(descriptive_plan[0], "category")
+    assert descriptive_plan[0].category == "common_info"
+    assert descriptive_plan[0].metadata["common_info_scope"] == "sheet"
 
 
 def test_runner_serializes_full_dataframe_final_answer():
@@ -1034,18 +1038,24 @@ def test_runner_serializes_full_dataframe_final_answer():
         runner.close()
 
 
-def test_descriptive_plan_uses_general_inspection_and_synthesis(tmp_path: Path):
+def test_common_info_plan_uses_verified_metadata_route(tmp_path: Path):
     plan = _llm_json({
         "subtasks": [
             {
                 "id": "inspect_table_info",
                 "layer": "inspect",
+                "category": "common_info",
                 "depends_on": [],
                 "description": "Describe the verified table.",
+                "metadata": {
+                    "common_info_scope": "table",
+                    "target_names": ["People Nested Headers"],
+                },
             },
             {
                 "id": "synthesize_table_info",
                 "layer": "synthesis",
+                "category": "common_info",
                 "depends_on": ["inspect_table_info"],
                 "description": "Return the verified table summary.",
             },
@@ -1054,16 +1064,7 @@ def test_descriptive_plan_uses_general_inspection_and_synthesis(tmp_path: Path):
     answer = "## Table: People Nested Headers\n- Description: Verified people table."
     llm = FakeLLM({
         "Table Structure": plan,
-        "Assigned Subtask:": _llm_json({
-            "reasoning": "Read the verified table metadata.",
-            "code": "table_description = env.get_table_structure('table1')['description']",
-            "description": "Reads the table description.",
-        }),
-        "Variables in namespace:": _llm_json({
-            "reasoning": "Format the inspected metadata.",
-            "code": f"final_answer = {answer!r}",
-            "description": "Formats the verified table summary.",
-        }),
+        "Verified structural answer:": answer,
     })
     runner = TableQARunner(
         STRUCTURE_PATH,
@@ -1077,6 +1078,7 @@ def test_descriptive_plan_uses_general_inspection_and_synthesis(tmp_path: Path):
         assert result.success
         assert result.final_answer == answer
         assert [output.layer for output in result.subtask_outputs] == ["inspect", "synthesis"]
-        assert all(not hasattr(output, "category") for output in result.subtask_outputs)
+        assert all(output.category == "common_info" for output in result.subtask_outputs)
+        assert all("business data" in output.reasoning for output in result.subtask_outputs)
     finally:
         runner.close()

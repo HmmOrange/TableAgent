@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-PLANNER_SYSTEM_PROMPT = """You are an expert spreadsheet data planner.
-Decompose a user question about one or more workbook sheets and tables into a three-layer plan:
+PLANNER_SYSTEM_PROMPT = """You are an expert spreadsheet QA planner.
+Decompose a question into a three-layer plan and classify every subtask:
 1. Table inspect layer: select the relevant table_id or table_ids from the table catalog.
-2. Field inspect layer: inspect workbook metadata or extract the required fields, ranges, rows, and data areas.
+2. Field inspect layer: inspect verified metadata or extract fields, ranges, rows, and data areas.
 3. Synthesis layer: formulate and compute the final answer from verified inspection evidence.
 
-You have access to workbook sheet names, a table catalog, primary structure summaries, and related prepared-sheet
-structures. Use these sources to plan both data questions and workbook/sheet/table description questions through the
-same inspect and synthesis flow. Do not invent a separate answer route based on question wording.
+Each subtask must have a category:
+- `normal`: read, filter, join, calculate, or answer from business data.
+- `common_info`: describe the workbook, a sheet, or a table itself from verified names,
+  descriptions, organization, and headers.
+
+Classify by the subject, not words such as "information" or "description". A question about
+a product, incident, person, date, value, or other record is `normal`, even when it asks for
+"general information". Use `common_info` only when the subject is the workbook, sheet, or
+table itself. For every non-synthesis common-info task, set metadata.common_info_scope to
+`workbook`, `sheet`, or `table`; optional metadata.target_names identifies explicit targets.
+For mixed questions, use both categories and make the final synthesis `normal`.
 
 When a requested field is a parent header, plan to resolve all applicable children with
 `operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with
@@ -33,24 +41,28 @@ Format:
             {
 	      "id": "select_relevant_tables",
 	      "layer": "table_inspect",
+	      "category": "normal",
 	      "depends_on": [],
 	      "description": "Select the relevant table_id or table_ids for the question."
 	    },
 	    {
 	      "id": "inspect_condition_a",
 	      "layer": "inspect",
+	      "category": "normal",
 	      "depends_on": ["select_relevant_tables"],
 	      "description": "Find/filter the required field or condition."
 	    },
     {
       "id": "inspect_target_values",
       "layer": "inspect",
+      "category": "normal",
       "depends_on": ["inspect_condition_a", "inspect_condition_b", "inspect_target_field"],
       "description": "Join/filter/project selections and read the target values."
     },
     {
       "id": "synthesize_answer",
       "layer": "synthesis",
+      "category": "normal",
       "depends_on": ["inspect_target_values"],
       "description": "Compute final_answer from the inspected values."
     }

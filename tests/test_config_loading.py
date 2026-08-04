@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,8 @@ import yaml
 
 from TableAgent.configs import load_config, resolve_llm_config, resolve_vlm_config
 from TableAgent.configs import TableAgentConfig
+from TableAgent.pipeline.pipeline_run import PipelineRunMixin
+from TableAgent.schema import EvalSample
 
 CONFIG_PATH = Path("config.example.yaml")
 
@@ -26,6 +29,7 @@ def test_root_config_contains_pipeline_and_dataset_settings():
     assert "service" in root_payload
     assert "table_agent" in root_payload
     assert config["table_agent"]["generation_max_tokens"] == 8192
+    assert TableAgentConfig.from_config(config).max_cell_width == 50
 
     provider_name, _ = resolve_vlm_config(config, "table_agent")
     assert provider_name == "layout_model"
@@ -42,6 +46,73 @@ def test_table_agent_root_config_applies_pipeline_generation_cap():
     assert vlm_provider_name == "layout_model"
     assert vlm_config["max_tokens"] is None
     assert config["table_agent"]["generation_max_tokens"] == 8192
+
+
+def test_table_agent_routing_config_is_loaded_and_used():
+    settings = TableAgentConfig.from_config(load_config(CONFIG_PATH)["table_agent"])
+
+    assert settings.routing.retrieval.mode == "auto"
+    assert settings.run_retrieval is True
+    assert settings.retrieval_top_k == 8
+    assert settings.retrieval_bm25_weight == 0.3
+    assert settings.qa_routing_mode == "auto"
+    assert settings.qa_common_info_enabled is True
+
+
+def test_table_agent_settings_are_json_serializable_for_runtime_reporting():
+    settings = TableAgentConfig.from_config(load_config(CONFIG_PATH)["table_agent"])
+
+    payload = PipelineRunMixin._serialize_config_value(settings)
+
+    assert payload["routing"]["retrieval"]["mode"] == "auto"
+    assert json.loads(json.dumps(payload))["routing"]["qa"]["mode"] == "auto"
+
+
+def test_table_agent_routing_switches_replace_legacy_booleans():
+    off = TableAgentConfig.from_config({
+        **load_config(CONFIG_PATH)["table_agent"],
+        "routing": {
+            "retrieval": {"mode": "off"},
+            "qa": {"mode": "normal", "common_info_enabled": False},
+        },
+    })
+    perfect = TableAgentConfig.from_config({
+        **load_config(CONFIG_PATH)["table_agent"],
+        "routing": {"retrieval": {"mode": "perfect"}},
+    })
+
+    assert off.run_retrieval is False
+    assert off.qa_routing_mode == "normal"
+    assert off.qa_common_info_enabled is False
+    assert perfect.run_retrieval is True
+    assert perfect.perfect_retrieval is True
+
+
+def test_auto_retrieval_skips_an_explicitly_selected_sheet():
+    settings = TableAgentConfig.from_config(load_config(CONFIG_PATH)["table_agent"])
+    sample = EvalSample(
+        index=0,
+        sample_id="sample",
+        table_id="table",
+        table_content="",
+        question="What is the total?",
+        answer=[],
+        table_path="workbook.xlsx",
+        raw={"selected_sheets": ["Summary"]},
+    )
+
+    assert settings.should_retrieve(sample) is False
+    unscoped = EvalSample(
+        index=0,
+        sample_id="sample",
+        table_id="table",
+        table_content="",
+        question="What is the total?",
+        answer=[],
+        table_path="workbook.xlsx",
+        raw={},
+    )
+    assert settings.should_retrieve(unscoped) is True
 
 
 def test_table_agent_phase_is_named_structure():

@@ -102,6 +102,7 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
     worksheet["C3"] = "A description that is much wider than the default spreadsheet column"
     worksheet["D4"] = "First line\nSecond line\nThird line"
     worksheet["D5"] = 100
+    worksheet["A10"] = "This off-viewport text must not widen column A " * 10
     workbook.save(workbook_path)
     workbook.close()
 
@@ -129,7 +130,9 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
             calls["grid_lines"] = sheet.print_options.gridLines
             calls["fit_to_width"] = sheet.page_setup.fitToWidth
             calls["fit_to_height"] = sheet.page_setup.fitToHeight
+            calls["column_a_width"] = sheet.column_dimensions["A"].width
             calls["column_c_width"] = sheet.column_dimensions["C"].width
+            calls["cell_c3_wrap_text"] = sheet["C3"].alignment.wrap_text
             calls["row_4_height"] = sheet.row_dimensions[4].height
         finally:
             saved.close()
@@ -173,6 +176,7 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
         resolution=240,
         timeout_seconds=30,
         show_coordinates=True,
+        max_cell_width=40,
     )
 
     assert image_path.is_file()
@@ -182,7 +186,9 @@ def test_libreoffice_range_renderer_sets_print_area_and_coordinates(monkeypatch,
     assert calls["grid_lines"] is True
     assert calls["fit_to_width"] == 1
     assert calls["fit_to_height"] == 1
-    assert calls["column_c_width"] > 60
+    assert calls["column_a_width"] == 13
+    assert calls["column_c_width"] == 40
+    assert calls["cell_c3_wrap_text"] is True
     assert calls["row_4_height"] > 40
     assert calls["scale"] == 384 / 72
     assert calls["page_index"] == 0

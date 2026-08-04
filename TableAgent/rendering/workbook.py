@@ -99,6 +99,7 @@ class WorkbookRenderer:
             timeout_seconds=self.settings.render_timeout_seconds,
             show_coordinates=self.settings.workbook_show_coordinates,
             max_workers=self.settings.max_workers,
+            max_cell_width=self.settings.max_cell_width,
         )
         result = _image_render_result(image_path, browser_path=Path("libreoffice"))
         _write_render_metadata(
@@ -140,6 +141,7 @@ def _render_xlsx_range_with_libreoffice(
     timeout_seconds: float = 60,
     show_coordinates: bool = True,
     max_workers: int = 1,
+    max_cell_width: int = 50,
 ) -> None:
     try:
         import openpyxl
@@ -175,7 +177,7 @@ def _render_xlsx_range_with_libreoffice(
             worksheet.page_setup.fitToWidth = 1
             worksheet.page_setup.fitToHeight = 1
             _ensure_visible_dimensions(worksheet, RowDimension, ColumnDimension)
-            _expand_dimensions_to_fit(worksheet)
+            _expand_dimensions_to_fit(worksheet, cell_range, max_cell_width=max_cell_width)
             workbook.save(prepared_path)
         finally:
             workbook.close()
@@ -287,18 +289,44 @@ def _ensure_visible_dimensions(worksheet: Any, row_dimension_cls: Any, column_di
             worksheet.column_dimensions[column_letter] = column_dimension_cls(worksheet, index=column_letter)
 
 
-def _expand_dimensions_to_fit(worksheet: Any) -> None:
+def _expand_dimensions_to_fit(
+    worksheet: Any,
+    cell_range: str | None = None,
+    *,
+    max_cell_width: int = 50,
+) -> None:
     """Expand worksheet dimensions so cell text is present in the exported image."""
+    from copy import copy
+
     from openpyxl.utils import get_column_letter
+    from openpyxl.utils.cell import range_boundaries
+
+    if max_cell_width < 1:
+        raise ValueError("max_cell_width must be a positive integer")
+
+    if cell_range:
+        min_column, min_row, max_column, max_row = range_boundaries(cell_range)
+    else:
+        min_column, min_row = 1, 1
+        max_column, max_row = worksheet.max_column, worksheet.max_row
 
     required_widths: dict[int, float] = {}
     merged_by_cell: dict[tuple[int, int], Any] = {}
     for merged_range in worksheet.merged_cells.ranges:
-        for row in range(merged_range.min_row, merged_range.max_row + 1):
-            for column in range(merged_range.min_col, merged_range.max_col + 1):
+        for row in range(max(min_row, merged_range.min_row), min(max_row, merged_range.max_row) + 1):
+            for column in range(
+                max(min_column, merged_range.min_col),
+                min(max_column, merged_range.max_col) + 1,
+            ):
                 merged_by_cell[(row, column)] = merged_range
 
-    for row in worksheet.iter_rows():
+    viewport_rows = worksheet.iter_rows(
+        min_row=min_row,
+        max_row=max_row,
+        min_col=min_column,
+        max_col=max_column,
+    )
+    for row in viewport_rows:
         for cell in row:
             if cell.value is None or not str(cell.value).strip():
                 continue
@@ -321,9 +349,15 @@ def _expand_dimensions_to_fit(worksheet: Any) -> None:
     for column, required in required_widths.items():
         letter = get_column_letter(column)
         dimension = worksheet.column_dimensions[letter]
-        dimension.width = max(float(dimension.width or 13), required)
+        dimension.width = min(max(float(dimension.width or 13), required), max_cell_width)
 
-    for row in worksheet.iter_rows():
+    viewport_rows = worksheet.iter_rows(
+        min_row=min_row,
+        max_row=max_row,
+        min_col=min_column,
+        max_col=max_column,
+    )
+    for row in viewport_rows:
         for cell in row:
             if cell.value is None or not str(cell.value).strip():
                 continue
@@ -338,7 +372,13 @@ def _expand_dimensions_to_fit(worksheet: Any) -> None:
                 float(worksheet.column_dimensions[get_column_letter(column)].width or 13)
                 for column in columns
             )
-            wrap = bool(cell.alignment.wrap_text)
+            wrap = bool(cell.alignment.wrap_text) or len(lines) > 1 or any(
+                _display_width(line) > available_width for line in lines
+            )
+            if wrap and not cell.alignment.wrap_text:
+                alignment = copy(cell.alignment)
+                alignment.wrap_text = True
+                cell.alignment = alignment
             wrapped_lines = sum(
                 max(1, math.ceil(_display_width(line) / max(1, available_width)))
                 for line in lines

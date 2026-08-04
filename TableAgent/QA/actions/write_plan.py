@@ -6,14 +6,15 @@ from typing import Any, List, Optional
 
 from TableAgent.QA.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
 from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
+from TableAgent.QA.header_hints import question_header_hints
 from TableAgent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.schema.subtask import SubTask
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
 Return only one JSON object with a non-empty `subtasks` list. Each subtask must have
-`id`, `description`, `layer` (`table_inspect`, `inspect`, or `synthesis`), and
-`depends_on` (a list). Include one table_inspect subtask when multiple tables must be
-routed, at least one inspect subtask, and a final synthesis subtask. No prose."""
+`id`, `description`, `layer` (`table_inspect`, `inspect`, or `synthesis`), `category`
+(`normal` or `common_info`), and `depends_on` (a list). Non-synthesis common-info
+tasks require metadata.common_info_scope as workbook, sheet, or table. No prose."""
 
 
 def parse_planner_output(content: str) -> list[SubTask]:
@@ -64,14 +65,29 @@ def parse_planner_output(content: str) -> list[SubTask]:
             raise ValueError(
                 f"Subtask '{subtask_id}' has invalid layer {layer!r}; expected 'table_inspect', 'inspect', or 'synthesis'."
             )
+        category = str(item.get("category", "normal")).strip().lower()
+        if category not in {"normal", "common_info"}:
+            raise ValueError(
+                f"Subtask '{subtask_id}' has invalid category {category!r}."
+            )
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         metadata = dict(metadata)
+        if item.get("common_info_scope") and "common_info_scope" not in metadata:
+            metadata["common_info_scope"] = item["common_info_scope"]
         if item.get("target_names") and "target_names" not in metadata:
             metadata["target_names"] = item["target_names"]
+        if category == "common_info" and layer != "synthesis":
+            scope = str(metadata.get("common_info_scope") or "").strip().lower()
+            if scope not in {"workbook", "sheet", "table"}:
+                raise ValueError(
+                    f"Common-info subtask '{subtask_id}' requires metadata.common_info_scope."
+                )
+            metadata["common_info_scope"] = scope
         subtasks.append(SubTask(
             id=subtask_id,
             description=description,
             layer=layer,  # type: ignore
+            category=category,  # type: ignore
             depends_on=_split_depends_on(item.get("depends_on", [])),
             status="pending",
             metadata=metadata,
@@ -156,6 +172,12 @@ class WriteQAPlanAction(BasePlanAction):
             table_catalog=table_catalog,
             table_structure=struct_summary,
         )
+        table_ids = [request.table_id] if request.table_id else self.env.operators.list_tables()
+        prompt += (
+            "\n\nExact question-to-header matches:\n"
+            f"{question_header_hints(self.env, request.question, table_ids)}\n"
+            "Treat these matches as authoritative during inspection and synthesis."
+        )
         if request.failure_context:
             previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)
             prompt += (
@@ -191,12 +213,18 @@ class WriteQAPlanAction(BasePlanAction):
                 })
                 raise exc
 
-        needs_table_inspect = len(self.env.operators.list_tables()) > 1
+        subtasks = self._apply_routing_policy(subtasks)
+        has_normal_inspection = any(
+            subtask.layer == "inspect" and subtask.category == "normal"
+            for subtask in subtasks
+        )
+        needs_table_inspect = len(self.env.operators.list_tables()) > 1 and has_normal_inspection
         if needs_table_inspect and not any(subtask.layer == "table_inspect" for subtask in subtasks):
             subtasks.insert(0, SubTask(
                 id="select_relevant_tables",
                 description="Select the relevant table_id or table_ids for the question.",
                 layer="table_inspect",
+                category="normal",
                 depends_on=[],
                 status="pending",
             ))
@@ -223,3 +251,30 @@ class WriteQAPlanAction(BasePlanAction):
             "subtasks": [str(s) for s in subtasks],
         })
         return PlanGenerationResult(subtasks=subtasks, raw_response=raw_response)
+
+    def _apply_routing_policy(self, subtasks: list[SubTask]) -> list[SubTask]:
+        mode = str(getattr(self.env, "qa_routing_mode", "auto"))
+        enabled = bool(getattr(self.env, "qa_common_info_enabled", True))
+        if mode == "normal" or not enabled:
+            for subtask in subtasks:
+                subtask.category = "normal"
+        elif mode == "common_info":
+            for subtask in subtasks:
+                subtask.category = "common_info"
+                if subtask.layer != "synthesis":
+                    metadata = subtask.metadata or {}
+                    metadata.setdefault("common_info_scope", "workbook")
+                    subtask.metadata = metadata
+
+        by_id = {subtask.id: subtask for subtask in subtasks}
+        for subtask in subtasks:
+            if subtask.layer != "synthesis":
+                continue
+            categories = {
+                by_id[dependency].category
+                for dependency in subtask.depends_on
+                if dependency in by_id
+            }
+            if categories:
+                subtask.category = "normal" if "normal" in categories else "common_info"
+        return subtasks
