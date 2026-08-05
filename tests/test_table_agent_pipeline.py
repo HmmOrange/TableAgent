@@ -597,14 +597,21 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
 
     def fake_run_verified_qa(**kwargs):
         captured["structure_path"] = kwargs["structure_path"]
+        captured["qa_artifact_dir"] = kwargs["qa_artifact_dir"]
         return LLMResponse(content="100"), {"success": True}
 
     monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
 
     output = pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
     selected_path = captured["structure_path"]
+    qa_artifact_dir = captured["qa_artifact_dir"]
+    relative_qa_dir = qa_artifact_dir.relative_to(tmp_path / "artifacts")
 
     assert selected_path.name == "retrieved_structure.yaml"
+    assert selected_path.parent == qa_artifact_dir
+    assert relative_qa_dir.parts[0] == "qa"
+    assert relative_qa_dir.parts[1].startswith("siflex_table-level")
+    assert len(relative_qa_dir.parts) == 3
     assert selected_path.read_text(encoding="utf-8") == selected_structure
     assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
     assert output.metadata["retrieval_info"]["table_id"] == "table2"
@@ -639,6 +646,11 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     assert second.metadata["cache_hit"] is True
     assert second.metadata["cache_key"] == first.metadata["cache_key"]
     assert second.predicted_answer == "100"
+    qa_run_dir = Path(second.metadata["qa"]["artifacts"]["run_dir"])
+    relative_qa_run = qa_run_dir.relative_to(tmp_path / "qa")
+    assert relative_qa_run.parts[0] == "qa"
+    assert relative_qa_run.parts[1].startswith("cache_1")
+    assert len(relative_qa_run.parts) == 4
 
 
 def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run(

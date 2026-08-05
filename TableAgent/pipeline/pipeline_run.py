@@ -108,7 +108,7 @@ class PipelineRunMixin:
             question=sample.question,
             structure_path=structure_path,
             workbook_path=workbook.path,
-            qa_artifact_dir=sample_dir / "qa",
+            qa_artifact_dir=self._qa_sample_dir(sample),
             fallback_prompt=self.prompts.answer_prompt(
                 sample, table_context, structure_text
             ),
@@ -163,7 +163,7 @@ class PipelineRunMixin:
             question=sample.question,
             structure_path=record.structure_path,
             workbook_path=record.workbook_path,
-            qa_artifact_dir=self._sample_dir(sample) / "qa",
+            qa_artifact_dir=self._qa_sample_dir(sample),
             fallback_prompt=self.prompts.answer_prompt(
                 sample, self._fit_context(sample.table_content), structure_text
             ),
