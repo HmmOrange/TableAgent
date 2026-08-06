@@ -457,18 +457,18 @@ def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
 def _table_mappings(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
     tables: dict[str, dict[str, Any]] = {}
     for key, value in parsed.items():
-        if not re.fullmatch(r"table\d+", str(key), flags=re.IGNORECASE):
-            continue
+        table: dict[str, Any] | None = None
         if isinstance(value, dict):
-            tables[str(key)] = value
-            continue
-        if isinstance(value, list):
+            table = value
+        elif isinstance(value, list):
             merged: dict[str, Any] = {}
             for item in value:
                 if isinstance(item, dict):
                     merged.update(item)
             if merged:
-                tables[str(key)] = merged
+                table = merged
+        if table is not None and isinstance(table.get("headers"), list):
+            tables[str(key)] = table
     return tables
 
 
