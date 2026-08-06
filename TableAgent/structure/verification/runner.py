@@ -25,8 +25,9 @@ class DeterministicVerificationResult:
 
 
 class DeterministicVerifier:
-    def __init__(self, timeout_seconds: float = 30):
+    def __init__(self, timeout_seconds: float = 30, *, data_only: bool = False):
         self.timeout_seconds = timeout_seconds
+        self.data_only = data_only
 
     def run(
         self,
@@ -71,6 +72,7 @@ class DeterministicVerifier:
                     str(workbook_path),
                     sheet_name,
                     str(structure_path),
+                    str(self.data_only).lower(),
                 ],
                 capture_output=True,
                 text=True,
