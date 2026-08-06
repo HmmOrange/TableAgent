@@ -1359,6 +1359,8 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
     assert "deterministic verifier" in LAYOUT_MAS_USER_PROMPT_TEMPLATE.lower()
     assert "quote every free-text scalar" in LAYOUT_MAS_SYSTEM_PROMPT
     assert "Wrap every free-text scalar in double quotes" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "`sub_headers` is recursive" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "never discard grandchildren or deeper descendants" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -1410,6 +1412,34 @@ This trailing explanation is also logging-only."""
     assert "trailing explanation" in discarded
     assert "reasoning" in discarded
     assert "confidence" in discarded
+
+
+def test_strict_structure_preserves_multi_level_sub_headers():
+    from TableAgent.structure.layout.parsing import extract_strict_structure
+
+    content = """headers:
+  - label: Civilian labor force
+    orientation: column
+    range: C4:J4
+    sub_headers:
+      - label: Employed
+        orientation: column
+        range: E5:H5
+        sub_headers:
+          - label: Agriculture
+            orientation: column
+            range: G6
+            sub_headers: []
+"""
+
+    structure_text, discarded = extract_strict_structure(content)
+    structure = yaml.safe_load(structure_text)
+    employed = structure["headers"][0]["sub_headers"][0]
+
+    assert employed["label"] == "Employed"
+    assert employed["sub_headers"][0]["label"] == "Agriculture"
+    assert employed["sub_headers"][0]["sub_headers"] == []
+    assert discarded == ""
 
 
 def test_table_agent_persists_only_strict_structure(tmp_path: Path):
@@ -1483,6 +1513,48 @@ remaining_directions: []
     assert discarded == ""
     assert directions == []
     assert changelog == "Added the row number header."
+
+
+def test_layout_parser_preserves_multi_level_sub_headers():
+    from TableAgent.structure.layout.parsing import extract_layout_structure
+
+    content = """structure:
+  table1:
+    id: employment
+    name: Employment
+    headers:
+      - id: civilian_labor_force
+        label: Civilian labor force
+        orientation: column
+        header_range: C4:J4
+        data_range: C9:J80
+        sub_headers:
+          - id: employed
+            label: Employed
+            orientation: column
+            header_range: E5:H5
+            data_range: E9:H80
+            sub_headers:
+              - id: employed_agriculture
+                label: Agriculture
+                orientation: column
+                header_range: G6
+                data_range: G9:G80
+                sub_headers: []
+changelog: Preserved the visible header hierarchy.
+remaining_directions: []
+"""
+
+    structure_text, discarded, directions, changelog = extract_layout_structure(content)
+    structure = yaml.safe_load(structure_text)
+    employed = structure["table1"]["headers"][0]["sub_headers"][0]
+
+    assert employed["id"] == "employed"
+    assert employed["sub_headers"][0]["id"] == "employed_agriculture"
+    assert employed["sub_headers"][0]["sub_headers"] == []
+    assert discarded == ""
+    assert directions == []
+    assert changelog == "Preserved the visible header hierarchy."
 
 
 def test_layout_parser_salvages_structure_when_changelog_breaks_yaml():

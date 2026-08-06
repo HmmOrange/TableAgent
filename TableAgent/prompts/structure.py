@@ -44,6 +44,13 @@ Range rules:
   child data ranges only; it must not include child `header_range` cells.
 - A child `header_range` must sit inside the parent header span: below it for column
   orientation, or to the right of it for row orientation.
+- `sub_headers` is recursive and may contain any number of header levels. Every child
+  uses the same header schema and may declare its own `sub_headers`. Use
+  `sub_headers: []` only when that header has no visible children.
+- Preserve the complete visible hierarchy. Never flatten nested group headers into
+  the top-level `headers` list, and never discard grandchildren or deeper descendants.
+- A parent or intermediate group `data_range` must cover the union of all descendant
+  leaf data ranges governed by that header.
 - When the viewport shows only continuation data, keep existing verified
   `header_range` values unchanged and extend only the relevant `data_range`.
   Never replace an existing `data_range` with only the current viewport slice.
@@ -73,7 +80,21 @@ structure:
         orientation: <row|column>
         header_range: <exact A1 range>
         data_range: <exact A1 range>
-        sub_headers: []
+        sub_headers:
+          - id: <unique stable snake_case child identifier>
+            label: "<visible child label>"
+            description: "<semantic role>"
+            orientation: <row|column>
+            header_range: <exact A1 range>
+            data_range: <exact A1 range>
+            sub_headers:
+              - id: <unique stable snake_case descendant identifier>
+                label: "<visible descendant label>"
+                description: "<semantic role>"
+                orientation: <row|column>
+                header_range: <exact A1 range>
+                data_range: <exact A1 range>
+                sub_headers: []
   tables2:
     <table details here if exists>
 changelog: "<concise changes, or No change.>"

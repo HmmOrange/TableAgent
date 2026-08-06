@@ -224,7 +224,10 @@ def _normalize_header(header: Any, *, include_sub_headers: bool) -> dict[str, An
             return None
         normalized_sub_headers = []
         for sub_header in sub_headers:
-            normalized_sub_header = _normalize_header(sub_header, include_sub_headers=False)
+            normalized_sub_header = _normalize_header(
+                sub_header,
+                include_sub_headers=isinstance(sub_header, dict) and "sub_headers" in sub_header,
+            )
             if normalized_sub_header is None:
                 return None
             normalized_sub_headers.append(normalized_sub_header)
@@ -234,29 +237,30 @@ def _normalize_header(header: Any, *, include_sub_headers: bool) -> dict[str, An
 
 def _structure_extras(parsed: dict[str, Any]) -> dict[str, Any]:
     extras = {key: value for key, value in parsed.items() if key != "headers"}
-    header_extras = []
-    for header in parsed.get("headers", []):
-        if not isinstance(header, dict):
-            continue
-        item = {
-            key: value
-            for key, value in header.items()
-            if key not in {"label", "description", "orientation", "range", "sub_headers"}
-        }
-        sub_extras = []
-        for sub_header in header.get("sub_headers") or []:
-            if isinstance(sub_header, dict):
-                sub_extras.append({
-                    key: value
-                    for key, value in sub_header.items()
-                    if key not in {"label", "description", "orientation", "range"}
-                })
-        if any(sub_extras):
-            item["sub_headers"] = sub_extras
-        header_extras.append(item)
+    header_extras = [
+        _header_extras(header)
+        for header in parsed.get("headers", [])
+        if isinstance(header, dict)
+    ]
     if any(header_extras):
         extras["headers"] = header_extras
     return extras
+
+
+def _header_extras(header: dict[str, Any]) -> dict[str, Any]:
+    item = {
+        key: value
+        for key, value in header.items()
+        if key not in {"label", "description", "orientation", "range", "sub_headers"}
+    }
+    sub_extras = [
+        _header_extras(sub_header)
+        for sub_header in header.get("sub_headers") or []
+        if isinstance(sub_header, dict)
+    ]
+    if any(sub_extras):
+        item["sub_headers"] = sub_extras
+    return item
 
 
 def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
@@ -505,7 +509,11 @@ def _normalize_layout_header(
             return None
         normalized_sub_headers = []
         for sub_header in sub_headers:
-            child = _normalize_layout_header(sub_header, include_sub_headers=False, used_ids=used_ids)
+            child = _normalize_layout_header(
+                sub_header,
+                include_sub_headers=isinstance(sub_header, dict) and "sub_headers" in sub_header,
+                used_ids=used_ids,
+            )
             if child is None:
                 return None
             normalized_sub_headers.append(child)

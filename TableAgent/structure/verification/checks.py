@@ -234,6 +234,24 @@ def _visible_subheader_gaps(worksheet, parent_box, child_header_boxes, data_box,
     ]
 
 
+def _descendant_header_boxes(headers, path):
+    boxes = []
+    if not isinstance(headers, list):
+        return boxes
+    for index, child in enumerate(headers):
+        if not isinstance(child, dict):
+            continue
+        child_path = f"{path}.sub_headers[{index}]"
+        child_header_range = child.get("header_range") or child.get("range")
+        if child_header_range is not None:
+            try:
+                boxes.append((child_path, child_header_range, _range_box(child_header_range)))
+            except (TypeError, ValueError):
+                pass
+        boxes.extend(_descendant_header_boxes(child.get("sub_headers"), child_path))
+    return boxes
+
+
 def _check_header(worksheet, path, header, used_box, errors, actions, null_fields):
     label = str(header.get("label") or "").strip()
     header_range = header.get("header_range") or header.get("range")
@@ -390,7 +408,8 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                 if child is not None:
                     _set_null(child, child_path, "header_range", null_fields)
                 errors.append(f"{child_path}.header_range is outside the parent header hierarchy: {child_header_range} vs {header_range}")
-        gaps = _visible_subheader_gaps(worksheet, header_box, child_header_boxes, data_box, orientation)
+        coverage_header_boxes = _descendant_header_boxes(sub_headers, path)
+        gaps = _visible_subheader_gaps(worksheet, header_box, coverage_header_boxes, data_box, orientation)
         if gaps:
             formatted = ", ".join(f"{cell}={text!r}" for cell, text in gaps[:8])
             errors.append(f"{path}.sub_headers do not cover visible layered header cells under parent {header_range}: {formatted}")
