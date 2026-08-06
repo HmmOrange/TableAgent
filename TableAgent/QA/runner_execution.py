@@ -190,6 +190,10 @@ class QAExecutionMixin:
                     {"attempt": replan_count, "error": str(exc)},
                 )
                 break
+            for subtask in plan:
+                if not subtask.metadata:
+                    subtask.metadata = {}
+                subtask.metadata["replan_failure_context"] = failure_context
             self.env.logger.log_event(
                 "replanning_complete",
                 {"attempt": replan_count, "subtasks": self._plan_payload(plan)},

@@ -21,6 +21,7 @@ from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetad
 from TableAgent.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
 from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
 from TableAgent.rendering.workbook import WorkbookRenderer
+from TableAgent.rendering.workbook import _render_pdf_page_in_subprocess
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
 from TableAgent.structure.verification import DeterministicVerifier
 from TableAgent.structure.verification.checks import verify_structure
@@ -311,6 +312,40 @@ def test_libreoffice_range_renderer_uses_pdfium_process_in_concurrent_mode(
     assert calls["pdf_path"].suffix == ".pdf"
     assert calls["resolution"] == 384
     assert calls["timeout_seconds"] == 30
+
+
+def test_pdfium_subprocess_uses_resolved_worker_script(monkeypatch, tmp_path: Path):
+    pdf_path = tmp_path / "table.pdf"
+    image_path = tmp_path / "table.png"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        image_path.write_bytes(b"png")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    _render_pdf_page_in_subprocess(
+        pdf_path,
+        image_path,
+        384,
+        timeout_seconds=30,
+    )
+
+    worker_path = Path(captured["command"][1])
+    assert captured["command"] == [
+        sys.executable,
+        str(worker_path),
+        str(pdf_path),
+        str(image_path),
+        "384",
+    ]
+    assert worker_path.is_absolute()
+    assert worker_path.name == "pdfium_worker.py"
+    assert captured["kwargs"]["timeout"] == 30
 
 
 def _hierarchical_workbook(path: Path) -> None:

@@ -10,9 +10,22 @@ Do not require synthesis to reference any exact upstream variable name. Judge wh
 the verified evidence. If synthesis filters raw data again, verify that it preserves the selected table/sheet, target
 identity, dates, equipment/process, statuses, and other conditions, using row counts or identifying keys when present.
 Reject only when the evidence shows filter drift or does not establish the requested scope.
-Do reject hard-coded constants when the code could compute from available inspected variables.
+Do reject answer-critical values learned from table data when the code hard-codes them instead of extracting or computing
+them from available inspected variables. Begin
+feedback for this failure with `UNPROVEN_LITERAL:` and identify the literal that must be replaced by a proven extraction.
+Allow literals explicitly stated in the user question when used to match its labels or qualifiers, plus ordinary structural
+constants used for indexing, arithmetic, percentage conversion, rounding, or output formatting.
 Reject attempts that attribute a value to the wrong header, especially when a neighboring column contains similar text.
 Reject unverified fixed-position column selection when verified header IDs, labels, or worksheet headers are available.
+Identify every explicit qualifier in the question--for example date, category, subgroup, geography, metric, unit, or
+aggregation level--and verify that the executed selection preserves it. Do not require any particular qualifier type;
+only check constraints actually present in the question. Reject an attempt when its runtime labels, filters, or keys do
+not demonstrate the same qualifier values.
+For answer-critical numeric or categorical results, require runtime output showing the selected labels or keys, source
+input values, and calculation or ordering rule. Reject a prose claim that evidence was checked when the actual runtime
+labels and values are absent.
+Reject calculations that combine an aggregate row with its component rows, count duplicate records without justification,
+use a neighboring denominator, or rank values at a different granularity from the question.
 When the requested field is a parent/group header, verify that code uses
 `operators.resolve_header_columns`/`operators.group_header_mask` or explicitly uses every relevant descendant column.
 Reject a monthly tracking field selected only because the sheet/report title contains a month when the question asks
@@ -92,6 +105,13 @@ Reject the answer when any of these applies:
   stock/status field merely because the report title contains a month;
 - the answer adds facts that are absent from the verified observations;
 - the answer uses sheet/table descriptions as evidence for record-level facts that were never inspected.
+- code hard-codes an answer-critical value learned from table data instead of deriving it from successful runtime evidence. Begin feedback for this case
+  with `UNPROVEN_LITERAL:` and identify the unproven literal.
+- an explicit question qualifier--such as a date, category, subgroup, geography, metric, unit, or aggregation level--is
+  missing from the runtime selection or is replaced by a different qualifier value;
+- runtime evidence does not show the answer-critical labels or keys, input values, and calculation or ordering rule;
+- an aggregate row is combined with its component rows, duplicate records are counted without justification, a neighboring
+  denominator is used, or values are compared at the wrong granularity.
 
 Return JSON only with `accepted` (boolean), `score` (0.0-1.0), and concise `feedback`. If rejected, state what a
 corrected plan must inspect or calculate. Do not solve the question yourself.
@@ -112,6 +132,7 @@ Verified grouped-header structure:
 Final answer:
 {final_answer}
 
-Verify coverage, exact target identity, header-to-value ownership, grouped-header child coverage, aggregation
-correctness, and grounding.
+First identify the explicit constraints in the question. Then verify coverage, exact target identity, qualifier binding,
+header-to-value ownership, grouped-header child coverage, aggregation and duplicate handling, calculation correctness,
+and grounding in the displayed runtime labels and values.
 """

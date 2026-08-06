@@ -11,7 +11,11 @@ from TableAgent.QA.actions.base_action import (
     CodeGenerationRequest,
     ReviewRequest,
 )
-from TableAgent.QA.agents.base_agent import BaseReActAgent
+from TableAgent.QA.agents.base_agent import (
+    BaseReActAgent,
+    actionable_failure_feedback,
+    code_fingerprint,
+)
 
 class TableQAAgent(BaseReActAgent):
     """
@@ -48,6 +52,10 @@ class TableQAAgent(BaseReActAgent):
         description = ""
         reasoning = ""
         last_updates = {}
+        failure_feedback = str(
+            (subtask.metadata or {}).get("replan_failure_context", "")
+        ).strip()
+        attempted_code: set[str] = set()
 
         while round_num <= self.max_retries and not success:
             try:
@@ -57,6 +65,7 @@ class TableQAAgent(BaseReActAgent):
                     layer=subtask.layer,
                     round_num=round_num,
                     subtask=subtask,
+                    failure_feedback=failure_feedback or None,
                 ))
             except Exception as exc:
                 code = ""
@@ -74,12 +83,39 @@ class TableQAAgent(BaseReActAgent):
                     score=0.0,
                     round=round_num,
                 ))
+                failure_feedback = observation
                 round_num += 1
                 continue
 
             code = code_result.code
             description = code_result.description
             reasoning = code_result.reasoning
+            fingerprint = code_fingerprint(code)
+            if fingerprint in attempted_code:
+                observation = (
+                    "Equivalent retry skipped: generated code repeats a previously rejected "
+                    "attempt without changing its selection or calculation."
+                )
+                failure_feedback = (
+                    "REPEATED_ATTEMPT: Generate materially different code that corrects the "
+                    "previous feedback. Change the selected labels, filters, inspected inputs, "
+                    "or calculation as required, and print the new runtime evidence."
+                )
+                subtask.status = "failed"
+                subtask.code_attempt = code
+                subtask.observation = observation
+                self.env.experience_pool.add(ExperienceRecord(
+                    subtask_id=subtask.id,
+                    description=description,
+                    code=code,
+                    observation=observation,
+                    reasoning=reasoning,
+                    score=0.0,
+                    round=round_num,
+                ))
+                round_num += 1
+                continue
+            attempted_code.add(fingerprint)
             
             # 2. Observation: Execute code in the shared environment
             execution = self.execute_action.run(CodeExecutionRequest(code=code))
@@ -108,8 +144,21 @@ class TableQAAgent(BaseReActAgent):
                 success = False
                 if run_success:
                     observation = f"Review rejected attempt:\n{review.feedback}"
+                    failure_feedback = actionable_failure_feedback(
+                        review.feedback,
+                        fallback=(
+                            "Reviewer rejected the attempt without a specific repair step. "
+                            "Compare every question qualifier with the selected runtime labels, "
+                            "print the answer-critical input values, and revise the selection or "
+                            "calculation instead of repeating the same code."
+                        ),
+                    )
                 else:
                     observation = f"Error during execution:\n{error}"
+                    failure_feedback = actionable_failure_feedback(
+                        error,
+                        fallback="Execution failed without details; regenerate the code with explicit runtime evidence.",
+                    )
                 subtask.status = "failed"
                 subtask.code_attempt = code
                 subtask.observation = observation

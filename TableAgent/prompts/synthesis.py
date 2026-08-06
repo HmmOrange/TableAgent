@@ -34,6 +34,16 @@ Keep output small. Use existing variables, summaries, filters, and aggregates; d
   deduplicate only identical repeated values.
 - Treat accepted inspection variables as the primary evidence and prefer reusing useful filtered, matched, selected,
   target, or result values instead of unnecessarily repeating inspection work.
+- Never type, copy, or hard-code an answer-critical value learned from table data. Every such value used in `final_answer`
+  must come from an accepted inspection variable, a workbook/DataFrame extraction performed by the code, or a
+  deterministic calculation over such values. Prior notebook output is context only; do not copy displayed values into code.
+- Literals explicitly stated in the user question may be used to match its labels or qualifiers. Ordinary structural
+  constants for indexing, arithmetic, percentage conversion, rounding, and output formatting are also allowed. If a
+  required value has no proven source, set an unavailable answer rather than guessing it.
+- Before setting `final_answer`, print a compact runtime evidence block showing the question qualifiers preserved from
+  inspection, the exact input labels and values used, the calculation or ordering rule, and the resulting value. The
+  relevant qualifiers depend on the question and may include date, category, subgroup, geography, metric, unit, or
+  aggregation level. Do not merely state that the evidence matches; print the actual runtime labels and values.
 - You may transform, rename, or recompute data when needed. When filtering raw data again, preserve every verified
   table/sheet, target identity, date, equipment, status, and matching condition, then validate the resulting row count
   or identifying keys against the inspection evidence before setting `final_answer`.
@@ -73,6 +83,8 @@ Prior inspection code and outcomes:
 {prior_outcomes}
 
 Write the final Python code to compute and assign `final_answer`. Print only a concise confirmation or the final answer.
+Use accepted inspection variables as the source of table values; never copy values from the displayed notebook history
+into numeric or string literals.
 """
 
 SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE = """User Question: {question}
@@ -98,4 +110,6 @@ preserved. If you filter raw data again, validate row counts or identifying keys
 `eval()` or `exec()`. Preserve verified header-to-value relationships and every label explicitly enumerated in the
 question. Do not reuse a prior translated or renamed label when reviewer feedback requires the original identifier. Use
 clean user-facing labels, and set `final_answer`.
+If the reviewer rejected an unproven or hard-coded value, do not reuse that literal. Re-access the accepted variable or
+re-extract the source data and derive the answer from it.
 """

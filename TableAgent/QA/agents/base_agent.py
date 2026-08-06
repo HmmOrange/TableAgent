@@ -1,4 +1,5 @@
 from __future__ import annotations
+import ast
 from abc import ABC, abstractmethod
 
 from TableAgent.environment.qa_env import QAEnvironment
@@ -7,6 +8,29 @@ from TableAgent.schema.qa import AgentOutput
 from TableAgent.QA.actions.base_action import BaseCodeExecutionAction, BaseCodeGenerationAction, BaseReviewAction
 from TableAgent.QA.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.QA.actions.review import ReviewSubtaskAction
+
+
+def code_fingerprint(code: str) -> str:
+    """Normalize generated code so formatting-only retries compare equal."""
+    text = str(code or "").strip()
+    try:
+        return ast.dump(ast.parse(text), annotate_fields=True, include_attributes=False)
+    except SyntaxError:
+        return " ".join(text.split())
+
+
+def actionable_failure_feedback(feedback: str | None, *, fallback: str) -> str:
+    text = str(feedback or "").strip()
+    generic = {
+        "rejected.",
+        "review rejected.",
+        "incorrect.",
+        "wrong.",
+        "try again.",
+    }
+    if len(text) >= 24 and text.casefold() not in generic:
+        return text
+    return fallback
 
 class BaseReActAgent(ABC):
     """

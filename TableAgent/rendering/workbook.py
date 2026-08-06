@@ -233,10 +233,10 @@ def _render_pdf_page_in_subprocess(
     *,
     timeout_seconds: float,
 ) -> None:
+    worker_path = Path(__file__).with_name("pdfium_worker.py").resolve()
     command = [
         sys.executable,
-        "-m",
-        "TableAgent.rendering.pdfium_worker",
+        str(worker_path),
         str(pdf_path),
         str(image_path),
         str(resolution),

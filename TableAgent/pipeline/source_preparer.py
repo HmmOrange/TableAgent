@@ -21,6 +21,15 @@ from TableAgent.structure.layout.parsing import _is_valid_structure
 LAYOUT_WORKFLOW_VERSION = 4
 
 
+class SourcePreparationError(RuntimeError):
+    """Report workbook preparation failures without discarding their causes."""
+
+    def __init__(self, failures: list[str]):
+        self.failures = tuple(failures)
+        details = "\n".join(f"- {failure}" for failure in failures)
+        super().__init__(f"TableAgent source preparation failed:\n{details}")
+
+
 class SourcePreparer:
     def __init__(
         self,
@@ -53,6 +62,7 @@ class SourcePreparer:
         if not samples or not has_workbook_sources(samples[0]):
             return
 
+        failures: list[str] = []
         selected_sheets = set(self.selected_sheet_names(samples))
         for source_path in self._source_paths(samples):
             identity = self._workbook_identity(samples, source_path)
@@ -62,6 +72,9 @@ class SourcePreparer:
                 self._progress("prepare_extract", workbook=source_path.name)
                 workbook_payload = self.metadata_extractor.extract(source_path)
             except Exception as exc:
+                failures.append(
+                    f"{workbook_name}: extraction failed: {type(exc).__name__}: {exc}"
+                )
                 if logger:
                     logger.error("ExStruct extraction failed for %s: %s", source_path, exc)
                 self._progress("prepare_error", workbook=source_path.name, sheet="<unreadable>")
@@ -111,6 +124,10 @@ class SourcePreparer:
                     self._write_sheet_text(source_path, sheet_name, paths["text"])
                     self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                 except Exception as exc:
+                    failures.append(
+                        f"{workbook_name}[{sheet_name}]: metadata preparation failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     if logger:
                         logger.error("TableAgent metadata preparation failed for %s:%s: %s", source_path, sheet_name, exc)
                     self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
@@ -131,6 +148,14 @@ class SourcePreparer:
                     self._progress("prepare_cached", workbook=source_path.name, sheet=sheet_name)
                     continue
                 if paths["error"].is_file():
+                    try:
+                        prior_error = paths["error"].read_text(encoding="utf-8").strip()
+                    except OSError as exc:
+                        prior_error = f"could not read structure.error: {exc}"
+                    failures.append(
+                        f"{workbook_name}[{sheet_name}]: "
+                        f"{prior_error or 'previous structure generation failed'}"
+                    )
                     self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
                     continue
 
@@ -138,20 +163,33 @@ class SourcePreparer:
                     self._progress("prepare_layout", workbook=source_path.name, sheet=sheet_name, range=metadata.used_range)
                     structure_text = self.analyze_sheet(source_path, sheet_name, metadata, sheet_dir)
                 except Exception as exc:
-                    structure_text = ""
+                    detail = (
+                        f"{workbook_name}[{sheet_name}]: layout workflow failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    failures.append(detail)
                     if logger:
                         logger.error("TableAgent layout workflow failed for %s:%s: %s", source_path, sheet_name, exc)
+                    paths["structure"].unlink(missing_ok=True)
+                    paths["error"].write_text(detail, encoding="utf-8")
+                    self._progress("prepare_error", workbook=source_path.name, sheet=sheet_name)
+                    continue
                 if _is_valid_structure(structure_text):
                     paths["error"].unlink(missing_ok=True)
                     paths["structure"].write_text(structure_text, encoding="utf-8")
                 else:
+                    detail = f"{workbook_name}[{sheet_name}]: layout workflow returned an empty or invalid structure"
+                    failures.append(detail)
                     paths["structure"].unlink(missing_ok=True)
                     paths["error"].write_text(
-                        f"Failed to generate structure (empty/invalid/token-capped). Raw: {structure_text}",
+                        f"{detail}. Raw: {structure_text}",
                         encoding="utf-8",
                     )
                 self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                 self._progress("prepare_done", workbook=source_path.name, sheet=sheet_name)
+
+        if failures:
+            raise SourcePreparationError(failures)
 
     def source_dir(
         self,
