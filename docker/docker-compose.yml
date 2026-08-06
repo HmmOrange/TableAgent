@@ -1,8 +1,10 @@
+name: tableagent
+
 services:
   table-agent:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     env_file:
       - .env
     environment:
