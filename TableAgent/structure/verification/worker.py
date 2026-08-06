@@ -13,7 +13,18 @@ def main() -> None:
     except AttributeError:
         pass
     workbook_path, sheet_name, structure_path = sys.argv[1:4]
-    print(json.dumps(verify_structure(workbook_path, sheet_name, structure_path), ensure_ascii=False))
+    data_only = len(sys.argv) > 4 and sys.argv[4].strip().lower() == "true"
+    print(
+        json.dumps(
+            verify_structure(
+                workbook_path,
+                sheet_name,
+                structure_path,
+                data_only=data_only,
+            ),
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

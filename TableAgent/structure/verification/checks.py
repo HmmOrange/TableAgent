@@ -9,9 +9,19 @@ import yaml
 from openpyxl.utils.cell import get_column_letter, range_boundaries
 
 
-def verify_structure(workbook_path: str | Path, sheet_name: str, structure_path: str | Path) -> dict[str, Any]:
+def verify_structure(
+    workbook_path: str | Path,
+    sheet_name: str,
+    structure_path: str | Path,
+    *,
+    data_only: bool = False,
+) -> dict[str, Any]:
     structure = yaml.safe_load(Path(structure_path).read_text(encoding="utf-8")) or {}
-    workbook = openpyxl.load_workbook(workbook_path, read_only=False, data_only=True)
+    workbook = openpyxl.load_workbook(
+        workbook_path,
+        read_only=False,
+        data_only=data_only,
+    )
     errors: list[str] = []
     actions: list[str] = []
     null_fields: list[str] = []
