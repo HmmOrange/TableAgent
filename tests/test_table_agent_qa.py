@@ -53,6 +53,338 @@ def _two_step_plan_json() -> str:
     })
 
 
+def test_prompts_require_provenance_for_table_values():
+    from TableAgent.prompts.react import REACT_SYSTEM_PROMPT, REVISION_USER_PROMPT_TEMPLATE
+    from TableAgent.prompts.review import REVIEW_SYSTEM_PROMPT, FINAL_ANSWER_REVIEW_SYSTEM_PROMPT
+    from TableAgent.prompts.synthesis import (
+        SYNTHESIS_SYSTEM_PROMPT,
+        SYNTHESIS_USER_PROMPT_TEMPLATE,
+        SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE,
+    )
+
+    assert "Never type, copy, or hard-code an answer-critical value" in REACT_SYSTEM_PROMPT
+    assert "compact runtime evidence block" in REACT_SYSTEM_PROMPT
+    assert "Qualifiers are generic constraints" in REACT_SYSTEM_PROMPT
+    assert "aggregation level" in REACT_SYSTEM_PROMPT
+    assert "Literals explicitly stated in the user question" in REACT_SYSTEM_PROMPT
+    assert "do not reuse that literal" in REVISION_USER_PROMPT_TEMPLATE
+    assert "Never type, copy, or hard-code an answer-critical value" in SYNTHESIS_SYSTEM_PROMPT
+    assert "compact runtime evidence block" in SYNTHESIS_SYSTEM_PROMPT
+    assert "Literals explicitly stated in the user question" in SYNTHESIS_SYSTEM_PROMPT
+    assert "never copy values" in SYNTHESIS_USER_PROMPT_TEMPLATE
+    assert "do not reuse that literal" in SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE
+    assert "UNPROVEN_LITERAL:" in REVIEW_SYSTEM_PROMPT
+    assert "UNPROVEN_LITERAL:" in FINAL_ANSWER_REVIEW_SYSTEM_PROMPT
+    assert "explicit qualifier" in REVIEW_SYSTEM_PROMPT
+    assert "aggregation level" in FINAL_ANSWER_REVIEW_SYSTEM_PROMPT
+
+
+def test_final_answer_review_rejects_invalid_response():
+    from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
+
+    class Logger:
+        def log_event(self, event_type, payload):
+            pass
+
+    class InvalidReviewer:
+        def generate(self, prompt, system_prompt=None):
+            return LLMResponse(content="not json", prompt_tokens=0, completion_tokens=0)
+
+    action = ReviewFinalAnswerAction(
+        type("Env", (), {"logger": Logger(), "operators": None})(),
+        llm_client=InvalidReviewer(),
+    )
+
+    result = action.run(question="What is the value?", plan=[], outputs=[], final_answer="10")
+
+    assert not result.accepted
+    assert result.score == 0.0
+    assert "invalid JSON" in result.feedback
+
+
+def test_final_answer_review_raises_when_reviewer_is_unavailable():
+    from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
+
+    class Logger:
+        def log_event(self, event_type, payload):
+            pass
+
+    class FailingReviewer:
+        def generate(self, prompt, system_prompt=None):
+            raise ConnectionError("review service unavailable")
+
+    action = ReviewFinalAnswerAction(
+        type("Env", (), {"logger": Logger(), "operators": None})(),
+        llm_client=FailingReviewer(),
+    )
+
+    with pytest.raises(RuntimeError, match="Final answer reviewer failed"):
+        action.run(question="What is the value?", plan=[], outputs=[], final_answer="10")
+
+
+def test_final_answer_review_requires_llm_client():
+    from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
+
+    action = ReviewFinalAnswerAction(
+        type("Env", (), {"logger": None, "operators": None})(),
+        llm_client=None,
+    )
+
+    with pytest.raises(RuntimeError, match="requires an LLM client"):
+        action.run(question="What is the value?", plan=[], outputs=[], final_answer="10")
+
+
+def test_subtask_review_rejects_non_boolean_acceptance():
+    from TableAgent.QA.actions.base_action import CodeExecutionResult, ReviewRequest
+    from TableAgent.QA.actions.review import ReviewSubtaskAction
+    from TableAgent.schema.subtask import SubTask
+
+    class InvalidReviewer:
+        def generate(self, prompt, system_prompt=None):
+            return LLMResponse(
+                content=json.dumps({"accepted": "false", "score": 1.0}),
+                prompt_tokens=0,
+                completion_tokens=0,
+            )
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    action = ReviewSubtaskAction(env, llm_client=InvalidReviewer())
+    result = action.run(
+        ReviewRequest(
+            question="What is the value?",
+            subtask=SubTask(
+                id="inspect_value",
+                description="Inspect the requested value.",
+                layer="inspect",
+            ),
+            code="value = 10\nprint(value)",
+            description="Inspect a value.",
+            execution=CodeExecutionResult(
+                output="10",
+                error="",
+                success=True,
+                namespace_updates={"value": 10},
+            ),
+            round_num=1,
+        )
+    )
+
+    assert not result.accepted
+    assert result.score == 0.0
+    assert "must be a boolean" in result.feedback
+
+
+def test_experience_pool_keeps_latest_rejected_attempt_for_retry():
+    from TableAgent.schema.experience import ExperiencePool
+
+    pool = ExperiencePool(max_records=3)
+    for round_num in range(1, 5):
+        pool.add(ExperienceRecord(
+            subtask_id="other",
+            description="accepted",
+            code=f"accepted_{round_num} = True",
+            observation="accepted",
+            score=1.0,
+            round=round_num,
+        ))
+    pool.add(ExperienceRecord(
+        subtask_id="inspect_target",
+        description="wrong row",
+        code="target = df.iloc[5]",
+        observation="WRONG_ROW: inspect the exact requested label",
+        score=0.0,
+        round=2,
+    ))
+
+    formatted = pool.format(
+        subtask_id="inspect_target",
+        prioritize_latest_failure=True,
+    )
+
+    assert "WRONG_ROW" in formatted
+    assert "target = df.iloc[5]" in formatted
+
+    pool.add(ExperienceRecord(
+        subtask_id="inspect_target",
+        description="newer wrong header",
+        code="target = df['neighboring_field']",
+        observation="WRONG_HEADER: use the requested verified header",
+        score=0.0,
+        round=2,
+    ))
+    latest_only = pool.select(
+        subtask_id="inspect_target",
+        prioritize_latest_failure=True,
+    )[0]
+    assert latest_only.observation.startswith("WRONG_HEADER:")
+
+
+def test_retry_receives_exact_reviewer_feedback():
+    from TableAgent.QA.actions.base_action import (
+        BaseCodeGenerationAction,
+        BaseReviewAction,
+        CodeGenerationRequest,
+        CodeGenerationResult,
+        ReviewResult,
+    )
+    from TableAgent.QA.agents.react_agent import TableQAAgent
+    from TableAgent.schema.subtask import SubTask
+
+    class RecordingPolicy(BaseCodeGenerationAction):
+        def __init__(self):
+            self.requests = []
+
+        def run(self, request: CodeGenerationRequest) -> CodeGenerationResult:
+            self.requests.append(request)
+            return CodeGenerationResult(
+                code=f"value = {request.round_num}",
+                description="Produces a retryable value.",
+                reasoning="Exercise reviewer feedback propagation.",
+            )
+
+    class RejectOnceReview(BaseReviewAction):
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return ReviewResult(
+                    accepted=False,
+                    feedback="WRONG_ROW: select the Total row, not the first detail row",
+                    score=0.0,
+                )
+            return ReviewResult(accepted=True, feedback="Accepted.", score=1.0)
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    policy = RecordingPolicy()
+    agent = TableQAAgent(
+        env,
+        code_action=policy,
+        review_action=RejectOnceReview(),
+        max_retries=2,
+    )
+    output = agent.run_subtask(
+        "What is the total?",
+        SubTask(id="inspect_target", description="Inspect the total row.", layer="inspect"),
+    )
+
+    assert output.success
+    assert policy.requests[0].failure_feedback is None
+    assert policy.requests[1].failure_feedback == (
+        "WRONG_ROW: select the Total row, not the first detail row"
+    )
+
+
+def test_retry_skips_equivalent_code_and_requests_material_change():
+    from TableAgent.QA.actions.base_action import (
+        BaseCodeGenerationAction,
+        BaseReviewAction,
+        CodeGenerationRequest,
+        CodeGenerationResult,
+        ReviewResult,
+    )
+    from TableAgent.QA.agents.react_agent import TableQAAgent
+    from TableAgent.schema.subtask import SubTask
+
+    class RepeatingPolicy(BaseCodeGenerationAction):
+        def __init__(self):
+            self.requests = []
+
+        def run(self, request: CodeGenerationRequest) -> CodeGenerationResult:
+            self.requests.append(request)
+            code = {
+                1: "value = 1\nprint(value)",
+                2: "value=1\nprint(value)",
+                3: "value = 2\nprint(value)",
+            }[request.round_num]
+            return CodeGenerationResult(
+                code=code,
+                description="Inspect a candidate value.",
+                reasoning="Exercise equivalent retry detection.",
+            )
+
+    class RejectFirstReview(BaseReviewAction):
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return ReviewResult(accepted=False, feedback="wrong.", score=0.0)
+            return ReviewResult(accepted=True, feedback="Accepted.", score=1.0)
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    policy = RepeatingPolicy()
+    reviewer = RejectFirstReview()
+    agent = TableQAAgent(
+        env,
+        code_action=policy,
+        review_action=reviewer,
+        max_retries=3,
+    )
+
+    output = agent.run_subtask(
+        "What is the requested value?",
+        SubTask(id="inspect_value", description="Inspect the requested value.", layer="inspect"),
+    )
+
+    assert output.success
+    assert output.attempt_count == 3
+    assert reviewer.calls == 2
+    assert "question qualifier" in policy.requests[1].failure_feedback
+    assert policy.requests[2].failure_feedback.startswith("REPEATED_ATTEMPT:")
+    assert any(
+        "Equivalent retry skipped" in record.observation
+        for record in env.experience_pool.records
+    )
+
+
+def test_replanned_subtask_receives_previous_plan_failure_context():
+    from TableAgent.QA.actions.base_action import (
+        BaseCodeGenerationAction,
+        CodeGenerationRequest,
+        CodeGenerationResult,
+    )
+
+    class ReplanAwarePolicy(BaseCodeGenerationAction):
+        def __init__(self):
+            self.inspect_requests = []
+
+        def run(self, request: CodeGenerationRequest) -> CodeGenerationResult:
+            if request.layer == "inspect":
+                self.inspect_requests.append(request)
+                code = (
+                    "inspected_value = 82.5"
+                    if request.failure_feedback
+                    else "raise ValueError('wrong initial selection')"
+                )
+            else:
+                code = "final_answer = inspected_value"
+            return CodeGenerationResult(
+                code=code,
+                description="Uses replanning feedback to change the failed inspection.",
+                reasoning="Exercise plan-level failure-context propagation.",
+            )
+
+    policy = ReplanAwarePolicy()
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=FakeLLM({"Table Structure": _two_step_plan_json()}),
+        policy=policy,
+        config={"table_agent": {"qa_max_retries": 1, "qa_max_replans": 1}},
+    )
+
+    result = runner.run("What is the average score?")
+
+    assert result.success
+    assert result.replan_count == 1
+    assert len(policy.inspect_requests) == 2
+    assert policy.inspect_requests[0].failure_feedback is None
+    assert "wrong initial selection" in policy.inspect_requests[1].failure_feedback
+
+
 def test_a1_conversions():
     # column name to number
     assert col_name_to_num("A") == 1

@@ -11,7 +11,11 @@ from TableAgent.QA.actions.base_action import (
     CodeGenerationRequest,
     ReviewRequest,
 )
-from TableAgent.QA.agents.base_agent import BaseReActAgent
+from TableAgent.QA.agents.base_agent import (
+    BaseReActAgent,
+    actionable_failure_feedback,
+    code_fingerprint,
+)
 
 class TableQASynthesisAgent(BaseReActAgent):
     """
@@ -47,6 +51,10 @@ class TableQASynthesisAgent(BaseReActAgent):
         description = ""
         reasoning = ""
         last_updates = {}
+        failure_feedback = str(
+            (subtask.metadata or {}).get("replan_failure_context", "")
+        ).strip()
+        attempted_code: set[str] = set()
 
         while round_num <= self.max_retries and not success:
             try:
@@ -56,6 +64,7 @@ class TableQASynthesisAgent(BaseReActAgent):
                     layer=subtask.layer,
                     round_num=round_num,
                     subtask=subtask,
+                    failure_feedback=failure_feedback or None,
                 ))
             except Exception as exc:
                 code = ""
@@ -73,12 +82,39 @@ class TableQASynthesisAgent(BaseReActAgent):
                     score=0.0,
                     round=round_num,
                 ))
+                failure_feedback = observation
                 round_num += 1
                 continue
 
             code = code_result.code
             description = code_result.description
             reasoning = code_result.reasoning
+            fingerprint = code_fingerprint(code)
+            if fingerprint in attempted_code:
+                observation = (
+                    "Equivalent synthesis retry skipped: generated code repeats a previously "
+                    "rejected attempt without changing its inputs or calculation."
+                )
+                failure_feedback = (
+                    "REPEATED_ATTEMPT: Generate materially different synthesis code that uses "
+                    "the reviewer feedback, preserves the question qualifiers, and prints the "
+                    "new input values, calculation, and result."
+                )
+                subtask.status = "failed"
+                subtask.code_attempt = code
+                subtask.observation = observation
+                self.env.experience_pool.add(ExperienceRecord(
+                    subtask_id=subtask.id,
+                    description=description,
+                    code=code,
+                    observation=observation,
+                    reasoning=reasoning,
+                    score=0.0,
+                    round=round_num,
+                ))
+                round_num += 1
+                continue
+            attempted_code.add(fingerprint)
             
             # 2. Observation: Execute code in the shared notebook
             execution = self.execute_action.run(CodeExecutionRequest(code=code))
@@ -111,10 +147,23 @@ class TableQASynthesisAgent(BaseReActAgent):
                 success = False
                 if not run_success:
                     observation = f"Error during synthesis execution:\n{error}"
+                    failure_feedback = actionable_failure_feedback(
+                        error,
+                        fallback="Synthesis execution failed without details; regenerate it with explicit runtime evidence.",
+                    )
                 elif not review.accepted:
                     observation = f"Review rejected synthesis attempt:\n{review.feedback}"
+                    failure_feedback = actionable_failure_feedback(
+                        review.feedback,
+                        fallback=(
+                            "Reviewer rejected synthesis without a specific repair step. Recheck "
+                            "the question qualifiers, input labels and values, and calculation, "
+                            "then generate materially different code with printed runtime evidence."
+                        ),
+                    )
                 else:
                     observation = "Error: synthesis completed, but 'final_answer' variable was not set in namespace."
+                    failure_feedback = observation
                 subtask.status = "failed"
                 subtask.code_attempt = code
                 subtask.observation = observation

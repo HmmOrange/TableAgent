@@ -152,6 +152,17 @@ def get_dependency_variable_summary(env: Any, subtask: Any) -> str:
     return "\n".join(lines)
 
 
+def get_failure_feedback(request: CodeGenerationRequest) -> str:
+    feedback = str(request.failure_feedback or "").strip()
+    if not feedback:
+        return ""
+    return (
+        "\n\nCorrection context from the previous rejected attempt or plan:\n"
+        f"{feedback}\n"
+        "The new code must explicitly correct this failure and must not repeat the rejected selection."
+    )
+
+
 def parse_model_output(content: str) -> Tuple[str, str, str]:
     json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
     payload = json_match.group(1) if json_match else content.strip()
@@ -196,6 +207,11 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
         if not self.env:
             raise ValueError("Environment not set on LLMCodeGenerationAction.")
         operator_catalog = get_operator_catalog(self.env)
+        failure_context = get_failure_feedback(request)
+        formatted_experience = self.env.experience_pool.format(
+            subtask_id=request.subtask_id,
+            prioritize_latest_failure=True,
+        )
 
         if request.layer == "table_inspect":
             if request.round_num == 1:
@@ -206,7 +222,6 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
                 ]
                 prior_outcomes = get_prior_outcomes(self.env)
-                formatted_experience = self.env.experience_pool.format()
                 prompt = REACT_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     subtask_description=(
@@ -218,6 +233,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                         "Also print a compact explanation of the selection.\n\n"
                         f"Table catalog:\n{table_catalog}\n\n"
                         f"Experience:\n{formatted_experience}"
+                        f"{failure_context}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     prior_outcomes=prior_outcomes,
@@ -236,10 +252,11 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
                         "Revise the table selection code. It must set `selected_table_ids` to a non-empty list of valid table_id strings.\n"
-                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
+                        f"Previous attempts and reasoning:\n{formatted_experience}"
+                        f"{failure_context}"
                     ),
                     failed_code=failed_code,
-                    error_message=error_msg,
+                    error_message=request.failure_feedback or error_msg,
                 )
                 system_prompt = REACT_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
         elif request.layer == "inspect":
@@ -269,8 +286,6 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 ]
 
                 prior_outcomes = get_prior_outcomes(self.env)
-                formatted_experience = self.env.experience_pool.format()
-
                 prompt = REACT_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     subtask_description=(
@@ -278,6 +293,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                         f"Table structure:\n{struct_summary}\n\n"
                         f"Exact question-to-header matches:\n{header_hints}\n\n"
                         f"Experience:\n{formatted_experience}"
+                        f"{failure_context}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     prior_outcomes=prior_outcomes,
@@ -296,10 +312,11 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
-                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
+                        f"Previous attempts and reasoning:\n{formatted_experience}"
+                        f"{failure_context}"
                     ),
                     failed_code=failed_code,
-                    error_message=error_msg,
+                    error_message=request.failure_feedback or error_msg,
                 )
                 system_prompt = REACT_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
         elif request.layer == "synthesis":
@@ -317,7 +334,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     prior_outcomes=prior_outcomes,
-                )
+                ) + failure_context
             else:
                 last_cell = self.env.notebook.cells[-1] if self.env.notebook.cells else None
                 failed_code = last_cell.code if last_cell else ""
@@ -331,8 +348,8 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     failed_code=failed_code,
-                    error_message=error_msg,
-                    experience=self.env.experience_pool.format(),
+                    error_message=request.failure_feedback or error_msg,
+                    experience=formatted_experience,
                 )
             system_prompt = SYNTHESIS_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
         else:

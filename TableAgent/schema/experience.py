@@ -37,24 +37,66 @@ class ExperiencePool:
     def add(self, record: ExperienceRecord):
         self.records.append(record)
 
-    def select(self) -> List[ExperienceRecord]:
+    def select(
+        self,
+        subtask_id: Optional[str] = None,
+        prioritize_latest_failure: bool = False,
+    ) -> List[ExperienceRecord]:
         """
         Select a bounded list of experiences.
-        Prioritizes successful attempts (score = 1.0) and then most recent attempts (round).
+        Prioritizes records for the current subtask, then successful and recent attempts.
+        Retry callers can pin the latest rejected attempt even when the pool contains
+        many successful records or replanning resets the per-subtask round number.
         """
-        # Sort by score descending, then by round descending
-        sorted_records = sorted(
-            self.records,
-            key=lambda r: (r.score, r.round),
-            reverse=True
-        )
-        return sorted_records[:self.max_records]
+        indexed_records = list(enumerate(self.records))
+        selected: List[ExperienceRecord] = []
+        selected_indexes: set[int] = set()
+        if prioritize_latest_failure and subtask_id:
+            failures = [
+                (index, record)
+                for index, record in indexed_records
+                if record.subtask_id == subtask_id and record.score < 1.0
+            ]
+            if failures:
+                latest_index, latest_failure = failures[-1]
+                selected.append(latest_failure)
+                selected_indexes.add(latest_index)
 
-    def format(self, max_code_chars: Optional[int] = None, max_observation_chars: Optional[int] = None) -> str:
+        remaining = [
+            (index, record)
+            for index, record in indexed_records
+            if index not in selected_indexes
+        ]
+        sorted_records = sorted(
+            remaining,
+            key=lambda indexed_record: (
+                indexed_record[1].subtask_id == subtask_id if subtask_id else False,
+                indexed_record[1].score,
+                indexed_record[1].round,
+                indexed_record[0],
+            ),
+            reverse=True,
+        )
+        selected.extend(
+            record
+            for _, record in sorted_records[: max(0, self.max_records - len(selected))]
+        )
+        return selected
+
+    def format(
+        self,
+        max_code_chars: Optional[int] = None,
+        max_observation_chars: Optional[int] = None,
+        subtask_id: Optional[str] = None,
+        prioritize_latest_failure: bool = False,
+    ) -> str:
         """
         Format the selected experiences into a structured text format for the model prompt.
         """
-        selected = self.select()
+        selected = self.select(
+            subtask_id=subtask_id,
+            prioritize_latest_failure=prioritize_latest_failure,
+        )
         if not selected:
             return "No previous experience."
 

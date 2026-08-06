@@ -11,6 +11,15 @@ from TableAgent.prompts.review import (
 )
 
 
+def _clip_evidence(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    marker = "\n...[evidence clipped]...\n"
+    remaining = max_chars - len(marker)
+    head = remaining // 2
+    return text[:head] + marker + text[-(remaining - head):]
+
+
 class ReviewFinalAnswerAction:
     """Independently verify the final answer against successful runtime evidence."""
 
@@ -20,7 +29,7 @@ class ReviewFinalAnswerAction:
 
     def run(self, *, question: str, plan: list[Any], outputs: list[Any], final_answer: str) -> ReviewResult:
         if self.llm_client is None:
-            return ReviewResult(accepted=True, feedback="Final review skipped without an LLM client.", score=1.0)
+            raise RuntimeError("Final answer review requires an LLM client")
 
         plan_text = json.dumps([
             {
@@ -37,10 +46,16 @@ class ReviewFinalAnswerAction:
                 continue
             observation = str(output.observation or "")
             code = str(output.code or "")
+            description = str(output.description or "")
+            reasoning = str(output.reasoning or "")
+            namespace_updates = ", ".join(sorted(output.namespace_updates)) or "None"
             evidence_sections.append(
                 f"## {output.subtask_id} [{output.layer}]\n"
-                f"Code:\n```python\n{code[-3000:]}\n```\n"
-                f"Observation:\n{observation[:4000]}"
+                f"Description: {description}\n"
+                f"Reasoning: {reasoning}\n"
+                f"Namespace updates: {namespace_updates}\n"
+                f"Code:\n```python\n{_clip_evidence(code, 5000)}\n```\n"
+                f"Observation:\n{_clip_evidence(observation, 7000)}"
             )
         evidence = "\n\n".join(evidence_sections) or "No successful runtime evidence was produced."
         grouped_headers = self._grouped_header_context()
@@ -59,7 +74,7 @@ class ReviewFinalAnswerAction:
             response = self.llm_client.generate(prompt, system_prompt=FINAL_ANSWER_REVIEW_SYSTEM_PROMPT)
         except Exception as exc:
             self.env.logger.log_event("final_answer_review_error", {"error": str(exc)})
-            return ReviewResult(accepted=True, feedback=f"Final review unavailable: {exc}", score=0.0)
+            raise RuntimeError(f"Final answer reviewer failed: {exc}") from exc
 
         self.env.logger.log_event("final_answer_review_response", {"content": response.content})
         json_match = re.search(r"```json\s*(.*?)\s*```", str(response.content), re.DOTALL)
@@ -67,16 +82,16 @@ class ReviewFinalAnswerAction:
         try:
             data = json.loads(payload)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return ReviewResult(accepted=True, feedback="Final reviewer returned invalid JSON; review skipped.", score=0.0)
+            return ReviewResult(accepted=False, feedback="Final reviewer returned invalid JSON.", score=0.0)
         if not isinstance(data, dict):
-            return ReviewResult(accepted=True, feedback="Final reviewer returned a non-object; review skipped.", score=0.0)
+            return ReviewResult(accepted=False, feedback="Final reviewer returned a non-object.", score=0.0)
         if "accepted" not in data:
-            return ReviewResult(accepted=True, feedback="Final reviewer omitted `accepted`; review skipped.", score=0.0)
+            return ReviewResult(accepted=False, feedback="Final reviewer omitted `accepted`.", score=0.0)
         accepted_value = data.get("accepted")
         if not isinstance(accepted_value, bool):
             return ReviewResult(
-                accepted=True,
-                feedback="Final reviewer returned a non-boolean `accepted`; review skipped.",
+                accepted=False,
+                feedback="Final reviewer returned a non-boolean `accepted`.",
                 score=0.0,
             )
         accepted = accepted_value

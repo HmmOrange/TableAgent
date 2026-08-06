@@ -63,6 +63,21 @@ Observation policy:
 - Preserve every distinct requested field value found for a matched item. Deduplicate repeated identical rows, but do
   not discard additional criteria or details belonging to the same item.
 
+Data provenance policy:
+- Never type, copy, or hard-code an answer-critical value learned from table data. Every such value used by this subtask
+  must be obtained in the current code from a workbook/DataFrame extraction, an accepted inspection variable, or a
+  deterministic calculation over those values.
+- Values printed in prior notebook output are context only. Do not copy them back into code as literals; reuse the
+  underlying variable or re-extract the source cell/range.
+- Literals explicitly stated in the user question may be used to match its labels or qualifiers. Ordinary structural
+  constants for indexing, arithmetic, percentage conversion, rounding, and output formatting are also allowed.
+- Before completing an inspection subtask, print a compact runtime evidence block containing: the question qualifiers
+  matched by the code; the exact table/sheet, row labels or keys, and verified header IDs selected; the extracted input
+  values; and the selection rule or calculation result. Qualifiers are generic constraints such as date, category,
+  subgroup, geography, metric, unit, or aggregation level--only include those present in the question. Print actual
+  runtime values, not a prose claim that the selection was checked. If the required value cannot be derived from the
+  available data, report that it is unavailable instead of guessing or remembering a value.
+
 Output contract:
 - Your entire assistant message must be exactly one JSON object or exactly one ```json fenced JSON object.
 - Do not write prose before or after the JSON.
@@ -109,5 +124,6 @@ Error message / Stdout:
 Please inspect the error carefully and revise your code to fix it. Preserve all previously verified table, sheet, item,
 date, equipment, and status constraints. Resolve columns by verified IDs/labels rather than unverified positions, and
 print a compact matched-row/key validation. If previous output was too large or truncated, inspect a smaller slice or
-variable summary.
+variable summary. If the reviewer rejected an unproven or hard-coded value, do not reuse that literal. Replace it with
+a workbook/DataFrame extraction, an accepted inspection variable, or a deterministic calculation over proven values.
 """

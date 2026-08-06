@@ -176,7 +176,20 @@ class ReviewSubtaskAction(BaseReviewAction):
                 score=0.0,
             )
 
-        accepted = bool(data.get("accepted", False))
+        if "accepted" not in data:
+            return ReviewResult(
+                accepted=False,
+                feedback="Reviewer JSON must include `accepted`.",
+                score=0.0,
+            )
+        accepted_value = data.get("accepted")
+        if not isinstance(accepted_value, bool):
+            return ReviewResult(
+                accepted=False,
+                feedback="Reviewer `accepted` value must be a boolean.",
+                score=0.0,
+            )
+        accepted = accepted_value
         try:
             score = float(data.get("score", 1.0 if accepted else 0.0))
         except (TypeError, ValueError):

@@ -12,6 +12,7 @@ class CodeGenerationRequest:
     layer: str
     round_num: int
     subtask: Optional[Any] = None
+    failure_feedback: Optional[str] = None
 
 
 @dataclass(frozen=True)

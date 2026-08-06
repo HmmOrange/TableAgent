@@ -10,6 +10,8 @@ from TableAgent.schema import EvalSample
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.llm import LLMResponse
 from TableAgent.configs import TableAgentConfig
+from TableAgent.perception.metadata import SheetMetadata
+from TableAgent.pipeline.source_preparer import SourcePreparer, SourcePreparationError
 
 
 class FakeLLM:
@@ -56,6 +58,56 @@ class FakeLLM:
                 completion_tokens=2,
             )
         return LLMResponse(content="100", prompt_tokens=6, completion_tokens=1)
+
+
+def test_source_preparer_preserves_layout_failure_context(tmp_path: Path):
+    import openpyxl
+
+    workbook_path = tmp_path / "source.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Data"
+    workbook.active["A1"] = "Value"
+    workbook.save(workbook_path)
+
+    class MetadataExtractor:
+        def extract(self, source_path):
+            return {"sheets": {"Data": {}}}
+
+        def sheet_metadata(self, source_path, workbook_payload, sheet_name):
+            return SheetMetadata(sheet_name, "A1:A1", [])
+
+    def fail_layout(source_path, sheet_name, metadata, sheet_dir):
+        raise RuntimeError("PDFium worker could not start")
+
+    settings = TableAgentConfig.from_config({
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "source_artifact_dir": str(tmp_path / "artifacts" / "shared"),
+    })
+    preparer = SourcePreparer(
+        settings,
+        fail_layout,
+        metadata_extractor=MetadataExtractor(),
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="sample-1",
+        table_id="table-1",
+        table_content="Value",
+        question="What is the value?",
+        answer=["Value"],
+        sample_path="sample.json",
+        table_path=str(workbook_path),
+    )
+
+    with pytest.raises(SourcePreparationError) as exc_info:
+        preparer.prepare([sample])
+
+    message = str(exc_info.value)
+    assert "source.xlsx[Data]" in message
+    assert "PDFium worker could not start" in message
+    error_paths = list((tmp_path / "artifacts" / "shared").rglob("structure.error"))
+    assert len(error_paths) == 1
+    assert "PDFium worker could not start" in error_paths[0].read_text(encoding="utf-8")
 
 
 class SuccessfulQALLM(FakeLLM):
@@ -311,7 +363,10 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     pipeline = TableAgentPipeline(
         llm_client=SuccessfulQALLM(),
         layout_vlm_client=FakeLayoutVLM(),
-        config={"artifact_dir": str(tmp_path), "max_refinement_rounds": 1},
+        config={
+            "artifact_dir": str(tmp_path),
+            "max_refinement_rounds": 1,
+        },
     )
 
     output = pipeline.run(sample)
