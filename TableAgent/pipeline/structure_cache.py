@@ -146,6 +146,7 @@ class StructureCache:
             "viewport_columns": self.settings.viewport_columns,
             "shift_cells": self.settings.shift_cells,
             "max_retry": self.settings.max_retry,
+            "structure_data_only": self.settings.structure_data_only,
             "layout_model": self.settings.layout_model_identity,
             "layout_prompt_sha256": hashlib.sha256(
                 (LAYOUT_MAS_SYSTEM_PROMPT + LAYOUT_MAS_USER_PROMPT_TEMPLATE).encode("utf-8")

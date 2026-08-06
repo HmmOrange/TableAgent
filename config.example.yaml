@@ -43,6 +43,7 @@ table_agent:
   libreoffice_path: null
   libreoffice_image_resolution: 600
   workbook_show_coordinates: true
+  structure_data_only: false
   max_cell_width: 50
   generation_max_tokens: 8192
   max_image_dimension: 8192

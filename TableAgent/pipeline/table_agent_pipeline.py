@@ -70,7 +70,9 @@ class TableAgentPipeline(
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, logger)
         self.layout_agent = LayoutAgent(self.layout_vlm) if self.layout_vlm is not None else None
-        self.verifier = DeterministicVerifier()
+        self.verifier = DeterministicVerifier(
+            data_only=self.settings.structure_data_only,
+        )
         self.qa_agent = QAAgent(self.llm, self.answer_system_prompt) if self.llm is not None else None
         self.table_retriever = table_retriever
         self.layout_workflow = (

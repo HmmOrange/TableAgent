@@ -24,6 +24,7 @@ class TableAgentConfig:
     libreoffice_path: Path | None
     libreoffice_image_resolution: int
     workbook_show_coordinates: bool
+    structure_data_only: bool
     max_cell_width: int
     generation_max_tokens: int | None
     max_image_dimension: int | None
@@ -66,6 +67,7 @@ class TableAgentConfig:
                 merged.get("libreoffice_image_resolution", merged.get("aspose_image_resolution", 192))
             ),
             workbook_show_coordinates=_bool(merged.get("workbook_show_coordinates", True)),
+            structure_data_only=_bool(merged.get("structure_data_only", False)),
             max_cell_width=_positive_int(merged.get("max_cell_width", 50), "max_cell_width"),
             generation_max_tokens=_optional_int(merged.get("generation_max_tokens")),
             max_image_dimension=_optional_int(merged.get("max_image_dimension")),
