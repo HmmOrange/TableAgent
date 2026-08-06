@@ -66,9 +66,12 @@ Range rules:
   asks for a field that is currently null, fill it only with an exact concrete A1
   range visible in this viewport.
 
-Return only this YAML envelope:
+Return only this YAML envelope. Each mapping directly under `structure` is one
+table. Table keys may be any non-empty YAML key; prefer a stable descriptive key
+and preserve existing keys exactly when refining a structure.
+
 structure:
-  table1:
+  revenue_summary:
     id: <unique stable snake_case table identifier>
     name: "<table name>"
     description: "<table purpose>"
@@ -95,7 +98,7 @@ structure:
                 header_range: <exact A1 range>
                 data_range: <exact A1 range>
                 sub_headers: []
-  tables2:
+  regional_breakdown:
     <table details here if exists>
 changelog: "<concise changes, or No change.>"
 remaining_directions: [<right|down|left|up as supported by visible evidence>]
