@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from datetime import datetime, timezone
@@ -39,6 +41,7 @@ from TableAgent.schema import EvalSample
 
 Stage = Literal["structure", "qa", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 class TableAgentService:
@@ -103,6 +106,7 @@ class TableAgentService:
         max_workers: int | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
+        started_at = time.monotonic()
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
         worker_count = self._resolve_max_workers(max_workers)
@@ -115,6 +119,15 @@ class TableAgentService:
         if run_id in {".", ".."}:
             raise ValueError("Invalid job id")
         selected_sheets = _normalize_sheet_filters(sheets)
+        LOGGER.info(
+            "TableAgent service run started stage=%s workbooks=%s workers=%s persist=%s embed=%s sheets=%s",
+            stage,
+            [path.name for path in workbook_list],
+            worker_count,
+            persist,
+            embed,
+            selected_sheets,
+        )
 
         run_dir = self._run_dir(run_id)
         if persist:
@@ -128,8 +141,14 @@ class TableAgentService:
                 workspace_dir = Path(workspace_text)
                 output_dir = run_dir if persist else workspace_dir / "output"
                 output_dir.mkdir(parents=True, exist_ok=True)
+                LOGGER.info("TableAgent normalizing workbooks run_id=%s", run_id)
                 normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
                 self._validate_sheet_filters(normalized, selected_sheets)
+                LOGGER.info(
+                    "TableAgent normalized workbooks run_id=%s names=%s",
+                    run_id,
+                    [item["name"] for item in normalized],
+                )
 
                 structures: list[dict[str, Any]] = []
                 answers: list[dict[str, Any]] = []
@@ -138,6 +157,7 @@ class TableAgentService:
                 workbook_identities = self._workbook_identities(normalized)
 
                 if worker_count == 1:
+                    LOGGER.info("TableAgent structure extraction started run_id=%s mode=single_worker", run_id)
                     base_sample = self._sample(
                         sample_id=f"{run_id}-structure",
                         question=query_list[0] if query_list else "Generate workbook structure",
@@ -159,6 +179,7 @@ class TableAgentService:
                     )
                     records = pipeline.verify_samples([base_sample], force=True)
                 else:
+                    LOGGER.info("TableAgent structure extraction started run_id=%s mode=multi_worker", run_id)
                     structure_samples = []
                     for workbook_index, item in enumerate(normalized, start=1):
                         identity = self._workbook_identities([item])
@@ -194,6 +215,11 @@ class TableAgentService:
                             structure_samples,
                         )
                         records = [record for group in record_groups for record in group]
+                LOGGER.info(
+                    "TableAgent structure extraction completed run_id=%s record_count=%s",
+                    run_id,
+                    len(records),
+                )
                 structures = self._structure_results(
                     records,
                     normalized,
@@ -204,8 +230,14 @@ class TableAgentService:
                 failed = [record for record in structures if not record["structure"]]
                 if failed:
                     raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
+                LOGGER.info(
+                    "TableAgent structure results ready run_id=%s structures=%s",
+                    run_id,
+                    len(structures),
+                )
 
                 if stage in {"qa", "all"}:
+                    LOGGER.info("TableAgent QA started run_id=%s query_count=%s", run_id, len(query_list))
                     samples = [
                         self._sample(
                             sample_id=f"{run_id}-query-{index}",
@@ -250,7 +282,9 @@ class TableAgentService:
                                 self._answer_result(sample.question, output, normalized)
                                 for sample, output in zip(samples, outputs)
                             ]
+                    LOGGER.info("TableAgent QA completed run_id=%s answer_count=%s", run_id, len(answers))
 
+                LOGGER.info("TableAgent artifact build started run_id=%s", run_id)
                 (
                     schema_artifacts,
                     metadata_artifacts,
@@ -262,6 +296,13 @@ class TableAgentService:
                     embed=embed,
                     selected_sheets=selected_sheets,
                     include_artifact_paths=persist,
+                )
+                LOGGER.info(
+                    "TableAgent artifact build completed run_id=%s schema_artifacts=%s metadata_artifacts=%s retrieval_records=%s",
+                    run_id,
+                    len(schema_artifacts),
+                    len(metadata_artifacts),
+                    len(retrieval_records),
                 )
 
                 result = {
@@ -282,6 +323,11 @@ class TableAgentService:
                         encoding="utf-8",
                     )
                     result["artifacts"] = self._artifact_paths(output_dir)
+                LOGGER.info(
+                    "TableAgent service run completed run_id=%s elapsed_seconds=%.3f",
+                    run_id,
+                    time.monotonic() - started_at,
+                )
                 return result
         except Exception:
             if persist and run_dir.exists():
