@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from TableAgent.QA.actions.base_action import (
+from TableAgent.stages.qa.actions.base_action import (
     BaseCodeExecutionAction,
     CodeExecutionRequest,
     CodeExecutionResult,

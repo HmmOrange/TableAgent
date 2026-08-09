@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -10,14 +9,16 @@ import yaml
 
 from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
-from TableAgent.pipeline.common import (
+from TableAgent.shared.pipeline import (
     SourceCandidate,
     display_path,
     read_image_tiles,
     safe_name,
     token_usage,
 )
+from TableAgent.shared.artifacts import prepared_verification
 from TableAgent.schema import EvalSample
+from TableAgent.stages.qa import QAInput
 
 
 class PipelineSourceQAMixin:
@@ -79,7 +80,7 @@ class PipelineSourceQAMixin:
                 "answer_route": "metadata_context",
             }
         else:
-            answer_response, qa_info = self._run_verified_qa(
+            qa_output = self.qa_stage.run(QAInput(
                 question=sample.question,
                 structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
@@ -87,12 +88,15 @@ class PipelineSourceQAMixin:
                 fallback_prompt=image_prompt,
                 fallback_image_path=candidate.image_path,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=related_structure_paths,
-                excluded_sheet_names=self._perfect_retrieval_excluded_sheets(
-                    candidate.workbook_path
+                related_structure_paths=tuple(related_structure_paths),
+                excluded_sheet_names=tuple(
+                    self._perfect_retrieval_excluded_sheets(
+                        candidate.workbook_path
+                    )
                 ),
                 enable_final_answer_review=True,
-            )
+            ))
+            answer_response, qa_info = qa_output.response, qa_output.metadata
         responses.append(answer_response)
         self._progress(
             "done",
@@ -149,7 +153,7 @@ class PipelineSourceQAMixin:
                 "workbook_source_format": "xlsx",
                 "workbook_sheets": list(candidate.sheet_names)
                 or [candidate.sheet_name],
-                "verification": self._prepared_verification(candidate.directory),
+                "verification": prepared_verification(candidate.directory),
                 "artifact_dir": display_path(candidate.directory),
                 "image_tiles": read_image_tiles(candidate.directory),
                 "retrieval_info": retrieval_info,
@@ -169,18 +173,6 @@ class PipelineSourceQAMixin:
                 "qa": qa_info,
             },
         )
-
-    @staticmethod
-    def _prepared_verification(directory: Path) -> dict[str, Any]:
-        metadata_path = directory / "metadata.json"
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            metadata = {}
-        verification = metadata.get("verification") if isinstance(metadata, dict) else None
-        if isinstance(verification, dict):
-            return dict(verification)
-        return {"status": "good", "feedback": "Retrieved from encoded source"}
 
     def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
         source_root = candidate.directory.parent

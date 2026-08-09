@@ -12,14 +12,14 @@ project_root = str(Path(__file__).resolve().parent.parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from TableAgent.perception.relations.scanner import scan_formulas
-from TableAgent.perception.relations.assignment import (
+from TableAgent.stages.structure.relations.scanner import scan_formulas
+from TableAgent.stages.structure.relations.assignment import (
     get_table_bounds,
     resolve_table_sheet,
     assign_formulas_to_table,
 )
-from TableAgent.perception.relations.classifier import classify_formulas_for_table
-from TableAgent.perception.relations.writer import write_relations
+from TableAgent.stages.structure.relations.classifier import classify_formulas_for_table
+from TableAgent.stages.structure.relations.writer import write_relations
 
 
 def extract_relations(

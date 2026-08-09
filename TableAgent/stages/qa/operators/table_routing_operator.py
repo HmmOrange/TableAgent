@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from TableAgent.QA.operators.base_operator import BaseOperator
-from TableAgent.pipeline.retrieval import TableCandidate, TableSearchRequest
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
+from TableAgent.stages.retrieval import TableCandidate, TableSearchRequest
 from TableAgent.utils import _lexical_overlap_score
 
 

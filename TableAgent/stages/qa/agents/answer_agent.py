@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from TableAgent.agents.base import BaseTableAgent
+from TableAgent.shared.agents import BaseTableAgent
 from TableAgent.llm import BaseLLM, LLMResponse
 
 

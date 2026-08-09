@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
-from TableAgent.QA.actions.base_action import ReviewResult
-from TableAgent.prompts.review import (
+from TableAgent.stages.qa.actions.base_action import ReviewResult
+from TableAgent.stages.qa.prompts.review import (
     FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
     FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE,
 )

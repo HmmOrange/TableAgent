@@ -1,10 +1,10 @@
 from __future__ import annotations
 from typing import List, Optional, Any
 
-from TableAgent.environment.qa_env import QAEnvironment
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 from TableAgent.schema.subtask import SubTask
-from TableAgent.QA.actions.base_action import PlanGenerationRequest
-from TableAgent.QA.actions.write_plan import WriteQAPlanAction
+from TableAgent.stages.qa.actions.base_action import PlanGenerationRequest
+from TableAgent.stages.qa.actions.write_plan import WriteQAPlanAction
 
 class TableQAPlanner:
     """

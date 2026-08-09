@@ -12,18 +12,18 @@ import openpyxl
 import yaml
 from PIL import Image
 
-from TableAgent.structure.layout.agent import (
+from TableAgent.stages.structure.layout.agent import (
     LayoutAgent,
     _union_existing_data_ranges,
 )
 from TableAgent.configs import TableAgentConfig
-from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
-from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
+from TableAgent.stages.structure.metadata import ExStructMetadataExtractor, SheetMetadata
+from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
+from TableAgent.stages.structure.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
-from TableAgent.structure.verification import DeterministicVerifier
-from TableAgent.structure.verification.checks import verify_structure
+from TableAgent.stages.structure.verification import DeterministicVerifier
+from TableAgent.stages.structure.verification.checks import verify_structure
 from TableAgent.llm import LLMResponse
 
 
@@ -903,7 +903,7 @@ def removed_semantic_verifier_does_not_accept_tool_error(tmp_path: Path, monkeyp
             "feedback": "Deterministic verifier tool failed before validating the structure.",
         }
 
-    monkeypatch.setattr("TableAgent.structure.layout.agent._execute_verifier", broken_verifier)
+    monkeypatch.setattr("TableAgent.stages.structure.layout.agent._execute_verifier", broken_verifier)
 
     result = VerificationAgent(SemanticRepairVerificationLLM(structure)).run(
         workbook_path=workbook_path,

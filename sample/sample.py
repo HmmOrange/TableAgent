@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from TableAgent.configs import DEFAULT_CONFIG_PATH, load_config
 from service import create_model_client
-from TableAgent.QA import TableQARunner
+from TableAgent.stages.qa import TableQARunner
 
 
 DEFAULT_STRUCTURE_PATH = ROOT / "sample" / "structure.yaml"

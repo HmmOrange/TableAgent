@@ -4,21 +4,21 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from TableAgent.environment.qa_env import QAEnvironment
-from TableAgent.QA.actions.base_action import BaseCodeGenerationAction
-from TableAgent.QA.actions.common_info import CommonInfoSubtaskAction
-from TableAgent.QA.actions.execute_notebook import ExecuteNotebookCodeAction
-from TableAgent.QA.actions.review import ReviewSubtaskAction
-from TableAgent.QA.actions.review_final_answer import ReviewFinalAnswerAction
-from TableAgent.QA.agents.planner import TableQAPlanner
-from TableAgent.QA.agents.react_agent import TableQAAgent
-from TableAgent.QA.agents.synthesis_agent import TableQASynthesisAgent
-from TableAgent.QA.runner_artifacts import QAArtifactMixin
-from TableAgent.QA.runner_execution import QAExecutionMixin
-from TableAgent.QA.runner_support import QARunnerSupportMixin
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
+from TableAgent.stages.qa.actions.base_action import BaseCodeGenerationAction
+from TableAgent.stages.qa.actions.common_info import CommonInfoSubtaskAction
+from TableAgent.stages.qa.actions.execute_notebook import ExecuteNotebookCodeAction
+from TableAgent.stages.qa.actions.review import ReviewSubtaskAction
+from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+from TableAgent.stages.qa.agents.planner import TableQAPlanner
+from TableAgent.stages.qa.agents.react_agent import TableQAAgent
+from TableAgent.stages.qa.agents.synthesis_agent import TableQASynthesisAgent
+from TableAgent.stages.qa.runner_artifacts import QAArtifactMixin
+from TableAgent.stages.qa.runner_execution import QAExecutionMixin
+from TableAgent.stages.qa.runner_support import QARunnerSupportMixin
 
 if TYPE_CHECKING:
-    from TableAgent.pipeline.retrieval import TableRetrieverContract
+    from TableAgent.stages.retrieval import TableRetrieverContract
 
 
 class TokenCountingLLM:
@@ -232,7 +232,7 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
                 raise ValueError(
                     "Either llm_client or code_action must be provided to TableQARunner."
                 )
-            from TableAgent.QA.actions.llm_code_generation import (
+            from TableAgent.stages.qa.actions.llm_code_generation import (
                 LLMCodeGenerationAction,
             )
 

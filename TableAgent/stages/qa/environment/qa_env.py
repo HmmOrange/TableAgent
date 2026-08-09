@@ -8,11 +8,11 @@ from TableAgent.schema.experience import ExperiencePool
 from TableAgent.schema.range import AxisSelection, Cell, CellRange
 from TableAgent.schema.header import Header
 from TableAgent.utils.structure_utils import load_formula_relations, load_table_structures
-from TableAgent.environment.notebook import Notebook
-from TableAgent.environment.logger import QALogger
+from TableAgent.stages.qa.environment.notebook import Notebook
+from TableAgent.stages.qa.environment.logger import QALogger
 
 if TYPE_CHECKING:
-    from TableAgent.pipeline.retrieval import TableRetrieverContract
+    from TableAgent.stages.retrieval import TableRetrieverContract
 
 class QAEnvironment:
     """Notebook-like runtime environment for QA execution."""
@@ -28,7 +28,7 @@ class QAEnvironment:
         table_retriever: TableRetrieverContract | None = None,
         related_structure_paths: Iterable[str | Path] | None = None,
     ):
-        from TableAgent.QA.operators.table_operator import TableOperators
+        from TableAgent.stages.qa.operators.table_operator import TableOperators
 
         self.structure_path = structure_path
         self.workbook_path = workbook_path

@@ -9,14 +9,16 @@ from typing import Any, Callable
 from TableAgent.artifacts import (
     legacy_sheet_dir,
     sheet_artifact_dir,
-    write_sheet_retrieval_cards,
     workbook_artifact_dir,
 )
 from TableAgent.configs import TableAgentConfig
-from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.pipeline.common import has_workbook_sources, safe_name
+from TableAgent.stages.structure.metadata import ExStructMetadataExtractor, SheetMetadata
+from TableAgent.shared.pipeline import has_workbook_sources, safe_name
 from TableAgent.schema import EvalSample
-from TableAgent.structure.layout.parsing import _is_valid_structure
+from TableAgent.stages.structure import StructureStage
+from TableAgent.stages.structure.layout.parsing import _is_valid_structure
+
+from .retrieval_artifacts import write_sheet_retrieval_cards
 
 LAYOUT_WORKFLOW_VERSION = 5
 
@@ -30,6 +32,7 @@ class SourcePreparer:
         progress_callback: Callable[..., None] | None = None,
         embedding_client: Any | None = None,
         embedding_model: str = "",
+        include_embeddings: bool | None = None,
     ):
         self.settings = settings
         self.analyze_sheet = analyze_sheet
@@ -37,6 +40,14 @@ class SourcePreparer:
         self.progress_callback = progress_callback
         self.embedding_client = embedding_client
         self.embedding_model = embedding_model
+        self.include_embeddings = (
+            bool(
+                settings.embed_retrieval_cards
+                or settings.prepare_retrieval_embeddings
+            )
+            if include_embeddings is None
+            else bool(include_embeddings)
+        )
 
     def _progress(self, stage: str, **fields: Any) -> None:
         if self.progress_callback:
@@ -58,6 +69,7 @@ class SourcePreparer:
             identity = self._workbook_identity(samples, source_path)
             workbook_name = str(identity.get("name") or source_path.name)
             source_hash = str(identity.get("sha256") or self._sha256(source_path))
+            artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir
             try:
                 self._progress("prepare_extract", workbook=source_path.name)
                 workbook_payload = self.metadata_extractor.extract(source_path)
@@ -152,6 +164,23 @@ class SourcePreparer:
                     )
                 self._write_retrieval_cards(sheet_dir, Path(workbook_name), sheet_name, logger)
                 self._progress("prepare_done", workbook=source_path.name, sheet=sheet_name)
+
+            try:
+                StructureStage.finalize_retrieval_artifacts(
+                    artifact_dir,
+                    [(workbook_name, source_hash)],
+                    selected_sheets=tuple(selected_sheets),
+                    include_embeddings=self.include_embeddings,
+                    embedding_client=self.embedding_client,
+                    embedding_model=self.embedding_model,
+                )
+            except Exception as exc:
+                if logger:
+                    logger.error(
+                        "TableAgent workbook retrieval card export failed for %s: %s",
+                        workbook_name,
+                        exc,
+                    )
 
     def source_dir(
         self,
@@ -288,7 +317,7 @@ class SourcePreparer:
                 sheet_dir,
                 source_path,
                 sheet_name,
-                include_embeddings=bool(self.settings.embed_retrieval_cards),
+                include_embeddings=self.include_embeddings,
                 embedding_client=self.embedding_client,
                 embedding_model=self.embedding_model,
             )

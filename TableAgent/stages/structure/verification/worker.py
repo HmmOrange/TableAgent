@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 
-from TableAgent.structure.verification.checks import verify_structure
+from TableAgent.stages.structure.verification.checks import verify_structure
 
 
 def main() -> None:

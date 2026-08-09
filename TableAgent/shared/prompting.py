@@ -3,7 +3,7 @@ from __future__ import annotations
 from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.common import SourceCandidate
+from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 
 class PromptBuilder:

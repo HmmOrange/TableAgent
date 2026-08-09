@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import List, Optional
 from TableAgent.schema.header import Header
-from TableAgent.QA.operators.base_operator import BaseOperator
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.utils import flatten_headers, _lexical_overlap_score
 
 class StructureOperator(BaseOperator):
@@ -73,7 +73,7 @@ class StructureOperator(BaseOperator):
 
 if __name__ == "__main__":
     import argparse
-    from TableAgent.environment.qa_env import QAEnvironment
+    from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 
     parser = argparse.ArgumentParser(description="Smoke-test structure/header operators.")
     parser.add_argument("--structure", default="sample/structure.yaml")

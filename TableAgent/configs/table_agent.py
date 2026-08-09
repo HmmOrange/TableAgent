@@ -45,6 +45,7 @@ class TableAgentConfig:
     qa_max_error_chars: int
     qa_max_value_repr_chars: int
     embed_retrieval_cards: bool
+    prepare_retrieval_embeddings: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -88,6 +89,9 @@ class TableAgentConfig:
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
             qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
             embed_retrieval_cards=_bool(merged.get("embed_retrieval_cards", False)),
+            prepare_retrieval_embeddings=_bool(
+                merged.get("prepare_retrieval_embeddings", False)
+            ),
         )
 
     @property

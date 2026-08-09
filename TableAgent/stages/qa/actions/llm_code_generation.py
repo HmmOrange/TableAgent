@@ -4,18 +4,18 @@ import json
 import re
 from typing import Any, Optional, Tuple
 
-from TableAgent.QA.actions.base_action import (
+from TableAgent.stages.qa.actions.base_action import (
     BaseCodeGenerationAction,
     CodeGenerationRequest,
     CodeGenerationResult,
 )
-from TableAgent.QA.header_hints import question_header_hints
-from TableAgent.prompts.react import (
+from TableAgent.stages.qa.header_hints import question_header_hints
+from TableAgent.stages.qa.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
     REVISION_USER_PROMPT_TEMPLATE,
 )
-from TableAgent.prompts.synthesis import (
+from TableAgent.stages.qa.prompts.synthesis import (
     SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE,
     SYNTHESIS_SYSTEM_PROMPT,
     SYNTHESIS_USER_PROMPT_TEMPLATE,

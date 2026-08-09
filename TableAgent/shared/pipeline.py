@@ -2,46 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from TableAgent.llm import LLMResponse
 from TableAgent.schema import EvalSample
-
-
-@dataclass(frozen=True)
-class SourceCandidate:
-    directory: Path
-    workbook_path: Path
-    sheet_name: str
-    image_path: Path
-    html_path: Path | None
-    structure_text: str
-    sheet_text: str
-    score: float
-    lexical_score: float = 0.0
-    bm25_score: float = 0.0
-    embedding_score: float = 0.0
-    embedding_used: bool = False
-    retrieval_card: str = ""
-    table_id: str = ""
-    table_name: str = ""
-    table_description: str = ""
-    entity_score: float = 0.0
-    matched_terms: tuple[str, ...] = ()
-    missing_terms: tuple[str, ...] = ()
-    retrieval_rank: int = 0
-    retrieval_type: str = "data"
-    retrieval_level: str = "table"
-    retrieval_trace: tuple[dict[str, Any], ...] = ()
-    retrieval_audit: tuple[dict[str, Any], ...] = ()
-    artifact_id: str = ""
-    embedding_vector: tuple[float, ...] = ()
-    embedding_model: str = ""
-    embedding_source: str = ""
-    sheet_names: tuple[str, ...] = ()
-    workbook_reference_score: float = 0.0
+from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 
 def safe_name(value: str) -> str:

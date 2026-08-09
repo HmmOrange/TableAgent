@@ -4,8 +4,8 @@ import openpyxl
 import yaml
 
 from TableAgent.configs import TableAgentConfig, load_config
-from TableAgent.structure.verification.checks import verify_structure
-from TableAgent.structure.verification.runner import DeterministicVerifier
+from TableAgent.stages.structure.verification.checks import verify_structure
+from TableAgent.stages.structure.verification.runner import DeterministicVerifier
 
 
 def _formula_workbook(path: Path) -> None:

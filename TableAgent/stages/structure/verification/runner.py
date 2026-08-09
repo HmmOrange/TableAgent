@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from TableAgent.structure.layout.parsing import _is_valid_structure
+from TableAgent.stages.structure.layout.parsing import _is_valid_structure
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class DeterministicVerifier:
                 [
                     sys.executable,
                     "-m",
-                    "TableAgent.structure.verification.worker",
+                    "TableAgent.stages.structure.verification.worker",
                     str(workbook_path),
                     sheet_name,
                     str(structure_path),

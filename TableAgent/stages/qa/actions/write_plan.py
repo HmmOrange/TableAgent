@@ -4,10 +4,10 @@ import json
 import re
 from typing import Any, List, Optional
 
-from TableAgent.QA.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
-from TableAgent.QA.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
-from TableAgent.QA.header_hints import question_header_hints
-from TableAgent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
+from TableAgent.stages.qa.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
+from TableAgent.stages.qa.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
+from TableAgent.stages.qa.header_hints import question_header_hints
+from TableAgent.stages.qa.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.schema.subtask import SubTask
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.

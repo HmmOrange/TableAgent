@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 import re
 from pathlib import Path
 from typing import Any
@@ -8,11 +9,11 @@ from typing import Any
 import yaml
 
 from TableAgent.artifacts import iter_sheet_artifact_dirs
-from TableAgent.pipeline.common import SourceCandidate
-from TableAgent.structure.layout.parsing import _is_valid_structure
+from TableAgent.stages.retrieval.contracts import SourceCandidate
+from TableAgent.stages.structure.layout.parsing import _is_valid_structure
 from TableAgent.utils.table_text import _lexical_overlap_score
 
-from .cards import (
+from TableAgent.stages.structure.card_builders import (
     build_metadata_retrieval_card,
     build_sheet_metadata_payload,
     build_source_retrieval_card,
@@ -129,6 +130,13 @@ class RetrievalCandidateLoadingMixin:
             sort_keys=False,
         )
         sheet_metadata_card = build_metadata_retrieval_card(sheet_metadata_payload)
+        metadata_embedding = self._prepared_embedding(
+            source_dir,
+            retrieval_type="metadata",
+            retrieval_level="sheet",
+            table_id="",
+            retrieval_card=sheet_metadata_card,
+        )
         metadata_candidate = self._source_candidate(
             source_dir=source_dir,
             workbook_path=workbook_path,
@@ -141,30 +149,41 @@ class RetrievalCandidateLoadingMixin:
             query=query,
             retrieval_type="metadata",
             retrieval_level="sheet",
+            **metadata_embedding,
         )
         table_cards = build_table_retrieval_cards(
             card_workbook_path, sheet_name, structure_text, sheet_text
         )
         if table_cards:
-            return [
-                self._source_candidate(
-                    source_dir=source_dir,
-                    workbook_path=workbook_path,
-                    sheet_name=sheet_name,
-                    image_path=image_path,
-                    html_path=html_path if html_path.is_file() else None,
-                    structure_text=table_card["structure_text"],
-                    sheet_text=sheet_text,
-                    retrieval_card=table_card["retrieval_card"],
-                    query=query,
-                    table_id=table_card["table_id"],
-                    table_name=table_card["table_name"],
-                    table_description=table_card["description"],
+            data_candidates = []
+            for table_card in table_cards:
+                embedding = self._prepared_embedding(
+                    source_dir,
                     retrieval_type="data",
                     retrieval_level="table",
+                    table_id=table_card["table_id"],
+                    retrieval_card=table_card["retrieval_card"],
                 )
-                for table_card in table_cards
-            ], [metadata_candidate]
+                data_candidates.append(
+                    self._source_candidate(
+                        source_dir=source_dir,
+                        workbook_path=workbook_path,
+                        sheet_name=sheet_name,
+                        image_path=image_path,
+                        html_path=html_path if html_path.is_file() else None,
+                        structure_text=table_card["structure_text"],
+                        sheet_text=sheet_text,
+                        retrieval_card=table_card["retrieval_card"],
+                        query=query,
+                        table_id=table_card["table_id"],
+                        table_name=table_card["table_name"],
+                        table_description=table_card["description"],
+                        retrieval_type="data",
+                        retrieval_level="table",
+                        **embedding,
+                    )
+                )
+            return data_candidates, [metadata_candidate]
 
         retrieval_card = build_source_retrieval_card(
             card_workbook_path, sheet_name, structure_text, sheet_text
@@ -181,6 +200,13 @@ class RetrievalCandidateLoadingMixin:
             query=query,
             retrieval_type="data",
             retrieval_level="sheet",
+            **self._prepared_embedding(
+                source_dir,
+                retrieval_type="data",
+                retrieval_level="sheet",
+                table_id="",
+                retrieval_card=retrieval_card,
+            ),
         )
         return [data_candidate], [metadata_candidate]
 
@@ -268,6 +294,33 @@ class RetrievalCandidateLoadingMixin:
                 {"metadata": workbook_payload}, allow_unicode=True, sort_keys=False
             )
             workbook_card = build_metadata_retrieval_card(workbook_payload)
+            prepared_workbook = self._prepared_retrieval_record(
+                base.directory.parent,
+                retrieval_type="metadata",
+                retrieval_level="workbook",
+                table_id="",
+                retrieval_card=None,
+            )
+            if prepared_workbook is not None:
+                prepared_payload = prepared_workbook.get("metadata")
+                if isinstance(prepared_payload, dict):
+                    workbook_payload = prepared_payload
+                    workbook_text = yaml.safe_dump(
+                        {"metadata": workbook_payload},
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                workbook_card = str(
+                    prepared_workbook.get("retrieval_card") or workbook_card
+                )
+                vector, model = self._artifact_embedding(prepared_workbook)
+                workbook_embedding = {
+                    "artifact_id": str(prepared_workbook.get("id") or ""),
+                    "embedding_vector": vector,
+                    "embedding_model": model,
+                }
+            else:
+                workbook_embedding = {}
             workbook_candidates.append(
                 self._source_candidate(
                     source_dir=base.directory,
@@ -281,9 +334,87 @@ class RetrievalCandidateLoadingMixin:
                     query=query,
                     retrieval_type="metadata",
                     retrieval_level="workbook",
+                    **workbook_embedding,
                 )
             )
         return workbook_candidates
+
+    def _prepared_embedding(
+        self,
+        directory: Path,
+        *,
+        retrieval_type: str,
+        retrieval_level: str,
+        table_id: str,
+        retrieval_card: str | None,
+    ) -> dict[str, Any]:
+        record = self._prepared_retrieval_record(
+            directory,
+            retrieval_type=retrieval_type,
+            retrieval_level=retrieval_level,
+            table_id=table_id,
+            retrieval_card=retrieval_card,
+        )
+        if record is None:
+            return {}
+        vector, model = self._artifact_embedding(record)
+        return {
+            "artifact_id": str(record.get("id") or ""),
+            "embedding_vector": vector,
+            "embedding_model": model,
+        }
+
+    @staticmethod
+    def _prepared_retrieval_record(
+        directory: Path,
+        *,
+        retrieval_type: str,
+        retrieval_level: str,
+        table_id: str,
+        retrieval_card: str | None,
+    ) -> dict[str, Any] | None:
+        records: Any = None
+        pickle_path = directory / "retrieval_cards.pkl"
+        if pickle_path.is_file():
+            try:
+                records = pickle.loads(pickle_path.read_bytes())
+            except (
+                EOFError,
+                pickle.UnpicklingError,
+                AttributeError,
+                ValueError,
+                TypeError,
+            ):
+                records = None
+        if not isinstance(records, list):
+            jsonl_path = directory / "retrieval_cards.jsonl"
+            if jsonl_path.is_file():
+                try:
+                    records = [
+                        json.loads(line)
+                        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                except (OSError, json.JSONDecodeError):
+                    records = None
+        if not isinstance(records, list):
+            return None
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("retrieval_type") or "") != retrieval_type:
+                continue
+            if str(record.get("retrieval_level") or "") != retrieval_level:
+                continue
+            if str(record.get("table_id") or "") != table_id:
+                continue
+            if (
+                retrieval_card is not None
+                and str(record.get("retrieval_card") or "") != retrieval_card
+            ):
+                continue
+            return record
+        return None
 
     @staticmethod
     def _workbook_description(sheet_payloads: list[dict[str, Any]]) -> str:
@@ -337,14 +468,6 @@ class RetrievalCandidateLoadingMixin:
             "table_description": candidate.table_description,
             "retrieval_card_preview": candidate.retrieval_card[:600],
         }
-
-    def _legacy_candidates_from_dir(
-        self, source_dir: Path, allowed_paths: set[str], query: str
-    ) -> list[SourceCandidate]:
-        data_candidates, _metadata_candidates = self._candidates_from_dir(
-            source_dir, allowed_paths, query
-        )
-        return data_candidates
 
     def _source_candidate(
         self,

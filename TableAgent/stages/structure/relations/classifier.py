@@ -5,7 +5,7 @@ from typing import Any
 import openpyxl
 from openpyxl.utils.cell import get_column_letter, range_boundaries
 
-from TableAgent.perception.relations.normalize import (
+from TableAgent.stages.structure.relations.normalize import (
     ref_regex,
     parse_reference,
     parse_cell_absolute,

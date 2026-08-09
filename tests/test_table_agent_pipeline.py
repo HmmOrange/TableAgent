@@ -363,7 +363,7 @@ def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
 
 
 def test_table_agent_all_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
-    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+    from TableAgent.stages.structure.cache import StructureCacheRecord
 
     sample = EvalSample(
         index=0,
@@ -400,7 +400,7 @@ def test_table_agent_all_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, 
 
 
 def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: Path, monkeypatch):
-    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+    from TableAgent.stages.structure.cache import StructureCacheRecord
 
     sample = EvalSample(
         index=0,
@@ -437,7 +437,7 @@ def test_table_agent_structure_phase_aborts_on_invalid_prepared_cache(tmp_path: 
 
 
 def test_table_agent_keeps_not_good_structure_artifact(tmp_path: Path, monkeypatch):
-    from TableAgent.pipeline.structure_cache import StructureCacheRecord
+    from TableAgent.stages.structure.cache import StructureCacheRecord
 
     sample = EvalSample(
         index=0,
@@ -477,7 +477,7 @@ def test_table_agent_keeps_not_good_structure_artifact(tmp_path: Path, monkeypat
 
 
 def test_prepared_source_propagates_not_good_status(tmp_path: Path, monkeypatch):
-    from TableAgent.pipeline.common import SourceCandidate
+    from TableAgent.shared.pipeline import SourceCandidate
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -523,7 +523,7 @@ def test_prepared_source_propagates_not_good_status(tmp_path: Path, monkeypatch)
 
 
 def test_analyze_source_sheet_persists_verification_status(tmp_path: Path):
-    from TableAgent.perception.metadata import SheetMetadata
+    from TableAgent.stages.structure.metadata import SheetMetadata
 
     pipeline = TableAgentPipeline(
         llm_client=FakeLLM(),
@@ -556,7 +556,7 @@ def test_analyze_source_sheet_persists_verification_status(tmp_path: Path):
 
 
 def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monkeypatch):
-    from TableAgent.pipeline.common import SourceCandidate
+    from TableAgent.shared.pipeline import SourceCandidate
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -1322,7 +1322,7 @@ def test_table_agent_max_tokens_config_driven(tmp_path: Path):
 
 
 def test_is_valid_structure_rules():
-    from TableAgent.structure.layout.parsing import _is_valid_structure
+    from TableAgent.stages.structure.layout.parsing import _is_valid_structure
     
     # 1. Reject structures with 'error' key
     assert not _is_valid_structure("headers: []\nerror: Failed to generate structure")
@@ -1344,7 +1344,7 @@ def test_is_valid_structure_rules():
 
 
 def test_table_agent_layout_prompt_uses_deterministic_feedback():
-    from TableAgent.prompts.structure import (
+    from TableAgent.stages.structure.structure_prompts import (
         LAYOUT_MAS_SYSTEM_PROMPT,
         LAYOUT_MAS_USER_PROMPT_TEMPLATE,
     )
@@ -1364,7 +1364,7 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
-    from TableAgent.structure.layout.parsing import extract_strict_structure
+    from TableAgent.stages.structure.layout.parsing import extract_strict_structure
 
     structure_text, _ = extract_strict_structure(
         "headers:\n"
@@ -1381,7 +1381,7 @@ def test_strict_structure_normalizes_uncertain_ranges_to_null():
 
 
 def test_strict_structure_extraction_discards_reasoning_and_extra_keys():
-    from TableAgent.structure.layout.parsing import extract_strict_structure
+    from TableAgent.stages.structure.layout.parsing import extract_strict_structure
 
     content = """I analyzed the table before producing the result.
 ```yaml
@@ -1415,7 +1415,7 @@ This trailing explanation is also logging-only."""
 
 
 def test_strict_structure_preserves_multi_level_sub_headers():
-    from TableAgent.structure.layout.parsing import extract_strict_structure
+    from TableAgent.stages.structure.layout.parsing import extract_strict_structure
 
     content = """headers:
   - label: Civilian labor force
@@ -1488,7 +1488,7 @@ remaining_directions: []
 
 
 def test_layout_parser_preserves_unquoted_no_header():
-    from TableAgent.structure.layout.parsing import extract_layout_structure
+    from TableAgent.stages.structure.layout.parsing import extract_layout_structure
 
     content = """structure:
   table1:
@@ -1516,7 +1516,7 @@ remaining_directions: []
 
 
 def test_layout_parser_preserves_multi_level_sub_headers():
-    from TableAgent.structure.layout.parsing import extract_layout_structure
+    from TableAgent.stages.structure.layout.parsing import extract_layout_structure
 
     content = """structure:
   table1:
@@ -1558,7 +1558,7 @@ remaining_directions: []
 
 
 def test_layout_parser_salvages_structure_when_changelog_breaks_yaml():
-    from TableAgent.structure.layout.parsing import extract_layout_structure
+    from TableAgent.stages.structure.layout.parsing import extract_layout_structure
 
     content = """```yaml
 structure:
@@ -1586,7 +1586,7 @@ remaining_directions: [right]
 
 
 def test_layout_parser_does_not_salvage_malformed_structure_block():
-    from TableAgent.structure.layout.parsing import extract_layout_structure
+    from TableAgent.stages.structure.layout.parsing import extract_layout_structure
 
     content = """structure:
   table1:

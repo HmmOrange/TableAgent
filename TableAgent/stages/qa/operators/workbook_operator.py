@@ -4,7 +4,7 @@ import pandas as pd
 from openpyxl.utils import get_column_letter
 from TableAgent.schema.range import CellRange
 from TableAgent.utils import parse_a1_range, read_excel_range
-from TableAgent.QA.operators.base_operator import BaseOperator
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
 
 class WorkbookOperator(BaseOperator):
     """Operator for reading cell values and converting to structures like DataFrames."""
@@ -108,7 +108,7 @@ class WorkbookOperator(BaseOperator):
 
 if __name__ == "__main__":
     import argparse
-    from TableAgent.environment.qa_env import QAEnvironment
+    from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 
     parser = argparse.ArgumentParser(description="Smoke-test workbook range operators.")
     parser.add_argument("--structure", default="sample/structure.yaml")

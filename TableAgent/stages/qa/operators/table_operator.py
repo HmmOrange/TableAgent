@@ -4,13 +4,13 @@ from typing import Any, List, Optional, Union
 import pandas as pd
 from TableAgent.schema.header import Header
 from TableAgent.schema.range import AxisSelection, CellRange
-from TableAgent.QA.operators.base_operator import BaseOperator
-from TableAgent.QA.operators.structure_operator import StructureOperator
-from TableAgent.QA.operators.range_operator import RangeOperator
-from TableAgent.QA.operators.workbook_operator import WorkbookOperator
-from TableAgent.QA.operators.filter_operator import FilterOperator
-from TableAgent.QA.operators.multitab_operator import MultiTableOperator
-from TableAgent.pipeline.retrieval import TableCandidate
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
+from TableAgent.stages.qa.operators.structure_operator import StructureOperator
+from TableAgent.stages.qa.operators.range_operator import RangeOperator
+from TableAgent.stages.qa.operators.workbook_operator import WorkbookOperator
+from TableAgent.stages.qa.operators.filter_operator import FilterOperator
+from TableAgent.stages.qa.operators.multitab_operator import MultiTableOperator
+from TableAgent.stages.retrieval import TableCandidate
 
 class TableOperators(BaseOperator):
     """
@@ -287,7 +287,7 @@ class TableOperators(BaseOperator):
 
 if __name__ == "__main__":
     import argparse
-    from TableAgent.environment.qa_env import QAEnvironment
+    from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 
     parser = argparse.ArgumentParser(description="Smoke-test unified TableOperators facade.")
     parser.add_argument("--structure", default="sample/structure.yaml")

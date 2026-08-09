@@ -6,9 +6,9 @@ from dataclasses import replace
 from typing import Any
 
 from TableAgent.llm import LLMResponse
-from TableAgent.pipeline.common import SourceCandidate
 from TableAgent.run_logging import Logger
-from TableAgent.structure.layout.parsing import _parse_yaml_mapping
+from TableAgent.stages.retrieval.contracts import SourceCandidate
+from TableAgent.stages.structure.layout.parsing import _parse_yaml_mapping
 
 from .embeddings import MockEmbeddingModel
 from .scoring import bm25_scores, cosine_similarity, hybrid_score, normalize_scores
@@ -43,7 +43,7 @@ class RetrievalRankingMixin:
             embedding_client = MockEmbeddingModel()
 
         if embedding_client is not None and not indexed_scores_available:
-            candidates = self._with_embedding_scores(
+            candidates = self._with_prepared_embedding_scores(
                 candidates, query, embedding_client
             )
 
@@ -114,7 +114,7 @@ class RetrievalRankingMixin:
             for rank, candidate in enumerate(ranked, start=1)
         ]
 
-    def _with_embedding_scores(
+    def _with_prepared_embedding_scores(
         self,
         candidates: list[SourceCandidate],
         query: str,
@@ -122,28 +122,9 @@ class RetrievalRankingMixin:
     ) -> list[SourceCandidate]:
         try:
             client_model = self._embedding_client_model(embedding_client)
-            generated_indices = [
-                index
-                for index, candidate in enumerate(candidates)
-                if not candidate.embedding_vector
-                or (
-                    candidate.embedding_model
-                    and client_model
-                    and candidate.embedding_model != client_model
-                )
-            ]
-            vectors = self._encode_with_client(
-                embedding_client,
-                [query]
-                + [candidates[index].retrieval_card for index in generated_indices],
-            )
-            query_vector = vectors[0]
-            generated_vectors = {
-                candidate_index: vectors[vector_index + 1]
-                for vector_index, candidate_index in enumerate(generated_indices)
-            }
+            query_vector = self._encode_with_client(embedding_client, [query])[0]
             scored = []
-            for index, candidate in enumerate(candidates):
+            for candidate in candidates:
                 stored_vector = candidate.embedding_vector
                 stored_compatible = bool(stored_vector) and not (
                     candidate.embedding_model
@@ -154,10 +135,8 @@ class RetrievalRankingMixin:
                     candidate_vector = stored_vector
                     embedding_source = "stored"
                 else:
-                    candidate_vector = generated_vectors.get(index)
-                    embedding_source = (
-                        "generated" if candidate_vector is not None else ""
-                    )
+                    candidate_vector = None
+                    embedding_source = ""
                 if candidate_vector is None:
                     scored.append(candidate)
                     continue
@@ -173,7 +152,7 @@ class RetrievalRankingMixin:
                 )
             return scored
         except Exception as exc:
-            logger.warning("Embedding generation failed: %s", exc)
+            logger.warning("Query embedding generation failed: %s", exc)
             return candidates
 
     def _resolve_query_type(

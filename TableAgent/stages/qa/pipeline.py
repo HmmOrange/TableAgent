@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 from TableAgent.llm import LLMResponse
-from TableAgent.QA.runner import TableQARunner
+from TableAgent.stages.qa.runner import TableQARunner
 
 
 class PipelineQAMixin:
@@ -148,7 +148,7 @@ class PipelineQAMixin:
 
     @staticmethod
     def _parse_structure(structure_text: str) -> dict[str, Any]:
-        from TableAgent.structure.layout.parsing import _parse_yaml_mapping
+        from TableAgent.stages.structure.layout.parsing import _parse_yaml_mapping
 
         return _parse_yaml_mapping(structure_text)
 

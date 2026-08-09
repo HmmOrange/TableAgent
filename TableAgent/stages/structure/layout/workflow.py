@@ -9,8 +9,8 @@ import openpyxl
 from openpyxl.utils.cell import range_boundaries
 
 from TableAgent.configs import TableAgentConfig
-from TableAgent.perception.metadata import SheetMetadata
-from TableAgent.pipeline.traversal import (
+from TableAgent.stages.structure.metadata import SheetMetadata
+from TableAgent.stages.structure.traversal import (
     Direction,
     DirectionQueue,
     TraversalTask,
@@ -19,9 +19,9 @@ from TableAgent.pipeline.traversal import (
     frontier_directions,
 )
 from TableAgent.rendering.workbook import WorkbookRenderer
-from TableAgent.structure.layout.agent import LayoutAgent
-from TableAgent.structure.layout.parsing import nullify_structure_ranges
-from TableAgent.structure.verification import DeterministicVerifier
+from TableAgent.stages.structure.layout.agent import LayoutAgent
+from TableAgent.stages.structure.layout.parsing import nullify_structure_ranges
+from TableAgent.stages.structure.verification import DeterministicVerifier
 
 
 @dataclass(frozen=True)

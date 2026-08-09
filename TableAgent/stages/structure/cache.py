@@ -12,10 +12,10 @@ from TableAgent.rendering.converter import sample_to_xlsx
 from TableAgent.schema import EvalSample
 
 from TableAgent.configs import TableAgentConfig
-from TableAgent.perception.metadata import SheetMetadata
-from TableAgent.pipeline.common import safe_name
-from TableAgent.prompts.structure import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
-from TableAgent.structure.layout.workflow import TableLayoutWorkflow
+from TableAgent.stages.structure.metadata import SheetMetadata
+from TableAgent.shared.pipeline import safe_name
+from TableAgent.stages.structure.structure_prompts import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
+from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 
 
 CACHE_SCHEMA_VERSION = 5

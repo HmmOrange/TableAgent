@@ -8,14 +8,14 @@ import yaml
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
-from TableAgent.prompts.structure import (
+from TableAgent.stages.structure.structure_prompts import (
     LAYOUT_MAS_SYSTEM_PROMPT,
     LAYOUT_MAS_USER_PROMPT_TEMPLATE,
 )
-from TableAgent.agents.base import AgentMessage, BaseTableAgent
+from TableAgent.shared.agents import AgentMessage, BaseTableAgent
 from TableAgent.llm import BaseLLM, LLMResponse
 
-from TableAgent.structure.layout.parsing import (
+from TableAgent.stages.structure.layout.parsing import (
     _is_valid_structure,
     extract_layout_structure,
 )

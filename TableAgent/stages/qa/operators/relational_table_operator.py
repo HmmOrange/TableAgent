@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from TableAgent.QA.operators.base_operator import BaseOperator
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
 
 
 class RelationalTableOperator(BaseOperator):

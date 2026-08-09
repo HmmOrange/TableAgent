@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import yaml
 
-from TableAgent.pipeline.retrieval.cards import (
+from TableAgent.stages.structure.card_builders import (
     build_metadata_retrieval_card,
     build_sheet_metadata_payload,
     build_table_retrieval_cards,
@@ -154,8 +154,22 @@ def _write_records(
     jsonl_path = directory / "retrieval_cards.jsonl"
     csv_path = directory / "retrieval_cards.csv"
     pickle_path = directory / "retrieval_cards.pkl"
+    output_records = records
+    if include_embeddings:
+        if embedding_client is None:
+            raise ValueError(
+                "Embedding export requires an explicit configured embedding client"
+            )
+        output_records = _records_with_embeddings(
+            _reuse_existing_embeddings(directory, records, embedding_model),
+            embedding_client=embedding_client,
+            embedding_model=embedding_model,
+        )
     jsonl_path.write_text(
-        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        "".join(
+            json.dumps(record, ensure_ascii=False) + "\n"
+            for record in output_records
+        ),
         encoding="utf-8",
     )
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
@@ -173,22 +187,47 @@ def _write_records(
             ],
         )
         writer.writeheader()
-        for record in records:
+        for record in output_records:
             writer.writerow({field: record.get(field, "") for field in writer.fieldnames})
     if not include_embeddings:
         pickle_path.unlink(missing_ok=True)
+        return output_records
+    pickle_path.write_bytes(pickle.dumps(output_records))
+    return output_records
+
+
+def _reuse_existing_embeddings(
+    directory: Path,
+    records: list[dict[str, Any]],
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    """Reuse structure-stage vectors when the card text and model are unchanged."""
+    pickle_path = directory / "retrieval_cards.pkl"
+    if not pickle_path.is_file():
         return records
-    if embedding_client is None:
-        raise ValueError(
-            "Embedding export requires an explicit configured embedding client"
-        )
-    embedded_records = _records_with_embeddings(
-        records,
-        embedding_client=embedding_client,
-        embedding_model=embedding_model,
-    )
-    pickle_path.write_bytes(pickle.dumps(embedded_records))
-    return embedded_records
+    try:
+        existing = pickle.loads(pickle_path.read_bytes())
+    except (EOFError, pickle.UnpicklingError, AttributeError, ValueError, TypeError):
+        return records
+    if not isinstance(existing, list):
+        return records
+    by_id = {
+        str(record.get("id") or ""): record
+        for record in existing
+        if isinstance(record, dict) and record.get("id")
+    }
+    reused = []
+    for record in records:
+        previous = by_id.get(str(record.get("id") or ""))
+        if (
+            isinstance(previous, dict)
+            and previous.get("retrieval_card") == record.get("retrieval_card")
+            and _embedding_values(previous, embedding_model) is not None
+        ):
+            reused.append({**record, "embedding": dict(previous["embedding"])})
+        else:
+            reused.append(record)
+    return reused
 
 
 def _records_with_embeddings(

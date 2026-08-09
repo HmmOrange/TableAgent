@@ -2,7 +2,7 @@ import pytest
 from pathlib import Path
 import openpyxl
 import yaml
-from TableAgent.perception.relations import extract_relations
+from TableAgent.stages.structure.relations import extract_relations
 
 def test_relations_extraction(tmp_path):
     # 1. Create temporary Excel workbook
@@ -285,10 +285,13 @@ def test_new_relations_requirements(tmp_path):
     cli_output = tmp_path / "cli_output.yaml"
     cmd = [
         sys.executable,
-        str(Path(__file__).parent.parent / "TableAgent" / "perception" / "relations" / "extract.py"),
-        "--xlsx", str(xlsx_path),
+        "-m",
+        "TableAgent.stages.structure.relations.extract",
+        "--xlsx",
+        str(xlsx_path),
         "--structure", str(structure_path),
-        "--output", str(cli_output)
+        "--output",
+        str(cli_output),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
     assert res.returncode == 0, f"CLI output: stdout: {res.stdout}, stderr: {res.stderr}"
@@ -300,7 +303,7 @@ def test_new_relations_requirements(tmp_path):
 
 
 def test_repeated_formula_descriptions():
-    from TableAgent.perception.relations.classifier import generate_description
+    from TableAgent.stages.structure.relations.classifier import generate_description
 
     # Test all row-wise aggregate functions
     for fn in ["SUM", "AVERAGE", "COUNT", "COUNTA", "MAX", "MIN", "SUBTOTAL"]:
@@ -320,4 +323,3 @@ def test_repeated_formula_descriptions():
     # Column-wise non-aggregate
     desc_col = generate_description("normal_formulas", "{col}8 = {col}2 - {col}3", is_col_wise=True, agg_fun=None)
     assert desc_col == "Repeated column-wise formula. Each column calculates a value from rows above it."
-

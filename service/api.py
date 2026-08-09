@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from TableAgent.pipeline.common import safe_name
+from TableAgent.shared.pipeline import safe_name
 from service.runtime import Stage, TableAgentService
 
 

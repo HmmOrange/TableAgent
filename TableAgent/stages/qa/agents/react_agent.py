@@ -1,9 +1,9 @@
 from __future__ import annotations
-from TableAgent.environment.qa_env import QAEnvironment
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 from TableAgent.schema.subtask import SubTask
 from TableAgent.schema.qa import AgentOutput
 from TableAgent.schema.experience import ExperienceRecord
-from TableAgent.QA.actions.base_action import (
+from TableAgent.stages.qa.actions.base_action import (
     BaseCodeExecutionAction,
     BaseCodeGenerationAction,
     BaseReviewAction,
@@ -11,7 +11,7 @@ from TableAgent.QA.actions.base_action import (
     CodeGenerationRequest,
     ReviewRequest,
 )
-from TableAgent.QA.agents.base_agent import BaseReActAgent
+from TableAgent.stages.qa.agents.base_agent import BaseReActAgent
 
 class TableQAAgent(BaseReActAgent):
     """

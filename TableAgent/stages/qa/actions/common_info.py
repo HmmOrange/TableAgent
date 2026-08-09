@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
-from TableAgent.prompts.common_info import (
+from TableAgent.stages.qa.prompts.common_info import (
     COMMON_INFO_LOCALIZATION_PROMPT,
     COMMON_INFO_LOCALIZATION_SYSTEM_PROMPT,
 )

@@ -10,8 +10,8 @@ from typing import Any
 import yaml
 
 from TableAgent.artifacts import iter_sheet_artifact_dirs
-from TableAgent.pipeline.common import SourceCandidate
-from .cards import build_source_retrieval_card
+from TableAgent.stages.retrieval.contracts import SourceCandidate
+from TableAgent.stages.structure.card_builders import build_source_retrieval_card
 
 
 class PerfectRetrievalMixin:

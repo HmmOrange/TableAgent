@@ -6,9 +6,9 @@ from typing import Any, Callable, Iterable, List, Optional, Union
 
 import pandas as pd
 
-from TableAgent.QA.operators.base_operator import BaseOperator
-from TableAgent.QA.operators.structure_operator import StructureOperator
-from TableAgent.QA.operators.workbook_operator import WorkbookOperator
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
+from TableAgent.stages.qa.operators.structure_operator import StructureOperator
+from TableAgent.stages.qa.operators.workbook_operator import WorkbookOperator
 from TableAgent.schema.range import AxisSelection, CellRange
 from TableAgent.utils import parse_a1_range, range_to_a1
 
@@ -343,7 +343,7 @@ class FilterOperator(BaseOperator):
 
 if __name__ == "__main__":
     import argparse
-    from TableAgent.environment.qa_env import QAEnvironment
+    from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 
     parser = argparse.ArgumentParser(description="Smoke-test generic value filtering and row/column selections.")
     parser.add_argument("--structure", default="sample/structure.yaml")

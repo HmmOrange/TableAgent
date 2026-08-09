@@ -5,11 +5,11 @@ from typing import Any
 
 import pandas as pd
 
-from TableAgent.QA.operators.base_operator import BaseOperator
-from TableAgent.pipeline.retrieval import TableCandidate
-from TableAgent.QA.operators.formula_relation_operator import FormulaRelationOperator
-from TableAgent.QA.operators.relational_table_operator import RelationalTableOperator
-from TableAgent.QA.operators.table_routing_operator import TableRoutingOperator
+from TableAgent.stages.qa.operators.base_operator import BaseOperator
+from TableAgent.stages.retrieval import TableCandidate
+from TableAgent.stages.qa.operators.formula_relation_operator import FormulaRelationOperator
+from TableAgent.stages.qa.operators.relational_table_operator import RelationalTableOperator
+from TableAgent.stages.qa.operators.table_routing_operator import TableRoutingOperator
 
 
 class MultiTableOperator(BaseOperator):

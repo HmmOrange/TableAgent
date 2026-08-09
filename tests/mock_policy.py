@@ -1,5 +1,5 @@
 from __future__ import annotations
-from TableAgent.QA.actions.base_action import BaseCodeGenerationAction, CodeGenerationRequest, CodeGenerationResult
+from TableAgent.stages.qa.actions.base_action import BaseCodeGenerationAction, CodeGenerationRequest, CodeGenerationResult
 
 class MockActionPolicy(BaseCodeGenerationAction):
     """

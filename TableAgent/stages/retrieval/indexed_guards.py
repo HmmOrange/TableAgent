@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from TableAgent.pipeline.common import SourceCandidate
+from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 
 _CLOSE_SHEET_SCORE = 500.0

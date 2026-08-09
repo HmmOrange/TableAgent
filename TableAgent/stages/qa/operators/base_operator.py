@@ -18,4 +18,4 @@ class BaseOperator(ABC):
         return "\n".join(lines)
 
 if __name__ == "__main__":
-    print("BaseOperator is abstract. Run a concrete module, e.g. `python -m TableAgent.QA.operators.table_operator`.")
+    print("BaseOperator is abstract. Run a concrete module, e.g. `python -m TableAgent.stages.qa.operators.table_operator`.")

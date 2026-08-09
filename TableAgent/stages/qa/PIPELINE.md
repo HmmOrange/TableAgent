@@ -81,6 +81,9 @@ embedding, entity, and metadata evidence, then returns the selected workbook, sh
 context. Embedding export requires a configured real provider and model; mock or missing embedding providers are
 rejected when embedding is requested.
 
+Corpus-side workbook, sheet, and table embeddings are prepared during structure extraction. Query-time retrieval
+embeds only the question and compares it with compatible stored vectors; it does not embed candidate cards on demand.
+
 The retriever is an input-selection layer. Once a source is selected, the same general QA orchestration executes it.
 
 ## Validation And Fallback

@@ -185,6 +185,17 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "structure").exists()
 
 
+def test_service_prepares_corpus_embeddings_for_injected_client(tmp_path: Path):
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        embedding_client=FakeEmbeddingClient(),
+    )
+
+    assert service._prepare_retrieval_embeddings("all", requested=False) is True
+    assert service._prepare_retrieval_embeddings("qa", requested=False) is True
+    assert service._prepare_retrieval_embeddings("structure", requested=False) is False
+
+
 def test_service_preserves_not_good_structure_artifacts(tmp_path: Path):
     class NotGoodPipeline(FakePipeline):
         def verify_samples(self, samples, force=False):
@@ -655,7 +666,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert answer["sheets"] == ["Sheet", "Archive"]
     assert answer["retrieval"]["mode"] == "table_agent_hybrid"
     assert answer["retrieval"]["document_id"] == "doc-sales"
-    assert answer["retrieval"]["embedding_used"] is True
+    assert answer["retrieval"]["embedding_used"] is False
     assert answer["retrieval"]["candidate_count"] == 3
     assert answer["retrieval"]["workbook_count"] == 2
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1

@@ -3,12 +3,12 @@
 This package preserves the existing prepared-source API while providing the contract
 for table-level retrieval.
 
-## Existing pipeline compatibility
+## Stage API
 
-Existing code continues to use:
+The canonical retriever API is:
 
 ```python
-from TableAgent.pipeline.retrieval import SourceRetriever
+from TableAgent.stages.retrieval import SourceRetriever
 ```
 
 `SourceRetriever` still ranks prepared SiFlex workbook/sheet artifacts using lexical
@@ -19,7 +19,7 @@ scores, optional embeddings, and optional LLM reranking.
 Implement `TableRetrieverContract` or subclass the placeholder `TableRetriever`:
 
 ```python
-from TableAgent.pipeline.retrieval import (
+from TableAgent.stages.retrieval import (
     TableCandidate,
     TableRetriever,
     TableSearchRequest,
@@ -41,10 +41,9 @@ placeholder raises `NotImplementedError`.
 Shared reusable pieces are split by responsibility:
 
 ```text
-cards.py             Retrieval-card construction
-contracts.py         TableRetrieverContract and placeholder implementation
+candidate_loading.py Load prepared structure-stage records
+contracts.py         Stage inputs/outputs and table retrieval contracts
 embeddings.py        Mock and OpenAI-compatible embedding clients
-models.py            SourceCandidate, TableCandidate, TableSearchRequest
 reranking.py         Structured selected-index handling
 scoring.py           Score normalization, cosine similarity, hybrid scoring
 source_retriever.py  Existing prepared workbook/sheet behavior
@@ -58,8 +57,7 @@ individual table while preserving the sheet-level retriever during migration.
 ### 1. Preserve the current source retriever
 
 Do not remove or change the public behavior of `SourceRetriever.select()`. It is still
-used by the prepared SiFlex path to choose one workbook and sheet. Existing imports
-from `TableAgent.pipeline.retrieval` must continue to work.
+used by the prepared SiFlex path to choose one workbook and sheet.
 
 Table-level retrieval can initially run after source preparation and before QA. Once it
 is stable, the pipeline may use it directly instead of selecting only one sheet.
@@ -79,7 +77,7 @@ sources/<workbook-id>/
     table.html
 ```
 
-Read each `structure.yaml` and create one `TableCandidate` for every table entry. Do
+Read prepared structure-stage records and create one `TableCandidate` for every table entry. Do
 not create a candidate for reserved blocks such as `relations`.
 
 Each candidate should include:
@@ -140,7 +138,9 @@ Question or subtask
     ↓
 Lexical table ranking
     ↓
-Embedding similarity
+Embed the query once
+    ↓
+Compare with structure-stage workbook/sheet/table vectors
     ↓
 Weighted hybrid score
     ↓
@@ -152,8 +152,10 @@ Final TableCandidate list
 ```
 
 Reuse helpers from `embeddings.py` and `scoring.py` instead of duplicating the source
-retriever's implementation. Cache table-card embeddings using a stable fingerprint of
-the retrieval card and embedding model.
+retriever's implementation. Workbook, sheet, and table-card embeddings belong to the
+structure stage and are persisted with the retrieval-card artifacts. Retrieval must
+never generate missing candidate vectors; it embeds only the query and falls back to
+lexical ranking for artifacts without a compatible prepared vector.
 
 The lexical and embedding stages should only retrieve candidates. They must not decide
 how to calculate the answer.

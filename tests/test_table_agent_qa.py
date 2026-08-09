@@ -17,13 +17,13 @@ from TableAgent.utils import (
     range_to_a1,
     load_table_structures,
 )
-from TableAgent.environment.qa_env import QAEnvironment
-from TableAgent.QA import TableQARunner
-from TableAgent.QA.runner import TokenCountingLLM
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
+from TableAgent.stages.qa import TableQARunner
+from TableAgent.stages.qa.runner import TokenCountingLLM
 from TableAgent.llm import LLMResponse
 from tests.mock_policy import MockActionPolicy
-from TableAgent.QA.agents import TableQAPlanner, TableQAAgent
-from TableAgent.QA.actions.write_plan import parse_planner_output
+from TableAgent.stages.qa.agents import TableQAPlanner, TableQAAgent
+from TableAgent.stages.qa.actions.write_plan import parse_planner_output
 
 # Setup paths
 STRUCTURE_PATH = "sample/structure.yaml"
@@ -506,7 +506,7 @@ def test_full_runner_pipeline():
 
 
 def test_runner_humanizes_header_id_in_final_answer():
-    from TableAgent.QA.actions.base_action import CodeGenerationRequest, CodeGenerationResult
+    from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest, CodeGenerationResult
 
     class HeaderIdAnswerPolicy:
         def run(self, request: CodeGenerationRequest) -> CodeGenerationResult:
@@ -535,8 +535,8 @@ def test_runner_humanizes_header_id_in_final_answer():
     assert runner.env.operators.get_header("table1", "score").label == "Score"
 
 def test_base_abstractions_usable():
-    from TableAgent.QA import BaseCodeGenerationAction, BaseReActAgent
-    from TableAgent.QA.actions.base_action import CodeGenerationRequest, CodeGenerationResult
+    from TableAgent.stages.qa import BaseCodeGenerationAction, BaseReActAgent
+    from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest, CodeGenerationResult
     from TableAgent.schema.subtask import SubTask
     from TableAgent.schema.qa import AgentOutput
     
@@ -711,8 +711,8 @@ def test_runner_persists_per_run_artifacts(tmp_path):
 
 
 def test_llm_code_generation_repairs_invalid_json_response():
-    from TableAgent.QA.actions.base_action import CodeGenerationRequest
-    from TableAgent.QA.actions.llm_code_generation import LLMCodeGenerationAction
+    from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest
+    from TableAgent.stages.qa.actions.llm_code_generation import LLMCodeGenerationAction
     from TableAgent.schema.subtask import SubTask
     from TableAgent.llm import LLMResponse
 
@@ -831,8 +831,8 @@ def test_runner_with_non_default_table_id(tmp_path):
 
 def test_no_table1_fallback_in_production_code():
     import pathlib
-    # Check all production code under TableAgent/QA
-    qa_dir = pathlib.Path("TableAgent/QA")
+    # Check the canonical QA-stage implementation.
+    qa_dir = pathlib.Path("TableAgent/stages/qa")
     
     # Check planner.py, runner.py, code-generation action
     files_to_check = [
@@ -938,12 +938,12 @@ def test_experience_format_truncates_large_observations():
 
 def test_operator_modules_have_runnable_smoke_entrypoints():
     modules = [
-        "TableAgent.QA.operators.base_operator",
-        "TableAgent.QA.operators.range_operator",
-        "TableAgent.QA.operators.filter_operator",
-        "TableAgent.QA.operators.structure_operator",
-        "TableAgent.QA.operators.workbook_operator",
-        "TableAgent.QA.operators.table_operator",
+            "TableAgent.stages.qa.operators.base_operator",
+            "TableAgent.stages.qa.operators.range_operator",
+            "TableAgent.stages.qa.operators.filter_operator",
+            "TableAgent.stages.qa.operators.structure_operator",
+            "TableAgent.stages.qa.operators.workbook_operator",
+            "TableAgent.stages.qa.operators.table_operator",
     ]
 
     for module in modules:
