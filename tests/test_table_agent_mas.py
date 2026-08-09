@@ -313,6 +313,30 @@ def test_libreoffice_range_renderer_uses_pdfium_process_in_concurrent_mode(
     assert calls["timeout_seconds"] == 30
 
 
+def test_pdfium_subprocess_uses_worker_file_path(monkeypatch, tmp_path: Path):
+    from TableAgent.rendering.workbook import _render_pdf_page_in_subprocess
+
+    calls = {}
+    pdf_path = tmp_path / "input.pdf"
+    image_path = tmp_path / "render.png"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    def fake_run(command, **kwargs):
+        calls["command"] = command
+        Image.new("RGB", (100, 80), "white").save(image_path)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    _render_pdf_page_in_subprocess(pdf_path, image_path, 384, timeout_seconds=30)
+
+    assert image_path.is_file()
+    worker_path = Path(calls["command"][1])
+    assert worker_path.name == "pdfium_worker.py"
+    assert worker_path.parent.name == "rendering"
+    assert calls["command"][2:] == [str(pdf_path), str(image_path), "384"]
+
+
 def _hierarchical_workbook(path: Path) -> None:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
