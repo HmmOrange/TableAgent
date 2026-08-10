@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from TableAgent.configs import TableAgentConfig, load_config
-from TableAgent.pipeline.retrieval import SourceRetriever
-from TableAgent.pipeline.retrieval.scoring import bm25_scores
+from TableAgent.stages.retrieval import SourceRetriever
+from TableAgent.stages.retrieval.scoring import bm25_scores
 
 
 def _settings(tmp_path: Path, *, mode: str = "lexical") -> TableAgentConfig:

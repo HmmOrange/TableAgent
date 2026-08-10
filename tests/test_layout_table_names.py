@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-from TableAgent.structure.layout.parsing import _is_valid_structure, extract_layout_structure
+from TableAgent.stages.structure.layout.parsing import _is_valid_structure, extract_layout_structure
 
 
 @pytest.mark.parametrize(

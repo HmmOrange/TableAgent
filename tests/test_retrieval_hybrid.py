@@ -4,16 +4,19 @@ import shutil
 import tempfile
 from pathlib import Path
 import pytest
-from TableAgent.artifacts import write_sheet_retrieval_cards, write_workbook_retrieval_cards
+from TableAgent.stages.structure.retrieval_artifacts import (
+    write_sheet_retrieval_cards,
+    write_workbook_retrieval_cards,
+)
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.retrieval import (
+from TableAgent.stages.retrieval import (
     MockEmbeddingModel,
     SourceRetriever,
     build_metadata_retrieval_card,
     build_sheet_metadata_payload,
     build_table_retrieval_cards,
 )
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.llm import BaseLLM, LLMResponse
 
 class FakeLLM(BaseLLM):
@@ -579,6 +582,23 @@ def test_perfect_retrieval_excludes_sheet3_for_maintenance_workbook():
     )
 
 def test_hybrid_retrieval_with_mock_embedding(temp_sources_dir):
+    embedding_client = MockEmbeddingModel()
+    write_sheet_retrieval_cards(
+        temp_sources_dir / "dummy_Sheet1",
+        Path("dummy.xlsx"),
+        "Sheet1",
+        include_embeddings=True,
+        embedding_client=embedding_client,
+        embedding_model="mock-hash-embedding",
+    )
+    write_sheet_retrieval_cards(
+        temp_sources_dir / "dummy_Sheet2",
+        Path("dummy.xlsx"),
+        "Sheet2",
+        include_embeddings=True,
+        embedding_client=embedding_client,
+        embedding_model="mock-hash-embedding",
+    )
     config = TableAgentConfig.from_config({
         "artifact_dir": str(temp_sources_dir.parent),
         "source_artifact_dir": str(temp_sources_dir.parent),
@@ -613,17 +633,35 @@ def test_hybrid_retrieval_with_mock_embedding(temp_sources_dir):
 
 
 def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path):
+    class QueryEmbeddingClient:
+        model = "prepared-model"
+
+        def __init__(self):
+            self.calls = []
+
+        async def encode(self, texts):
+            values = list(texts) if isinstance(texts, list) else [texts]
+            self.calls.append(values)
+            return [[1.0, 0.0] for _ in values]
+
     config = TableAgentConfig.from_config({
         "artifact_dir": str(tmp_path / "artifacts"),
         "source_artifact_dir": str(tmp_path / "sources"),
         "retrieval_rerank_with_llm": False,
         "retrieval_top_k": 3,
         "retrieval_candidate_max_chars": 1000,
-        "retrieval_embedding_provider": "mock",
+        "retrieval_embedding_provider": None,
         "retrieval_lexical_weight": 0.5,
         "retrieval_embedding_weight": 0.5,
     })
-    retriever = SourceRetriever(config, FakeLLM(), None, None)
+    embedding_client = QueryEmbeddingClient()
+    retriever = SourceRetriever(
+        config,
+        FakeLLM(),
+        None,
+        None,
+        embedding_client=embedding_client,
+    )
     sales_path = tmp_path / "sales.xlsx"
     maintenance_path = tmp_path / "maintenance.xlsx"
 
@@ -645,6 +683,11 @@ def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path)
                 "retrieval_level": "table",
                 "retrieval_card": "Regional revenue score and quarterly sales results",
                 "structure_yaml": "table1:\n  sheet: Summary\n  headers: []\n",
+                "embedding": {
+                    "model": "prepared-model",
+                    "dimension": 2,
+                    "values": [1.0, 0.0],
+                },
             },
             {
                 "id": "maintenance:plan",
@@ -655,6 +698,11 @@ def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path)
                 "retrieval_level": "table",
                 "retrieval_card": "Equipment maintenance schedule and spare parts",
                 "structure_yaml": "table1:\n  sheet: Plan\n  headers: []\n",
+                "embedding": {
+                    "model": "prepared-model",
+                    "dimension": 2,
+                    "values": [0.0, 1.0],
+                },
             },
         ],
     )
@@ -663,6 +711,7 @@ def test_indexed_hybrid_retrieval_selects_one_workbook_and_keeps_audit(tmp_path)
     assert candidate.artifact_id == "sales:summary"
     assert candidate.workbook_path == sales_path
     assert candidate.embedding_used is True
+    assert embedding_client.calls == [["regional revenue score"]]
     assert [row["artifact_id"] for row in candidate.retrieval_audit] == [
         "sales:summary",
         "maintenance:plan",
@@ -737,7 +786,7 @@ def test_no_provider_does_not_instantiate_live_embedding(temp_sources_dir):
     })
     llm = FakeLLM()
 
-    from TableAgent.pipeline import retrieval
+    from TableAgent.stages import retrieval
 
     mock_embedding_called = False
 
@@ -894,7 +943,7 @@ table2:
 
 def test_candidate_prompt_text_labels(temp_sources_dir):
     from TableAgent.pipeline.prompting import PromptBuilder
-    from TableAgent.pipeline.common import SourceCandidate
+    from TableAgent.stages.retrieval.contracts import SourceCandidate
     
     config = TableAgentConfig.from_config({
         "retrieval_candidate_max_chars": 1000,

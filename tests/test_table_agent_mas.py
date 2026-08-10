@@ -12,18 +12,18 @@ import openpyxl
 import yaml
 from PIL import Image
 
-from TableAgent.structure.layout.agent import (
+from TableAgent.stages.structure.layout.agent import (
     LayoutAgent,
     _union_existing_data_ranges,
 )
 from TableAgent.configs import TableAgentConfig
-from TableAgent.perception.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
-from TableAgent.pipeline.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
+from TableAgent.stages.structure.metadata import ExStructMetadataExtractor, SheetMetadata
+from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow, _has_enough_data, _range_fully_covered
+from TableAgent.stages.structure.traversal import Direction, DirectionQueue, TraversalTask, Viewport, corner_viewports
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.rendering.workbook import _render_xlsx_range_with_libreoffice
-from TableAgent.structure.verification import DeterministicVerifier
-from TableAgent.structure.verification.checks import verify_structure
+from TableAgent.stages.structure.verification import DeterministicVerifier
+from TableAgent.stages.structure.verification.checks import verify_structure
 from TableAgent.llm import LLMResponse
 
 
@@ -311,6 +311,30 @@ def test_libreoffice_range_renderer_uses_pdfium_process_in_concurrent_mode(
     assert calls["pdf_path"].suffix == ".pdf"
     assert calls["resolution"] == 384
     assert calls["timeout_seconds"] == 30
+
+
+def test_pdfium_subprocess_uses_worker_file_path(monkeypatch, tmp_path: Path):
+    from TableAgent.rendering.workbook import _render_pdf_page_in_subprocess
+
+    calls = {}
+    pdf_path = tmp_path / "input.pdf"
+    image_path = tmp_path / "render.png"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    def fake_run(command, **kwargs):
+        calls["command"] = command
+        Image.new("RGB", (100, 80), "white").save(image_path)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    _render_pdf_page_in_subprocess(pdf_path, image_path, 384, timeout_seconds=30)
+
+    assert image_path.is_file()
+    worker_path = Path(calls["command"][1])
+    assert worker_path.name == "pdfium_worker.py"
+    assert worker_path.parent.name == "rendering"
+    assert calls["command"][2:] == [str(pdf_path), str(image_path), "384"]
 
 
 def _hierarchical_workbook(path: Path) -> None:
@@ -903,7 +927,7 @@ def removed_semantic_verifier_does_not_accept_tool_error(tmp_path: Path, monkeyp
             "feedback": "Deterministic verifier tool failed before validating the structure.",
         }
 
-    monkeypatch.setattr("TableAgent.structure.layout.agent._execute_verifier", broken_verifier)
+    monkeypatch.setattr("TableAgent.stages.structure.layout.agent._execute_verifier", broken_verifier)
 
     result = VerificationAgent(SemanticRepairVerificationLLM(structure)).run(
         workbook_path=workbook_path,

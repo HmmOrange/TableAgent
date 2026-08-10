@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shutil
 import tempfile
@@ -20,21 +21,25 @@ from TableAgent.artifacts import (
     build_workbook_schema,
     copy_artifact_tree,
     sheet_artifact_dir,
-    write_sheet_retrieval_cards,
-    write_workbook_retrieval_cards,
     workbook_artifact_dir,
 )
 from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
-from TableAgent.pipeline.common import safe_name
-from TableAgent.pipeline.retrieval.embeddings import (
+from TableAgent.utils.paths import safe_name
+from TableAgent.stages.retrieval.embeddings import (
+    MockEmbeddingModel,
     OpenAICompatibleEmbeddingClient,
 )
-from TableAgent.artifacts.retrieval_cards import (
+from TableAgent.stages.structure.retrieval_artifacts import (
     DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL,
+    write_sheet_retrieval_cards,
+    write_workbook_retrieval_cards,
 )
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
+from TableAgent.stages.qa import QAInput
+from TableAgent.stages.retrieval import RetrievalInput
+from TableAgent.stages.structure import StructureStage
 
 
 Stage = Literal["structure", "qa", "all"]
@@ -136,6 +141,10 @@ class TableAgentService:
                 source_dir = workspace_dir / "structure"
                 table_path = ";".join(str(item["path"]) for item in normalized)
                 workbook_identities = self._workbook_identities(normalized)
+                prepare_retrieval_embeddings = self._prepare_retrieval_embeddings(
+                    stage,
+                    requested=embed,
+                )
 
                 if worker_count == 1:
                     base_sample = self._sample(
@@ -146,14 +155,15 @@ class TableAgentService:
                         selected_sheets=selected_sheets,
                         workbook_identities=workbook_identities,
                     )
-                    pipeline = self.pipeline_factory(
+                    pipeline = self._create_pipeline(
                         llm_client=self._answer_client(),
                         layout_vlm_client=self._layout_client(),
                         config=self._pipeline_config(
                             "structure",
                             output_dir,
                             source_dir,
-                            embed=False,
+                            embed=embed,
+                            prepare_embeddings=prepare_retrieval_embeddings,
                             max_workers=worker_count,
                         ),
                     )
@@ -189,6 +199,8 @@ class TableAgentService:
                                 sample,
                                 output_dir=output_dir,
                                 source_dir=source_dir,
+                                embed=embed,
+                                prepare_embeddings=prepare_retrieval_embeddings,
                                 max_workers=worker_count,
                             ),
                             structure_samples,
@@ -205,6 +217,25 @@ class TableAgentService:
                 if failed:
                     raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
 
+                structure_embedding_client = None
+                structure_embedding_model = DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL
+                if prepare_retrieval_embeddings:
+                    (
+                        structure_embedding_client,
+                        structure_embedding_model,
+                    ) = self._structure_embedding_backend(requested=embed)
+                StructureStage.finalize_retrieval_artifacts(
+                    source_dir,
+                    [
+                        (str(item["name"]), str(item["sha256"]))
+                        for item in normalized
+                    ],
+                    selected_sheets=selected_sheets,
+                    include_embeddings=prepare_retrieval_embeddings,
+                    embedding_client=structure_embedding_client,
+                    embedding_model=structure_embedding_model,
+                )
+
                 if stage in {"qa", "all"}:
                     samples = [
                         self._sample(
@@ -218,7 +249,7 @@ class TableAgentService:
                         for index, query in enumerate(query_list, start=1)
                     ]
                     if worker_count == 1:
-                        pipeline = self.pipeline_factory(
+                        pipeline = self._create_pipeline(
                             llm_client=self._answer_client(),
                             layout_vlm_client=None,
                             config=self._pipeline_config(
@@ -354,7 +385,7 @@ class TableAgentService:
             if not grouped:
                 raise ValueError("Indexed artifacts do not match any uploaded workbook")
 
-            pipeline = self.pipeline_factory(
+            pipeline = self._create_pipeline(
                 llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
@@ -566,7 +597,7 @@ class TableAgentService:
 
         with tempfile.TemporaryDirectory(prefix="table-agent-select-") as workspace_text:
             workspace_dir = Path(workspace_text)
-            pipeline = self.pipeline_factory(
+            pipeline = self._create_pipeline(
                 llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
@@ -578,13 +609,13 @@ class TableAgentService:
                 ),
             )
             responses = []
-            candidate = pipeline.source_retriever.select_indexed(
+            candidate = pipeline.retrieval_stage.run_indexed(RetrievalInput(
                 question=normalized_query,
                 artifacts=eligible_artifacts,
                 workbook_paths=workbook_paths,
                 responses=responses,
                 fit_context=pipeline._fit_context,
-            )
+            )).candidate
         if candidate is None:
             raise RuntimeError("TableAgent hybrid retrieval found no usable candidate")
 
@@ -708,7 +739,7 @@ class TableAgentService:
                     or isinstance(artifact.get("metadata"), dict)
                 )
             ]
-            pipeline = self.pipeline_factory(
+            pipeline = self._create_pipeline(
                 llm_client=self._answer_client_for_mode(mode),
                 layout_vlm_client=None,
                 config=self._pipeline_config(
@@ -722,13 +753,13 @@ class TableAgentService:
                 ),
             )
             responses = []
-            candidate = pipeline.source_retriever.select_indexed(
+            candidate = pipeline.retrieval_stage.run_indexed(RetrievalInput(
                 question=normalized_query,
                 artifacts=eligible_artifacts,
                 workbook_paths=workbook_paths,
                 responses=responses,
                 fit_context=pipeline._fit_context,
-            )
+            )).candidate
             if candidate is None:
                 raise RuntimeError(
                     "Indexed artifacts did not contain any usable verified structures"
@@ -824,20 +855,21 @@ class TableAgentService:
                 f"Question: {normalized_query}\n\n"
                 f"Selected retrieval card:\n{selected_card}"
             )
-            answer_response, qa_info = pipeline._run_verified_qa(
+            qa_output = pipeline.qa_stage.run(QAInput(
                 question=normalized_query,
                 structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=output_dir / "qa",
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=related_structure_paths,
+                related_structure_paths=tuple(related_structure_paths),
                 enable_final_answer_review=(
                     True
                     if qa_enable_final_review is None
                     else qa_enable_final_review
                 ),
-            )
+            ))
+            answer_response, qa_info = qa_output.response, qa_output.metadata
             public_qa_info = dict(qa_info)
             public_qa_info.pop("artifacts", None)
             retrieval_payload = self._indexed_retrieval_payload(
@@ -1012,6 +1044,27 @@ class TableAgentService:
             )
         return self._layout_vlm_client
 
+    def _create_pipeline(
+        self,
+        *,
+        llm_client: Any,
+        layout_vlm_client: Any,
+        config: dict[str, Any],
+    ) -> Any:
+        kwargs = {
+            "llm_client": llm_client,
+            "layout_vlm_client": layout_vlm_client,
+            "config": config,
+        }
+        if self._embedding_client is not None:
+            try:
+                parameters = inspect.signature(self.pipeline_factory).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "embedding_client" in parameters:
+                kwargs["embedding_client"] = self._embedding_client
+        return self.pipeline_factory(**kwargs)
+
     def _worker_client(self, kind: Literal["llm", "vlm"]) -> tuple[Any, bool]:
         """Return an isolated model client for a concurrent pipeline task."""
         if kind == "llm":
@@ -1035,6 +1088,8 @@ class TableAgentService:
         *,
         output_dir: Path,
         source_dir: Path,
+        embed: bool,
+        prepare_embeddings: bool,
         max_workers: int,
     ) -> list[Any]:
         llm_client, llm_owned = self._worker_client("llm")
@@ -1042,14 +1097,15 @@ class TableAgentService:
         layout_owned = False
         try:
             layout_client, layout_owned = self._worker_client("vlm")
-            pipeline = self.pipeline_factory(
+            pipeline = self._create_pipeline(
                 llm_client=llm_client,
                 layout_vlm_client=layout_client,
                 config=self._pipeline_config(
                     "structure",
                     output_dir,
                     source_dir,
-                    embed=False,
+                    embed=embed,
+                    prepare_embeddings=prepare_embeddings,
                     max_workers=max_workers,
                 ),
             )
@@ -1069,7 +1125,7 @@ class TableAgentService:
     ) -> PipelineOutput:
         llm_client, llm_owned = self._worker_client("llm")
         try:
-            pipeline = self.pipeline_factory(
+            pipeline = self._create_pipeline(
                 llm_client=llm_client,
                 layout_vlm_client=None,
                 config=self._pipeline_config(
@@ -1096,6 +1152,42 @@ class TableAgentService:
             raise ValueError("max_workers must be a positive integer")
         return resolved
 
+    def _prepare_retrieval_embeddings(
+        self,
+        stage: Stage,
+        *,
+        requested: bool,
+    ) -> bool:
+        if requested:
+            return True
+        if stage not in {"qa", "all"}:
+            return False
+        # An injected client is an explicit retrieval configuration even when
+        # no provider name is present in the service config.
+        if self._embedding_client is not None:
+            return True
+        agent_config = self.config.get("table_agent") or {}
+        if not isinstance(agent_config, dict):
+            return False
+        routing = agent_config.get("routing") or {}
+        retrieval = routing.get("retrieval") if isinstance(routing, dict) else {}
+        if not isinstance(retrieval, dict):
+            retrieval = {}
+        if bool(agent_config.get("perfect_retrieval", False)):
+            mode = "perfect"
+        elif "run_retrieval" in agent_config:
+            mode = "auto" if bool(agent_config.get("run_retrieval")) else "off"
+        else:
+            mode = str(retrieval.get("mode", "auto")).strip().lower()
+        if mode not in {"auto", "hybrid", "indexed"}:
+            return False
+        provider = (
+            self.embedding_profile
+            or agent_config.get("retrieval_embedding_provider")
+            or retrieval.get("embedding_provider")
+        )
+        return bool(str(provider or "").strip())
+
     def _pipeline_config(
         self,
         phase: Stage,
@@ -1103,6 +1195,7 @@ class TableAgentService:
         source_dir: Path,
         *,
         embed: bool = False,
+        prepare_embeddings: bool = False,
         qa_max_replans: int | None = None,
         retrieval_rerank_with_llm: bool | None = None,
         mode: str | None = None,
@@ -1119,6 +1212,7 @@ class TableAgentService:
                 "structure_cache_dir": str(source_dir / "cache"),
                 "cache_namespace": "service",
                 "embed_retrieval_cards": bool(embed),
+                "prepare_retrieval_embeddings": bool(prepare_embeddings),
             }
         )
         if max_workers is not None:
@@ -1171,6 +1265,25 @@ class TableAgentService:
         if not self._embedding_model:
             raise ValueError("The configured retrieval embedding model name is empty")
         return self._embedding_client, self._embedding_model
+
+    def _structure_embedding_backend(self, *, requested: bool) -> tuple[Any, str]:
+        table_agent_config = self.config.get("table_agent") or {}
+        routing = (
+            table_agent_config.get("routing")
+            if isinstance(table_agent_config, dict)
+            else {}
+        ) or {}
+        retrieval = routing.get("retrieval") if isinstance(routing, dict) else {}
+        if not isinstance(retrieval, dict):
+            retrieval = {}
+        provider = self.embedding_profile or (
+            table_agent_config.get("retrieval_embedding_provider")
+            if isinstance(table_agent_config, dict)
+            else None
+        ) or retrieval.get("embedding_provider")
+        if str(provider or "").strip().lower() == "mock" and not requested:
+            return MockEmbeddingModel(), DEFAULT_RETRIEVAL_CARD_EMBEDDING_MODEL
+        return self._retrieval_embedding_backend()
 
     def _build_workbook_artifacts(
         self,

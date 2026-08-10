@@ -6,7 +6,7 @@ import openpyxl
 import pytest
 import yaml
 
-from TableAgent.environment.qa_env import QAEnvironment
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
 
 
 def _write_structure(path: Path) -> None:

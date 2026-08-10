@@ -1,7 +1,7 @@
 from __future__ import annotations
 import yaml
 from typing import Any, Dict, List
-from TableAgent.schema.header import Header
+from TableAgent.domain.structure import Header
 from TableAgent.utils.excel_utils import parse_a1_range
 
 

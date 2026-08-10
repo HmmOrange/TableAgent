@@ -20,5 +20,6 @@ config.yaml
 .codegraph
 
 AGENTS.md
+REFACTOR_SKILL.md
 
 .DS_Store

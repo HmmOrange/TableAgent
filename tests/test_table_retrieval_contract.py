@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from TableAgent.environment.qa_env import QAEnvironment
-from TableAgent.pipeline.retrieval import (
+from TableAgent.stages.qa.environment.qa_env import QAEnvironment
+from TableAgent.stages.retrieval import (
     MockEmbeddingModel,
     OpenAICompatibleEmbeddingClient,
     SourceRetriever,
@@ -10,7 +10,7 @@ from TableAgent.pipeline.retrieval import (
     TableRetrieverContract,
     TableSearchRequest,
 )
-from TableAgent.pipeline.retrieval.source_retriever import SourceRetriever as SourceRetrieverImplementation
+from TableAgent.stages.retrieval.source_retriever import SourceRetriever as SourceRetrieverImplementation
 
 
 SAMPLE_WORKBOOK = Path("sample/multitab.xlsx")

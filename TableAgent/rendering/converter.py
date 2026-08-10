@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 
 @dataclass(frozen=True)

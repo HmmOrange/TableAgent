@@ -6,19 +6,33 @@ from typing import Any
 
 from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
-from TableAgent.pipeline.common import (
-    display_path,
-    has_workbook_sources,
-    read_image_tiles,
-    token_usage,
-)
-from TableAgent.rendering.converter import sample_to_xlsx
-from TableAgent.schema import EvalSample
-from TableAgent.structure.layout.parsing import _is_valid_structure
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
+from TableAgent.pipeline.sample import has_workbook_sources
+from TableAgent.utils.llm_metrics import token_usage
+from TableAgent.utils.paths import display_path
+from TableAgent.pipeline.sample import EvalSample
+from TableAgent.stages.qa import QAInput
+from TableAgent.stages.retrieval import RetrievalInput
 
 
-class PipelineRunMixin:
-    """Execute prepared or cached TableAgent QA runs."""
+def serialize_config_value(value: Any) -> Any:
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        return {key: serialize_config_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [serialize_config_value(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+class PipelineRunner(RuntimeComponent):
+    """Execute prepared or cached QA through explicit stage contracts."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def run(self, sample: EvalSample) -> PipelineOutput:
         if self.settings.phase == "structure":
@@ -32,13 +46,14 @@ class PipelineRunMixin:
                         [sample], regenerate_invalid=True, force=True
                     )
             responses: list[LLMResponse] = []
-            candidate = (
-                self.source_retriever.select_perfect(sample)
-                if self.settings.perfect_retrieval
-                else self.source_retriever.select(
-                    sample, responses, self._fit_context
+            candidate = self.stages.retrieval.run(
+                RetrievalInput(
+                    sample=sample,
+                    responses=responses,
+                    fit_context=self._fit_context,
+                    perfect=self.settings.perfect_retrieval,
                 )
-            )
+            ).candidate
             if candidate is None:
                 raise RuntimeError(
                     f"Missing or stale structure cache for sample {sample.sample_id!r}; "
@@ -61,105 +76,10 @@ class PipelineRunMixin:
             )
         return self._run_cached_qa(sample, record)
 
-    def _run_legacy(self, sample: EvalSample) -> PipelineOutput:
-        start_time = self.start_timer()
-        responses: list[LLMResponse] = []
-
-        self._progress("prepare", sample=sample.sample_id)
-        self.source_preparer.prepare([sample], regenerate_invalid=False)
-        self._progress("retrieval", sample=sample.sample_id)
-        candidate = self.source_retriever.select(
-            sample, responses, self._fit_context
-        )
-        if candidate is not None:
-            return self._run_prepared_source(
-                sample, candidate, responses, start_time
-            )
-
-        sample_dir = self._sample_dir(sample)
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        workbook = sample_to_xlsx(sample, sample_dir / "table.xlsx")
-        sheet_name = workbook.sheet_names[0]
-        metadata = self._metadata_for_workbook_sheet(workbook.path, sheet_name)
-        workflow_result = self.layout_workflow.run(
-            workbook_path=workbook.path,
-            sheet_name=sheet_name,
-            metadata=metadata,
-            output_dir=sample_dir,
-        )
-        responses.extend(workflow_result.responses)
-        structure_text = workflow_result.structure_text
-
-        structure_path = sample_dir / "structure.yaml"
-        if _is_valid_structure(structure_text):
-            structure_path.write_text(structure_text, encoding="utf-8")
-        else:
-            structure_path.unlink(missing_ok=True)
-        image_path = sample_dir / "table.png"
-        html_path = sample_dir / "table.html"
-        table_context = self._fit_context(sample.table_content)
-        self._progress(
-            "qa",
-            sample=sample.sample_id,
-            workbook=workbook.path.name,
-            sheet=sheet_name,
-        )
-        answer_response, qa_info = self._run_verified_qa(
-            question=sample.question,
-            structure_path=structure_path,
-            workbook_path=workbook.path,
-            qa_artifact_dir=self._qa_sample_dir(sample),
-            fallback_prompt=self.prompts.answer_prompt(
-                sample, table_context, structure_text
-            ),
-        )
-        responses.append(answer_response)
-        self._progress(
-            "done",
-            sample=sample.sample_id,
-            workbook=workbook.path.name,
-            sheet=sheet_name,
-        )
-
-        return PipelineOutput(
-            sample_id=sample.sample_id,
-            structured_table=structure_text,
-            predicted_answer=answer_response.content,
-            latency=self.stop_timer(start_time),
-            token_usage=token_usage(responses),
-            metadata={
-                "structure_path": display_path(structure_path),
-                "workbook_path": str(workbook.path),
-                "image_path": display_path(
-                    image_path
-                    if image_path.is_file()
-                    else workflow_result.image_path
-                )
-                if workflow_result.image_path
-                else None,
-                "html_path": display_path(html_path) if html_path.is_file() else None,
-                "workbook_source_format": workbook.source_format,
-                "workbook_sheets": workbook.sheet_names,
-                "verification": workflow_result.verification,
-                "artifact_dir": display_path(sample_dir),
-                "image_tiles": read_image_tiles(sample_dir),
-                "metadata_yaml_path": display_path(sample_dir / "metadata.yaml"),
-                "render_metadata_path": display_path(
-                    sample_dir / "table.metadata.json"
-                )
-                if (sample_dir / "table.metadata.json").is_file()
-                else None,
-                "changelog_path": display_path(workflow_result.changelog_path),
-                "events_path": display_path(workflow_result.events_path),
-                "iteration_artifact_dir": display_path(sample_dir / "iterations"),
-                "qa": qa_info,
-            },
-        )
-
     def _run_cached_qa(self, sample, record) -> PipelineOutput:
         start_time = self.start_timer()
         structure_text = record.structure_path.read_text(encoding="utf-8")
-        answer_response, qa_info = self._run_verified_qa(
+        qa_output = self.stages.qa.run(QAInput(
             question=sample.question,
             structure_path=record.structure_path,
             workbook_path=record.workbook_path,
@@ -167,7 +87,8 @@ class PipelineRunMixin:
             fallback_prompt=self.prompts.answer_prompt(
                 sample, self._fit_context(sample.table_content), structure_text
             ),
-        )
+        ))
+        answer_response, qa_info = qa_output.response, qa_output.metadata
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=structure_text,
@@ -215,16 +136,14 @@ class PipelineRunMixin:
             },
         }
 
+    @staticmethod
+    def _client_config(client: Any) -> dict[str, Any]:
+        return {
+            "model_name": getattr(client, "model_name", None),
+            "temperature": getattr(client, "temperature", None),
+            "max_tokens": getattr(client, "max_tokens", None),
+        }
+
     @classmethod
     def _serialize_config_value(cls, value: Any) -> Any:
-        if is_dataclass(value):
-            value = asdict(value)
-        if isinstance(value, dict):
-            return {
-                key: cls._serialize_config_value(item) for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple)):
-            return [cls._serialize_config_value(item) for item in value]
-        if isinstance(value, Path):
-            return str(value)
-        return value
+        return serialize_config_value(value)

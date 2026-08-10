@@ -2,7 +2,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.rendering.converter import sample_to_xlsx
 
 

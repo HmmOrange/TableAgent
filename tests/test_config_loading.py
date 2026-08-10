@@ -6,8 +6,8 @@ import yaml
 
 from TableAgent.configs import load_config, resolve_llm_config, resolve_vlm_config
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.pipeline_run import PipelineRunMixin
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.pipeline_run import PipelineRunner
+from TableAgent.pipeline.sample import EvalSample
 
 CONFIG_PATH = Path("config.example.yaml")
 
@@ -62,7 +62,7 @@ def test_table_agent_routing_config_is_loaded_and_used():
 def test_table_agent_settings_are_json_serializable_for_runtime_reporting():
     settings = TableAgentConfig.from_config(load_config(CONFIG_PATH)["table_agent"])
 
-    payload = PipelineRunMixin._serialize_config_value(settings)
+    payload = PipelineRunner._serialize_config_value(settings)
 
     assert payload["routing"]["retrieval"]["mode"] == "auto"
     assert json.loads(json.dumps(payload))["routing"]["qa"]["mode"] == "auto"

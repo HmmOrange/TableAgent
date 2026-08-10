@@ -1,9 +1,6 @@
-from __future__ import annotations
-
-from TableAgent.schema import EvalSample
-
 from TableAgent.configs import TableAgentConfig
-from TableAgent.pipeline.common import SourceCandidate
+from TableAgent.pipeline.sample import EvalSample
+from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 
 class PromptBuilder:
@@ -60,3 +57,6 @@ class PromptBuilder:
                 f"retrieval_card:\n{card}"
             )
         return "\n\n".join(lines)
+
+
+__all__ = ["PromptBuilder"]

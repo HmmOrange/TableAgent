@@ -3,6 +3,13 @@
 TableAgent extracts verified table structure from Excel workbooks and answers
 natural-language questions over one or more sheets.
 
+## Architecture
+
+Phase-specific implementation lives under `TableAgent/stages/structure`,
+`TableAgent/stages/retrieval`, and `TableAgent/stages/qa`. Cross-stage helpers live
+under `TableAgent/shared`, while `TableAgent/pipeline` composes the stages. See
+[`TableAgent/stages/README.md`](TableAgent/stages/README.md) for the ownership map.
+
 ## Requirements
 
 - Python 3.13 or newer
@@ -140,6 +147,11 @@ dimension, and vector values. TableAgent uses
 OpenAI-compatible embedding model. Ingestion rejects missing or `mock` providers so
 production artifacts cannot silently contain test embeddings. The example configuration
 uses `BAAI/bge-m3` through `TABLE_AGENT_EMBEDDING_BASE_URL`.
+
+Workbook, sheet, and table vectors are corpus artifacts owned by the structure
+stage. End-to-end `qa` and `all` runs prepare temporary vectors before retrieval;
+retrieval embeds only the incoming query. `--embed` controls whether those prepared
+vectors are also included in persisted ingestion output.
 
 The returned `retrieval_records` are ready for an external index. Sheet- and
 table-level records include the sheet's `structure_yaml`, while every record also
