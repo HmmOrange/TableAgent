@@ -13,7 +13,7 @@ _EXPORTS = {
     "StructureCacheRecord": (".cache", "StructureCacheRecord"),
     "StructureInput": (".contracts", "StructureInput"),
     "StructureOutput": (".contracts", "StructureOutput"),
-    "StructurePipelineMixin": (".pipeline", "StructurePipelineMixin"),
+    "StructurePipeline": (".pipeline", "StructurePipeline"),
     "StructureStage": (".stage", "StructureStage"),
     "TableLayoutWorkflow": (".layout.workflow", "TableLayoutWorkflow"),
     "TraversalTask": (".traversal", "TraversalTask"),

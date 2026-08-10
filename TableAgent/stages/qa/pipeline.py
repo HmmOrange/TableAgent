@@ -8,11 +8,17 @@ from typing import Any
 import yaml
 
 from TableAgent.llm import LLMResponse
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
+from TableAgent.pipeline.pipeline_run import serialize_config_value
 from TableAgent.stages.qa.runner import TableQARunner
 
 
-class PipelineQAMixin:
+class VerifiedQAPipeline(RuntimeComponent):
     """Run verified QA and provide conservative fallback helpers."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def _run_verified_qa(
         self,
@@ -62,7 +68,7 @@ class PipelineQAMixin:
             "llm_client": self.llm,
             "config": {
                 "table_agent": {
-                    **self._serialize_config_value(self.settings),
+                    **serialize_config_value(self.settings),
                     "artifact_dir": str(qa_artifact_dir),
                     "qa_excluded_sheet_names": list(excluded_sheet_names or []),
                     "qa_final_answer_review": enable_final_answer_review,
@@ -74,7 +80,7 @@ class PipelineQAMixin:
         }
         if self._progress_callback is not None:
             runner_kwargs["progress_callback"] = self._progress_callback
-        pipeline_module = sys.modules.get(self.__class__.__module__)
+        pipeline_module = sys.modules.get(self.runtime.__class__.__module__)
         runner_type = getattr(pipeline_module, "TableQARunner", TableQARunner)
         with runner_type(**runner_kwargs) as runner:
             result = runner.run(question)

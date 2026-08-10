@@ -8,6 +8,8 @@ from typing import Any
 import openpyxl
 
 from TableAgent.schema import EvalSample
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.shared.artifacts import prepared_verification
 from TableAgent.shared.pipeline import has_workbook_sources
 
@@ -17,8 +19,11 @@ from .metadata import SheetMetadata
 from .source_preparer import SourcePreparer
 
 
-class StructurePipelineMixin:
-    """Structure-stage entry points exposed through the pipeline orchestrator."""
+class StructurePipeline(RuntimeComponent):
+    """Coordinate structure work through the pipeline runtime contract."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def verify_samples(
         self,
@@ -26,7 +31,7 @@ class StructurePipelineMixin:
         *,
         force: bool = True,
     ) -> list[StructureCacheRecord]:
-        output = self.structure_stage.run(
+        output = self.stages.structure.run(
             StructureInput(samples=tuple(samples), force=force)
         )
         return list(output.records)

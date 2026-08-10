@@ -7,7 +7,7 @@ _EXPORTS = {
     "OpenAICompatibleEmbeddingClient": (".embeddings", "OpenAICompatibleEmbeddingClient"),
     "RetrievalInput": (".contracts", "RetrievalInput"),
     "RetrievalOutput": (".contracts", "RetrievalOutput"),
-    "RetrievalPipelineMixin": (".pipeline", "RetrievalPipelineMixin"),
+    "RetrievalPipeline": (".pipeline", "RetrievalPipeline"),
     "RetrievalStage": (".stage", "RetrievalStage"),
     "SourceCandidate": (".contracts", "SourceCandidate"),
     "SourceRetriever": (".source_retriever", "SourceRetriever"),

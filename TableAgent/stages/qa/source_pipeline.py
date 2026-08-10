@@ -9,6 +9,8 @@ import yaml
 
 from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.shared.pipeline import (
     SourceCandidate,
     display_path,
@@ -21,8 +23,11 @@ from TableAgent.schema import EvalSample
 from TableAgent.stages.qa import QAInput
 
 
-class PipelineSourceQAMixin:
+class SourceQAPipeline(RuntimeComponent):
     """Answer against a retrieved prepared source and report retrieval evidence."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def _run_prepared_source(
         self,
@@ -80,7 +85,7 @@ class PipelineSourceQAMixin:
                 "answer_route": "metadata_context",
             }
         else:
-            qa_output = self.qa_stage.run(QAInput(
+            qa_output = self.stages.qa.run(QAInput(
                 question=sample.question,
                 structure_path=structure_path,
                 workbook_path=candidate.workbook_path,

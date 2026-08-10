@@ -6,6 +6,8 @@ from typing import Any
 
 from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.shared.pipeline import (
     display_path,
     has_workbook_sources,
@@ -16,8 +18,23 @@ from TableAgent.stages.qa import QAInput
 from TableAgent.stages.retrieval import RetrievalInput
 
 
-class PipelineRunMixin:
-    """Execute prepared or cached TableAgent QA runs."""
+def serialize_config_value(value: Any) -> Any:
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        return {key: serialize_config_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [serialize_config_value(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+class PipelineRunner(RuntimeComponent):
+    """Execute prepared or cached QA through explicit stage contracts."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def run(self, sample: EvalSample) -> PipelineOutput:
         if self.settings.phase == "structure":
@@ -31,7 +48,7 @@ class PipelineRunMixin:
                         [sample], regenerate_invalid=True, force=True
                     )
             responses: list[LLMResponse] = []
-            candidate = self.retrieval_stage.run(
+            candidate = self.stages.retrieval.run(
                 RetrievalInput(
                     sample=sample,
                     responses=responses,
@@ -64,7 +81,7 @@ class PipelineRunMixin:
     def _run_cached_qa(self, sample, record) -> PipelineOutput:
         start_time = self.start_timer()
         structure_text = record.structure_path.read_text(encoding="utf-8")
-        qa_output = self.qa_stage.run(QAInput(
+        qa_output = self.stages.qa.run(QAInput(
             question=sample.question,
             structure_path=record.structure_path,
             workbook_path=record.workbook_path,
@@ -121,16 +138,14 @@ class PipelineRunMixin:
             },
         }
 
+    @staticmethod
+    def _client_config(client: Any) -> dict[str, Any]:
+        return {
+            "model_name": getattr(client, "model_name", None),
+            "temperature": getattr(client, "temperature", None),
+            "max_tokens": getattr(client, "max_tokens", None),
+        }
+
     @classmethod
     def _serialize_config_value(cls, value: Any) -> Any:
-        if is_dataclass(value):
-            value = asdict(value)
-        if isinstance(value, dict):
-            return {
-                key: cls._serialize_config_value(item) for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple)):
-            return [cls._serialize_config_value(item) for item in value]
-        if isinstance(value, Path):
-            return str(value)
-        return value
+        return serialize_config_value(value)

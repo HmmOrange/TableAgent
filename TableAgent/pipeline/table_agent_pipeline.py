@@ -15,7 +15,9 @@ from TableAgent.stages.retrieval.retrieval_prompts import (
 from TableAgent.configs import TableAgentConfig
 from TableAgent.configs.models_config import available_models
 from TableAgent.llm import BaseLLM
-from TableAgent.pipeline.base import BasePipeline
+from TableAgent.pipeline.base import BasePipeline, PipelineOutput
+from TableAgent.pipeline.contracts import PipelineStages
+from TableAgent.pipeline.progress import format_progress
 from TableAgent.stages.qa.agents.answer_agent import QAAgent
 from TableAgent.stages.qa.runner import TableQARunner
 from TableAgent.run_logging import Logger
@@ -28,9 +30,9 @@ from TableAgent.stages.retrieval.embeddings import (
     MockEmbeddingModel,
     OpenAICompatibleEmbeddingClient,
 )
-from TableAgent.stages.qa.pipeline import PipelineQAMixin
-from TableAgent.pipeline.pipeline_run import PipelineRunMixin
-from TableAgent.stages.qa.source_pipeline import PipelineSourceQAMixin
+from TableAgent.stages.qa.pipeline import VerifiedQAPipeline
+from TableAgent.pipeline.pipeline_run import PipelineRunner
+from TableAgent.stages.qa.source_pipeline import SourceQAPipeline
 from TableAgent.stages.structure.source_preparer import SourcePreparer
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 from TableAgent.stages.structure.cache import StructureCache, StructureCacheRecord
@@ -38,9 +40,9 @@ from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.stages.structure.verification import DeterministicVerifier
 from TableAgent.stages.qa import QAStage
 from TableAgent.stages.retrieval import RetrievalStage
-from TableAgent.stages.retrieval.pipeline import RetrievalPipelineMixin
+from TableAgent.stages.retrieval.pipeline import RetrievalPipeline
 from TableAgent.stages.structure import StructureStage
-from TableAgent.stages.structure.pipeline import StructurePipelineMixin
+from TableAgent.stages.structure.pipeline import StructurePipeline
 
 if TYPE_CHECKING:
     from TableAgent.stages.retrieval import TableRetrieverContract
@@ -48,20 +50,14 @@ if TYPE_CHECKING:
 logger = Logger(__name__)
 
 
-class TableAgentPipeline(
-    StructurePipelineMixin,
-    RetrievalPipelineMixin,
-    PipelineRunMixin,
-    PipelineSourceQAMixin,
-    PipelineQAMixin,
-    BasePipeline,
-):
+class TableAgentPipeline(BasePipeline):
     name = "table_agent"
     prepare_samples_before_run = True
     answer_system_prompt = ANSWER_SYSTEM_PROMPT
     answer_user_prompt_template = ANSWER_USER_PROMPT_TEMPLATE
     reranker_system_prompt = RERANKER_SYSTEM_PROMPT
     reranker_user_prompt_template = RERANKER_USER_PROMPT_TEMPLATE
+    _verified_observation_fallback_prompt = VerifiedQAPipeline._verified_observation_fallback_prompt
 
     def __init__(
         self,
@@ -88,6 +84,10 @@ class TableAgentPipeline(
         )
         self.qa_agent = QAAgent(self.llm, self.answer_system_prompt) if self.llm is not None else None
         self.table_retriever = table_retriever
+        self._structure_pipeline = StructurePipeline(self)
+        self._retrieval_pipeline = RetrievalPipeline(self)
+        self._qa_pipeline = VerifiedQAPipeline(self)
+        self._source_qa_pipeline = SourceQAPipeline(self)
         self.layout_workflow = (
             TableLayoutWorkflow(
                 self.settings,
@@ -176,9 +176,64 @@ class TableAgentPipeline(
         self._verified_samples: dict[str, StructureCacheRecord] = {}
         self._prepared_source_samples: set[str] = set()
         self._progress_callback: Callable[[str], None] | None = None
-        self.structure_stage = StructureStage(self._verify_samples_impl)
+        self.structure_stage = StructureStage(self._structure_pipeline._verify_samples_impl)
         self.qa_stage = QAStage(lambda **kwargs: self._run_verified_qa(**kwargs))
+        self.stages = PipelineStages(
+            structure=self.structure_stage,
+            retrieval=self.retrieval_stage,
+            qa=self.qa_stage,
+        )
+        self._runner = PipelineRunner(self)
         self._apply_generation_cap()
+
+    def run(self, sample: EvalSample) -> PipelineOutput:
+        return self._runner.run(sample)
+
+    def get_config(self) -> dict[str, Any]:
+        return self._runner.get_config()
+
+    def verify_samples(
+        self,
+        samples: list[EvalSample],
+        *,
+        force: bool = True,
+    ) -> list[StructureCacheRecord]:
+        return self._structure_pipeline.verify_samples(samples, force=force)
+
+    @staticmethod
+    def structure_progress_totals(samples: list[EvalSample]) -> dict[str, Any]:
+        return StructurePipeline.structure_progress_totals(samples)
+
+    def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
+        return self._retrieval_pipeline.filter_samples(samples)
+
+    def _run_verified_qa(self, **kwargs: Any):
+        return self._qa_pipeline._run_verified_qa(**kwargs)
+
+    def _run_prepared_source(self, *args: Any, **kwargs: Any) -> PipelineOutput:
+        return self._source_qa_pipeline._run_prepared_source(*args, **kwargs)
+
+    def _run_cached_qa(self, *args: Any, **kwargs: Any) -> PipelineOutput:
+        return self._runner._run_cached_qa(*args, **kwargs)
+
+    def _analyze_source_sheet(self, *args: Any, **kwargs: Any) -> str:
+        return self._structure_pipeline._analyze_source_sheet(*args, **kwargs)
+
+    def _metadata_for_workbook_sheet(self, *args: Any, **kwargs: Any):
+        return self._structure_pipeline._metadata_for_workbook_sheet(*args, **kwargs)
+
+    def _fit_context(self, table_content: str) -> str:
+        return self._source_qa_pipeline._fit_context(table_content)
+
+    def _answer_prompt(
+        self, sample: EvalSample, table_context: str, structure_text: str
+    ) -> str:
+        return self._source_qa_pipeline._answer_prompt(
+            sample, table_context, structure_text
+        )
+
+    def _qa_sample_dir(self, sample: EvalSample) -> Path:
+        return self._source_qa_pipeline._qa_sample_dir(sample)
 
     def prepare_samples(self, samples: list[EvalSample], logger: Any | None = None) -> None:
         if self.settings.phase == "qa":
@@ -221,51 +276,7 @@ class TableAgentPipeline(
     def _progress(self, stage: str, **fields: Any) -> None:
         if self._progress_callback is None:
             return
-        labels = {
-            "prepare": "prepare",
-            "prepare_extract": "prepare:extract",
-            "prepare_metadata": "prepare:metadata",
-            "prepare_cached": "prepare:cached",
-            "prepare_error": "prepare:error",
-            "prepare_layout": "prepare:layout",
-            "prepare_done": "prepare:done",
-            "retrieval": "retrieve",
-            "rerank": "rerank",
-            "render": "render",
-            "layout": "layout",
-            "verify": "verify",
-            "structure_done": "structure:done",
-            "qa": "qa",
-            "answer": "answer",
-            "done": "done",
-        }
-        parts = [labels.get(stage, stage)]
-        if stage in {"prepare_layout", "prepare_done", "render", "layout", "verify"}:
-            ordered_fields = [
-                ("range", "range"),
-                ("iteration", "iter"),
-                ("direction", "dir"),
-                ("workbook", "book"),
-                ("sheet", "sheet"),
-                ("sample", "sample"),
-            ]
-        else:
-            ordered_fields = [
-                ("sample", "sample"),
-                ("workbook", "book"),
-                ("sheet", "sheet"),
-                ("table", "table"),
-                ("range", "range"),
-                ("iteration", "iter"),
-                ("direction", "dir"),
-            ]
-        for key, label in ordered_fields:
-            value = fields.get(key)
-            if value is None or value == "":
-                continue
-            text = str(value)
-            parts.append(f"{label}={text}")
-        self._progress_callback(" | ".join(parts))
+        self._progress_callback(format_progress(stage, fields))
 
     def set_run_id(self, run_id: int) -> Path:
         if run_id < 1:
@@ -285,11 +296,3 @@ class TableAgentPipeline(
             self.llm.max_tokens = self.settings.generation_max_tokens
         if hasattr(self.layout_vlm, "max_tokens"):
             self.layout_vlm.max_tokens = self.settings.generation_max_tokens
-
-    @staticmethod
-    def _client_config(client: Any) -> dict[str, Any]:
-        return {
-            "model_name": getattr(client, "model_name", None),
-            "temperature": getattr(client, "temperature", None),
-            "max_tokens": getattr(client, "max_tokens", None),
-        }

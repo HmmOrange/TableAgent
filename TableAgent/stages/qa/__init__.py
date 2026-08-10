@@ -20,6 +20,8 @@ _EXPORTS = {
     "QAInput": (".contracts", "QAInput"),
     "QAOutput": (".contracts", "QAOutput"),
     "QAStage": (".stage", "QAStage"),
+    "SourceQAPipeline": (".source_pipeline", "SourceQAPipeline"),
+    "VerifiedQAPipeline": (".pipeline", "VerifiedQAPipeline"),
     "ReviewRequest": (".actions.base_action", "ReviewRequest"),
     "ReviewResult": (".actions.base_action", "ReviewResult"),
     "ReviewSubtaskAction": (".actions.review", "ReviewSubtaskAction"),

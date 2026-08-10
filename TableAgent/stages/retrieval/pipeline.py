@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from TableAgent.schema import EvalSample
+from TableAgent.pipeline.component import RuntimeComponent
+from TableAgent.pipeline.contracts import PipelineRuntimeContract
 
 
-class RetrievalPipelineMixin:
-    """Retrieval-stage hooks exposed through the pipeline orchestrator."""
+class RetrievalPipeline(RuntimeComponent):
+    """Expose retrieval-stage orchestration through an explicit runtime."""
+
+    def __init__(self, runtime: PipelineRuntimeContract):
+        super().__init__(runtime)
 
     def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
         """Skip samples whose perfect-retrieval source is unavailable."""
