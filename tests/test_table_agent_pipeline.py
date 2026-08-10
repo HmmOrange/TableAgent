@@ -477,7 +477,7 @@ def test_table_agent_keeps_not_good_structure_artifact(tmp_path: Path, monkeypat
 
 
 def test_prepared_source_propagates_not_good_status(tmp_path: Path, monkeypatch):
-    from TableAgent.shared.pipeline import SourceCandidate
+    from TableAgent.stages.retrieval.contracts import SourceCandidate
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -556,7 +556,7 @@ def test_analyze_source_sheet_persists_verification_status(tmp_path: Path):
 
 
 def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monkeypatch):
-    from TableAgent.shared.pipeline import SourceCandidate
+    from TableAgent.stages.retrieval.contracts import SourceCandidate
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()

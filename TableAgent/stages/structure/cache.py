@@ -13,7 +13,7 @@ from TableAgent.pipeline.sample import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import SheetMetadata
-from TableAgent.shared.pipeline import safe_name
+from TableAgent.utils.paths import safe_name
 from TableAgent.stages.structure.structure_prompts import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 

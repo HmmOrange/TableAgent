@@ -13,7 +13,8 @@ from TableAgent.artifacts import (
 )
 from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import ExStructMetadataExtractor, SheetMetadata
-from TableAgent.shared.pipeline import has_workbook_sources, safe_name
+from TableAgent.pipeline.sample import has_workbook_sources
+from TableAgent.utils.paths import safe_name
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.structure import StructureStage
 from TableAgent.stages.structure.layout.parsing import _is_valid_structure

@@ -8,11 +8,9 @@ from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.component import RuntimeComponent
 from TableAgent.pipeline.contracts import PipelineRuntimeContract
-from TableAgent.shared.pipeline import (
-    display_path,
-    has_workbook_sources,
-    token_usage,
-)
+from TableAgent.pipeline.sample import has_workbook_sources
+from TableAgent.utils.llm_metrics import token_usage
+from TableAgent.utils.paths import display_path
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 from TableAgent.stages.retrieval import RetrievalInput

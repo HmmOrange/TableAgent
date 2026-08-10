@@ -107,8 +107,8 @@ TableAgent/
 |- configs/         Configuration loading and typed settings
 |- pipeline/        Cross-stage composition and run coordination
 |- rendering/       Workbook-to-image conversion and image handling
-|- schema/          Shared domain models and value objects
-|- shared/          Helpers reused by multiple stages
+|- domain/          Shared spreadsheet domain models and value objects
+|- shared/          Cross-stage agent and artifact infrastructure
 |- stages/          Phase-specific business logic
 |- utils/           General Excel, structure, and text utilities
 |- llm.py           LLM interface and response types
@@ -145,6 +145,9 @@ Composes stages without owning phase-specific business logic.
 - `component.py` provides the small runtime-backed base used by composed runners.
 - `pipeline_run.py` contains `PipelineRunner`, which routes prepared-source and
   cached runs and assembles run results.
+- `sample.py` defines the pipeline input record and workbook-source classification.
+- `prompting.py` composes the QA answer and retrieval candidate prompts used by
+  the orchestrator.
 - `progress.py` formats the stable progress-event messages consumed by the service.
 - `base.py` contains the `BasePipeline` interface and re-exports `PipelineOutput`.
 
@@ -174,14 +177,19 @@ live in `TableAgent/pipeline/sample.py`, and QA-only models remain under
 Cross-stage infrastructure that has more than one real consumer.
 
 - `agents.py` contains shared agent/message behavior.
-- `artifacts.py` contains reusable artifact helpers.
-- `pipeline.py` contains shared pipeline utilities.
-- `prompting.py` contains prompt construction helpers used across boundaries.
+- `artifacts.py` reads verification and image-tile metadata consumed by multiple
+  stages.
+
+Pipeline composition, path utilities, and stage contracts do not belong here.
 
 ### `TableAgent/utils/`
 
-Small general-purpose helpers for Excel operations, structure manipulation, and
-table-to-text conversion. Phase-specific helpers should stay with their stage.
+Small general-purpose helpers for Excel operations, structure manipulation,
+table-to-text conversion, portable path display/sanitization, and LLM usage
+aggregation. Phase-specific helpers should stay with their stage.
+
+- `paths.py` owns portable path display and safe artifact-name generation.
+- `llm_metrics.py` aggregates token usage from model responses.
 
 ## Stage Packages: `TableAgent/stages/`
 

@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Iterator
 
-from TableAgent.shared.pipeline import safe_name
+from TableAgent.utils.paths import safe_name
 
 
 def workbook_artifact_dir(

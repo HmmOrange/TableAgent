@@ -23,8 +23,8 @@ from TableAgent.stages.qa.runner import TableQARunner
 from TableAgent.run_logging import Logger
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.structure.layout.agent import LayoutAgent
-from TableAgent.shared.pipeline import has_workbook_sources
-from TableAgent.shared.prompting import PromptBuilder
+from TableAgent.pipeline.prompting import PromptBuilder
+from TableAgent.pipeline.sample import has_workbook_sources
 from TableAgent.stages.retrieval import SourceRetriever
 from TableAgent.stages.retrieval.embeddings import (
     MockEmbeddingModel,

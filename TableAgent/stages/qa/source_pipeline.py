@@ -11,14 +11,10 @@ from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.component import RuntimeComponent
 from TableAgent.pipeline.contracts import PipelineRuntimeContract
-from TableAgent.shared.pipeline import (
-    SourceCandidate,
-    display_path,
-    read_image_tiles,
-    safe_name,
-    token_usage,
-)
-from TableAgent.shared.artifacts import prepared_verification
+from TableAgent.shared.artifacts import prepared_verification, read_image_tiles
+from TableAgent.stages.retrieval.contracts import SourceCandidate
+from TableAgent.utils.llm_metrics import token_usage
+from TableAgent.utils.paths import display_path, safe_name
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 

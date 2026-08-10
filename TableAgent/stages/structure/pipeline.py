@@ -11,7 +11,7 @@ from TableAgent.pipeline.sample import EvalSample
 from TableAgent.pipeline.component import RuntimeComponent
 from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.shared.artifacts import prepared_verification
-from TableAgent.shared.pipeline import has_workbook_sources
+from TableAgent.pipeline.sample import has_workbook_sources
 
 from .cache import StructureCacheRecord
 from .contracts import StructureInput

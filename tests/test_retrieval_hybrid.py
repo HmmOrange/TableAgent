@@ -942,8 +942,8 @@ table2:
     assert "Maintenance item" in sheet_candidates[0].retrieval_card
 
 def test_candidate_prompt_text_labels(temp_sources_dir):
-    from TableAgent.shared.prompting import PromptBuilder
-    from TableAgent.shared.pipeline import SourceCandidate
+    from TableAgent.pipeline.prompting import PromptBuilder
+    from TableAgent.stages.retrieval.contracts import SourceCandidate
     
     config = TableAgentConfig.from_config({
         "retrieval_candidate_max_chars": 1000,

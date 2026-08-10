@@ -26,7 +26,7 @@ from TableAgent.artifacts import (
 from TableAgent.configs import load_config
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
-from TableAgent.shared.pipeline import safe_name
+from TableAgent.utils.paths import safe_name
 from TableAgent.stages.retrieval.embeddings import (
     MockEmbeddingModel,
     OpenAICompatibleEmbeddingClient,
