@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from TableAgent.schema.qa import AgentOutput, QAResult
-from TableAgent.schema.subtask import SubTask
+from TableAgent.stages.qa.models.results import AgentOutput, QAResult
+from TableAgent.stages.qa.models.subtask import SubTask
 
 
 class QAExecutionMixin:

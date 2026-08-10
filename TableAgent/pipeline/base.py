@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.pipeline.contracts import PipelineOutput
 
 __all__ = ["BasePipeline", "PipelineOutput"]

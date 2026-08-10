@@ -6,7 +6,7 @@ import yaml
 from PIL import Image
 import pytest
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.llm import LLMResponse
 from TableAgent.configs import TableAgentConfig
@@ -2110,8 +2110,8 @@ def test_table_agent_default_max_replans_is_five(tmp_path: Path):
 def test_verified_fallback_uses_successful_inspections_only():
     from types import SimpleNamespace
 
-    from TableAgent.schema.qa import AgentOutput, QAResult
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.results import AgentOutput, QAResult
+    from TableAgent.stages.qa.models.subtask import SubTask
 
     result = QAResult(
         question="Describe the matching record.",
@@ -2147,8 +2147,8 @@ def test_verified_fallback_uses_successful_inspections_only():
 def test_verified_fallback_rejects_unsafe_evidence():
     from types import SimpleNamespace
 
-    from TableAgent.schema.qa import AgentOutput, QAResult
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.results import AgentOutput, QAResult
+    from TableAgent.stages.qa.models.subtask import SubTask
 
     result = QAResult(
         question="Return the matching record.",

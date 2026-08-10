@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional
-from TableAgent.schema.header import Header
+from TableAgent.domain.structure import Header
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.utils import flatten_headers, _lexical_overlap_score
 

@@ -1,6 +1,6 @@
-from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
+
 
 def _clip(text: str, max_chars: int) -> str:
     if not text or len(text) <= max_chars:
@@ -13,6 +13,7 @@ def _clip(text: str, max_chars: int) -> str:
     tail = keep - head
     return text[:head] + marker + text[-tail:]
 
+
 @dataclass
 class ExperienceRecord:
     subtask_id: str
@@ -20,7 +21,7 @@ class ExperienceRecord:
     code: str
     observation: str
     reasoning: str = ""
-    score: float = 0.0  # 1.0 for success, 0.0 for failure
+    score: float = 0.0
     round: int = 1
 
     def __repr__(self) -> str:
@@ -38,22 +39,20 @@ class ExperiencePool:
         self.records.append(record)
 
     def select(self) -> List[ExperienceRecord]:
-        """
-        Select a bounded list of experiences.
-        Prioritizes successful attempts (score = 1.0) and then most recent attempts (round).
-        """
-        # Sort by score descending, then by round descending
+        """Select successful and recent attempts up to the configured limit."""
         sorted_records = sorted(
             self.records,
-            key=lambda r: (r.score, r.round),
-            reverse=True
+            key=lambda record: (record.score, record.round),
+            reverse=True,
         )
         return sorted_records[:self.max_records]
 
-    def format(self, max_code_chars: Optional[int] = None, max_observation_chars: Optional[int] = None) -> str:
-        """
-        Format the selected experiences into a structured text format for the model prompt.
-        """
+    def format(
+        self,
+        max_code_chars: Optional[int] = None,
+        max_observation_chars: Optional[int] = None,
+    ) -> str:
+        """Format selected experiences for inclusion in a model prompt."""
         selected = self.select()
         if not selected:
             return "No previous experience."
@@ -61,8 +60,7 @@ class ExperiencePool:
         max_code_chars = self.max_code_chars if max_code_chars is None else max_code_chars
         max_observation_chars = self.max_observation_chars if max_observation_chars is None else max_observation_chars
         formatted_parts = []
-        # Sort back to chronological order for prompt presentation
-        selected_chronological = sorted(selected, key=lambda r: r.round)
+        selected_chronological = sorted(selected, key=lambda record: record.round)
         for exp in selected_chronological:
             code = _clip(exp.code, max_code_chars)
             observation = _clip(exp.observation, max_observation_chars)

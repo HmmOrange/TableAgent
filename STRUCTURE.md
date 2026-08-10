@@ -162,11 +162,12 @@ Converts workbook content into images used by layout extraction.
 - `image_utils.py` provides image sizing, tiling, and related helpers.
 - `pdfium_worker.py` isolates PDFium rendering work.
 
-### `TableAgent/schema/`
+### `TableAgent/domain/`
 
-Shared domain types used across stages. Modules model evaluation samples, QA
-results, plans/subtasks, header trees, cell ranges, and agent experience records.
-Stage-specific input/output contracts remain inside the relevant stage package.
+Shared spreadsheet concepts independent of pipeline stages. `ranges.py` models
+cells and selections, while `structure.py` models header trees. Pipeline samples
+live in `TableAgent/pipeline/sample.py`, and QA-only models remain under
+`TableAgent/stages/qa/`.
 
 ### `TableAgent/shared/`
 
@@ -260,7 +261,7 @@ flow.
   explicit handoffs.
 - Put code in `TableAgent/shared/` only when multiple stages genuinely use it.
 - Keep external transport and request parsing in `service/`.
-- Keep shared domain types in `TableAgent/schema/`; keep stage-only contracts with
-  their stage.
+- Keep shared spreadsheet types in `TableAgent/domain/`; keep pipeline samples in
+  `TableAgent/pipeline/` and stage-only models and contracts with their stage.
 - Treat `outputs/`, `logs/`, local datasets, caches, and package metadata as
   generated or operational state, not application source.

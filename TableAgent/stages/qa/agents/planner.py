@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Optional, Any
 
 from TableAgent.stages.qa.environment.qa_env import QAEnvironment
-from TableAgent.schema.subtask import SubTask
+from TableAgent.stages.qa.models.subtask import SubTask
 from TableAgent.stages.qa.actions.base_action import PlanGenerationRequest
 from TableAgent.stages.qa.actions.write_plan import WriteQAPlanAction
 

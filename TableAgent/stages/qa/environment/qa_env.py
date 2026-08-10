@@ -4,9 +4,9 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 
-from TableAgent.schema.experience import ExperiencePool
-from TableAgent.schema.range import AxisSelection, Cell, CellRange
-from TableAgent.schema.header import Header
+from TableAgent.domain.ranges import AxisSelection, Cell, CellRange
+from TableAgent.domain.structure import Header
+from TableAgent.stages.qa.experience import ExperiencePool
 from TableAgent.utils.structure_utils import load_formula_relations, load_table_structures
 from TableAgent.stages.qa.environment.notebook import Notebook
 from TableAgent.stages.qa.environment.logger import QALogger

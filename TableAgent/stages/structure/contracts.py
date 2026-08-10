@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 if TYPE_CHECKING:
     from .cache import StructureCacheRecord

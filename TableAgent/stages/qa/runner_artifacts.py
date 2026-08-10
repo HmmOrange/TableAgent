@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from TableAgent.schema.qa import QAResult
-from TableAgent.schema.subtask import SubTask
+from TableAgent.stages.qa.models.results import QAResult
+from TableAgent.stages.qa.models.subtask import SubTask
 
 
 class QAArtifactMixin:

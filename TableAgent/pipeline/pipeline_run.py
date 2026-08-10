@@ -13,7 +13,7 @@ from TableAgent.shared.pipeline import (
     has_workbook_sources,
     token_usage,
 )
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 from TableAgent.stages.retrieval import RetrievalInput
 

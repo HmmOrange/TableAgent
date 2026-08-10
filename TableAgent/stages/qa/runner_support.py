@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from TableAgent.schema.subtask import SubTask
+from TableAgent.stages.qa.models.subtask import SubTask
 
 
 class QARunnerSupportMixin:

@@ -2,8 +2,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
-from TableAgent.schema.header import Header
-from TableAgent.schema.range import AxisSelection, CellRange
+from TableAgent.domain.ranges import AxisSelection, CellRange
+from TableAgent.domain.structure import Header
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.stages.qa.operators.structure_operator import StructureOperator
 from TableAgent.stages.qa.operators.range_operator import RangeOperator

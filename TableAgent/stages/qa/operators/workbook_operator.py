@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Union, List, Any
 import pandas as pd
 from openpyxl.utils import get_column_letter
-from TableAgent.schema.range import CellRange
+from TableAgent.domain.ranges import CellRange
 from TableAgent.utils import parse_a1_range, read_excel_range
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 

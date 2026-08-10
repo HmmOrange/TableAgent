@@ -36,7 +36,7 @@ from TableAgent.stages.structure.retrieval_artifacts import (
     write_sheet_retrieval_cards,
     write_workbook_retrieval_cards,
 )
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 from TableAgent.stages.retrieval import RetrievalInput
 from TableAgent.stages.structure import StructureStage

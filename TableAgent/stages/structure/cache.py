@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from TableAgent.rendering.converter import sample_to_xlsx
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import SheetMetadata

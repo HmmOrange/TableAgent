@@ -9,7 +9,7 @@ import pandas as pd
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.stages.qa.operators.structure_operator import StructureOperator
 from TableAgent.stages.qa.operators.workbook_operator import WorkbookOperator
-from TableAgent.schema.range import AxisSelection, CellRange
+from TableAgent.domain.ranges import AxisSelection, CellRange
 from TableAgent.utils import parse_a1_range, range_to_a1
 
 

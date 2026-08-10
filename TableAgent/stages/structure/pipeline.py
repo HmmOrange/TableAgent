@@ -7,7 +7,7 @@ from typing import Any
 
 import openpyxl
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.pipeline.component import RuntimeComponent
 from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.shared.artifacts import prepared_verification

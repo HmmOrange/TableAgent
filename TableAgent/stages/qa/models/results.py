@@ -1,7 +1,8 @@
-from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from TableAgent.schema.subtask import SubTask
+
+from TableAgent.stages.qa.models.subtask import SubTask
+
 
 @dataclass
 class AgentOutput:
@@ -15,6 +16,7 @@ class AgentOutput:
     layer: str = ""
     category: str = "normal"
     attempt_count: int = 1
+
 
 @dataclass
 class QAResult:

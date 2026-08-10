@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
-from TableAgent.schema.range import CellRange
+from TableAgent.domain.ranges import CellRange
 from TableAgent.utils import _lexical_overlap_score
 
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from TableAgent.llm import LLMResponse
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 
 @dataclass(frozen=True)

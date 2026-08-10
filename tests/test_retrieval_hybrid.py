@@ -16,7 +16,7 @@ from TableAgent.stages.retrieval import (
     build_sheet_metadata_payload,
     build_table_retrieval_cards,
 )
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.llm import BaseLLM, LLMResponse
 
 class FakeLLM(BaseLLM):

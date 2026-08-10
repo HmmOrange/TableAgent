@@ -1,8 +1,8 @@
 from __future__ import annotations
 from TableAgent.stages.qa.environment.qa_env import QAEnvironment
-from TableAgent.schema.subtask import SubTask
-from TableAgent.schema.qa import AgentOutput
-from TableAgent.schema.experience import ExperienceRecord
+from TableAgent.stages.qa.experience import ExperienceRecord
+from TableAgent.stages.qa.models.results import AgentOutput
+from TableAgent.stages.qa.models.subtask import SubTask
 from TableAgent.stages.qa.actions.base_action import (
     BaseCodeExecutionAction,
     BaseCodeGenerationAction,

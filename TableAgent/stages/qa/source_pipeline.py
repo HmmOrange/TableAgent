@@ -19,7 +19,7 @@ from TableAgent.shared.pipeline import (
     token_usage,
 )
 from TableAgent.shared.artifacts import prepared_verification
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 
 

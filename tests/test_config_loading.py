@@ -7,7 +7,7 @@ import yaml
 from TableAgent.configs import load_config, resolve_llm_config, resolve_vlm_config
 from TableAgent.configs import TableAgentConfig
 from TableAgent.pipeline.pipeline_run import PipelineRunner
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 CONFIG_PATH = Path("config.example.yaml")
 

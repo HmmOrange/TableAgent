@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Union, List, Optional
-from TableAgent.schema.range import AxisSelection, CellRange
+from TableAgent.domain.ranges import AxisSelection, CellRange
 from TableAgent.utils import parse_a1_range
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 

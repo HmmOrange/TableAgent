@@ -6,7 +6,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from TableAgent.llm import LLMResponse
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 

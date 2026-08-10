@@ -8,7 +8,7 @@ from TableAgent.configs import TableAgentConfig
 from TableAgent.llm import BaseLLM, LLMResponse
 from TableAgent.shared.pipeline import has_workbook_sources
 from TableAgent.run_logging import Logger
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.retrieval.contracts import SourceCandidate
 
 from .candidate_loading import RetrievalCandidateLoadingMixin

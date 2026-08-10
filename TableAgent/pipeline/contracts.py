@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol, TYPE_CHECKING
 
-from TableAgent.schema import EvalSample
+from TableAgent.pipeline.sample import EvalSample
 
 if TYPE_CHECKING:
     from TableAgent.stages.qa.contracts import QAInput, QAOutput

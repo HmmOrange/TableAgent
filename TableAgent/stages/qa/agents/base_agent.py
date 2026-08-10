@@ -2,8 +2,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from TableAgent.stages.qa.environment.qa_env import QAEnvironment
-from TableAgent.schema.subtask import SubTask
-from TableAgent.schema.qa import AgentOutput
+from TableAgent.stages.qa.models.results import AgentOutput
+from TableAgent.stages.qa.models.subtask import SubTask
 from TableAgent.stages.qa.actions.base_action import BaseCodeExecutionAction, BaseCodeGenerationAction, BaseReviewAction
 from TableAgent.stages.qa.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.stages.qa.actions.review import ReviewSubtaskAction

@@ -9,9 +9,9 @@ from TableAgent.stages.qa.prompts.common_info import (
     COMMON_INFO_LOCALIZATION_PROMPT,
     COMMON_INFO_LOCALIZATION_SYSTEM_PROMPT,
 )
-from TableAgent.schema.header import Header
-from TableAgent.schema.qa import AgentOutput
-from TableAgent.schema.subtask import SubTask
+from TableAgent.domain.structure import Header
+from TableAgent.stages.qa.models.results import AgentOutput
+from TableAgent.stages.qa.models.subtask import SubTask
 
 
 @dataclass(frozen=True)

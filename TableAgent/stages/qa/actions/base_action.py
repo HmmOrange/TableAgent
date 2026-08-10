@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from TableAgent.schema.subtask import SubTask
+from TableAgent.stages.qa.models.subtask import SubTask
 
 @dataclass(frozen=True)
 class CodeGenerationRequest:

@@ -7,7 +7,8 @@ import sys
 import pytest
 from pathlib import Path
 
-from TableAgent.schema import AxisSelection, Cell, CellRange, Header, ExperienceRecord
+from TableAgent.domain import AxisSelection, Cell, CellRange, Header
+from TableAgent.stages.qa.experience import ExperienceRecord
 from TableAgent.utils import (
     col_name_to_num,
     col_num_to_name,
@@ -326,7 +327,7 @@ def test_topological_sort_invalid_planning():
         runner._topological_sort(unknown_dep_plan)
 
     # 3. Duplicate subtask IDs
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.subtask import SubTask
     dup_plan = [
         SubTask(id="task_a", description="A first", layer="inspect", depends_on=[]),
         SubTask(id="task_a", description="A second", layer="inspect", depends_on=[])
@@ -402,7 +403,7 @@ def test_react_loop_and_retry_self_repair():
     policy = MockActionPolicy(simulate_error=True)
     agent = TableQAAgent(env, policy=policy, max_retries=3)
     
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.subtask import SubTask
     subtask = SubTask(id="test_subtask", description="Get scores", layer="inspect")
     
     output = agent.run_subtask(question="What is the average score?", subtask=subtask)
@@ -537,8 +538,8 @@ def test_runner_humanizes_header_id_in_final_answer():
 def test_base_abstractions_usable():
     from TableAgent.stages.qa import BaseCodeGenerationAction, BaseReActAgent
     from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest, CodeGenerationResult
-    from TableAgent.schema.subtask import SubTask
-    from TableAgent.schema.qa import AgentOutput
+    from TableAgent.stages.qa.models.results import AgentOutput
+    from TableAgent.stages.qa.models.subtask import SubTask
     
     # 1. Test subclassing BaseCodeGenerationAction
     class CustomPolicy(BaseCodeGenerationAction):
@@ -713,7 +714,7 @@ def test_runner_persists_per_run_artifacts(tmp_path):
 def test_llm_code_generation_repairs_invalid_json_response():
     from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest
     from TableAgent.stages.qa.actions.llm_code_generation import LLMCodeGenerationAction
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.subtask import SubTask
     from TableAgent.llm import LLMResponse
 
     class RepairingLLM:
@@ -915,7 +916,7 @@ def test_variable_preview_summarizes_large_values():
 
 
 def test_experience_format_truncates_large_observations():
-    from TableAgent.schema.experience import ExperiencePool, ExperienceRecord
+    from TableAgent.stages.qa.experience import ExperiencePool, ExperienceRecord
 
     pool = ExperiencePool(max_records=2, max_code_chars=80, max_observation_chars=80)
     pool.add(ExperienceRecord(
@@ -1017,7 +1018,7 @@ def test_planner_extracts_trailing_json_and_common_info_metadata():
 def test_runner_serializes_full_dataframe_final_answer():
     import pandas as pd
 
-    from TableAgent.schema.subtask import SubTask
+    from TableAgent.stages.qa.models.subtask import SubTask
 
     runner = TableQARunner(STRUCTURE_PATH, WORKBOOK_PATH, policy=MockActionPolicy())
     try:

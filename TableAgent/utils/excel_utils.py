@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from typing import Any, List, Tuple
-from TableAgent.schema.range import CellRange
+from TableAgent.domain.ranges import CellRange
 
 def col_name_to_num(col_str: str) -> int:
     col_str = col_str.upper()
