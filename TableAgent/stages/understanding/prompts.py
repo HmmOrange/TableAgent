@@ -1,10 +1,6 @@
 SYSTEM_PROMPT = """You inspect a spreadsheet image. Return valid JSON only."""
 
-USER_PROMPT_TEMPLATE = """Inspect the top-left viewport of this spreadsheet.
-
-Workbook: {workbook_name}
-Sheet: {sheet_name}
-Viewport: {viewport_range}
+USER_PROMPT_TEMPLATE = """Inspect the viewport of this spreadsheet.
 
 Identify the row headers, row group headers, column headers, and column group
 headers visible in the image. Read the hierarchy before writing the JSON.
