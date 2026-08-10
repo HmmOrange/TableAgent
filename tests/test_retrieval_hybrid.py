@@ -52,7 +52,7 @@ def temp_sources_dir():
         (c1_dir / "metadata.json").write_text(json.dumps({
             "workbook_path": "/path/to/dummy.xlsx",
             "sheet_name": "Sheet1",
-            "layout_workflow_version": 4,
+            "layout_workflow_version": 5,
         }), encoding="utf-8")
         (c1_dir / "structure.yaml").write_text("""
 table1:
@@ -74,7 +74,7 @@ table1:
         (c2_dir / "metadata.json").write_text(json.dumps({
             "workbook_path": "/path/to/dummy.xlsx",
             "sheet_name": "Sheet2",
-            "layout_workflow_version": 4,
+            "layout_workflow_version": 5,
         }), encoding="utf-8")
         (c2_dir / "structure.yaml").write_text("""
 table1:
@@ -130,7 +130,7 @@ def test_source_retriever_discovers_nested_and_legacy_sheet_directories(temp_sou
     (nested / "metadata.json").write_text(json.dumps({
         "workbook_path": "/path/to/dummy.xlsx",
         "sheet_name": "NestedSheet",
-        "layout_workflow_version": 4,
+        "layout_workflow_version": 5,
     }), encoding="utf-8")
     (nested / "structure.yaml").write_text("""
 table1:
@@ -781,7 +781,7 @@ def test_top_level_headers_structure_included(temp_sources_dir):
     (c3_dir / "metadata.json").write_text(json.dumps({
         "workbook_path": "/path/to/dummy.xlsx",
         "sheet_name": "Sheet3",
-        "layout_workflow_version": 4,
+        "layout_workflow_version": 5,
     }), encoding="utf-8")
     (c3_dir / "structure.yaml").write_text("""
 headers:
@@ -828,7 +828,7 @@ def test_source_retriever_ranks_tables_within_one_sheet(temp_sources_dir):
     (source_dir / "metadata.json").write_text(json.dumps({
         "workbook_path": "/path/to/dummy.xlsx",
         "sheet_name": "Sheet3",
-        "layout_workflow_version": 4,
+        "layout_workflow_version": 5,
     }), encoding="utf-8")
     (source_dir / "structure.yaml").write_text("""
 table1:
@@ -1052,7 +1052,7 @@ def test_retrieval_entity_match_promotes_specific_value_candidate(temp_sources_d
     (summary_dir / "metadata.json").write_text(json.dumps({
         "workbook_path": "/path/to/dummy.xlsx",
         "sheet_name": "Summary",
-        "layout_workflow_version": 4,
+        "layout_workflow_version": 5,
     }), encoding="utf-8")
     (summary_dir / "structure.yaml").write_text("""
 table1:
@@ -1075,7 +1075,7 @@ table1:
     (detail_dir / "metadata.json").write_text(json.dumps({
         "workbook_path": "/path/to/dummy.xlsx",
         "sheet_name": "Detail",
-        "layout_workflow_version": 4,
+        "layout_workflow_version": 5,
     }), encoding="utf-8")
     (detail_dir / "structure.yaml").write_text("""
 table1:

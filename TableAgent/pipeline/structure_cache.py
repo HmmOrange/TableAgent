@@ -93,7 +93,7 @@ class StructureCache:
                 "source_sha256": source_hash,
                 "sheet_name": sheet_name,
                 "status": result.verification.get("status", "not_good"),
-                "workflow_version": 4,
+                "workflow_version": 5,
                 "artifacts": {"structure": "structure.yaml", "workbook": "workbook.xlsx"},
             }
             (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -141,7 +141,7 @@ class StructureCache:
             "schema": CACHE_SCHEMA_VERSION,
             "source_sha256": source_hash,
             "sheet_name": sheet_name,
-            "workflow_version": 4,
+            "workflow_version": 5,
             "viewport_rows": self.settings.viewport_rows,
             "viewport_columns": self.settings.viewport_columns,
             "shift_cells": self.settings.shift_cells,

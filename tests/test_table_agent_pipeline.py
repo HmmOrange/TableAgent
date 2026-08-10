@@ -597,14 +597,21 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
 
     def fake_run_verified_qa(**kwargs):
         captured["structure_path"] = kwargs["structure_path"]
+        captured["qa_artifact_dir"] = kwargs["qa_artifact_dir"]
         return LLMResponse(content="100"), {"success": True}
 
     monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
 
     output = pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
     selected_path = captured["structure_path"]
+    qa_artifact_dir = captured["qa_artifact_dir"]
+    relative_qa_dir = qa_artifact_dir.relative_to(tmp_path / "artifacts")
 
     assert selected_path.name == "retrieved_structure.yaml"
+    assert selected_path.parent == qa_artifact_dir
+    assert relative_qa_dir.parts[0] == "qa"
+    assert relative_qa_dir.parts[1].startswith("siflex_table-level")
+    assert len(relative_qa_dir.parts) == 3
     assert selected_path.read_text(encoding="utf-8") == selected_structure
     assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
     assert output.metadata["retrieval_info"]["table_id"] == "table2"
@@ -639,6 +646,11 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     assert second.metadata["cache_hit"] is True
     assert second.metadata["cache_key"] == first.metadata["cache_key"]
     assert second.predicted_answer == "100"
+    qa_run_dir = Path(second.metadata["qa"]["artifacts"]["run_dir"])
+    relative_qa_run = qa_run_dir.relative_to(tmp_path / "qa")
+    assert relative_qa_run.parts[0] == "qa"
+    assert relative_qa_run.parts[1].startswith("cache_1")
+    assert len(relative_qa_run.parts) == 4
 
 
 def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run(
@@ -1347,6 +1359,8 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
     assert "deterministic verifier" in LAYOUT_MAS_USER_PROMPT_TEMPLATE.lower()
     assert "quote every free-text scalar" in LAYOUT_MAS_SYSTEM_PROMPT
     assert "Wrap every free-text scalar in double quotes" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "`sub_headers` is recursive" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "never discard grandchildren or deeper descendants" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -1398,6 +1412,34 @@ This trailing explanation is also logging-only."""
     assert "trailing explanation" in discarded
     assert "reasoning" in discarded
     assert "confidence" in discarded
+
+
+def test_strict_structure_preserves_multi_level_sub_headers():
+    from TableAgent.structure.layout.parsing import extract_strict_structure
+
+    content = """headers:
+  - label: Civilian labor force
+    orientation: column
+    range: C4:J4
+    sub_headers:
+      - label: Employed
+        orientation: column
+        range: E5:H5
+        sub_headers:
+          - label: Agriculture
+            orientation: column
+            range: G6
+            sub_headers: []
+"""
+
+    structure_text, discarded = extract_strict_structure(content)
+    structure = yaml.safe_load(structure_text)
+    employed = structure["headers"][0]["sub_headers"][0]
+
+    assert employed["label"] == "Employed"
+    assert employed["sub_headers"][0]["label"] == "Agriculture"
+    assert employed["sub_headers"][0]["sub_headers"] == []
+    assert discarded == ""
 
 
 def test_table_agent_persists_only_strict_structure(tmp_path: Path):
@@ -1471,6 +1513,48 @@ remaining_directions: []
     assert discarded == ""
     assert directions == []
     assert changelog == "Added the row number header."
+
+
+def test_layout_parser_preserves_multi_level_sub_headers():
+    from TableAgent.structure.layout.parsing import extract_layout_structure
+
+    content = """structure:
+  table1:
+    id: employment
+    name: Employment
+    headers:
+      - id: civilian_labor_force
+        label: Civilian labor force
+        orientation: column
+        header_range: C4:J4
+        data_range: C9:J80
+        sub_headers:
+          - id: employed
+            label: Employed
+            orientation: column
+            header_range: E5:H5
+            data_range: E9:H80
+            sub_headers:
+              - id: employed_agriculture
+                label: Agriculture
+                orientation: column
+                header_range: G6
+                data_range: G9:G80
+                sub_headers: []
+changelog: Preserved the visible header hierarchy.
+remaining_directions: []
+"""
+
+    structure_text, discarded, directions, changelog = extract_layout_structure(content)
+    structure = yaml.safe_load(structure_text)
+    employed = structure["table1"]["headers"][0]["sub_headers"][0]
+
+    assert employed["id"] == "employed"
+    assert employed["sub_headers"][0]["id"] == "employed_agriculture"
+    assert employed["sub_headers"][0]["sub_headers"] == []
+    assert discarded == ""
+    assert directions == []
+    assert changelog == "Preserved the visible header hierarchy."
 
 
 def test_layout_parser_salvages_structure_when_changelog_breaks_yaml():

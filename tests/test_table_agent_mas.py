@@ -338,6 +338,26 @@ def _wide_hierarchical_workbook(path: Path) -> None:
     workbook.save(path)
 
 
+def _deep_hierarchical_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:F1")
+    worksheet["A1"] = "Labor force"
+    worksheet.merge_cells("A2:D2")
+    worksheet["A2"] = "Employed"
+    worksheet.merge_cells("E2:F2")
+    worksheet["E2"] = "Unemployed"
+    for cell, value in zip(
+        ("A3", "B3", "C3", "D3", "E3", "F3"),
+        ("Total", "Percent", "Agriculture", "Nonagricultural", "Number", "Percent"),
+    ):
+        worksheet[cell] = value
+    for col in range(1, 7):
+        worksheet.cell(row=4, column=col).value = col
+    workbook.save(path)
+
+
 def _merged_header_workbook(path: Path) -> None:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
@@ -489,6 +509,70 @@ def test_verifier_accepts_consistent_header_and_sub_header_ranges(tmp_path: Path
                         "orientation": "column",
                         "header_range": "B2:B2",
                         "data_range": "B3:B3",
+                    },
+                ],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["status"] == "good"
+    assert report["errors"] == []
+
+
+def test_verifier_accepts_multi_level_header_coverage(tmp_path: Path):
+    workbook_path = tmp_path / "deep.xlsx"
+    _deep_hierarchical_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "name": "Employment",
+            "description": "Employment by status",
+            "headers": [{
+                "label": "Labor force",
+                "description": "Labor force group",
+                "orientation": "column",
+                "header_range": "A1:F1",
+                "data_range": "A4:F4",
+                "sub_headers": [
+                    {
+                        "label": "Employed",
+                        "description": "Employed group",
+                        "orientation": "column",
+                        "header_range": "A2:D2",
+                        "data_range": "A4:D4",
+                        "sub_headers": [
+                            {
+                                "label": label,
+                                "description": label,
+                                "orientation": "column",
+                                "header_range": f"{column}3",
+                                "data_range": f"{column}4",
+                                "sub_headers": [],
+                            }
+                            for column, label in zip(
+                                ("A", "B", "C", "D"),
+                                ("Total", "Percent", "Agriculture", "Nonagricultural"),
+                            )
+                        ],
+                    },
+                    {
+                        "label": "Unemployed",
+                        "description": "Unemployed group",
+                        "orientation": "column",
+                        "header_range": "E2:F2",
+                        "data_range": "E4:F4",
+                        "sub_headers": [
+                            {
+                                "label": label,
+                                "description": label,
+                                "orientation": "column",
+                                "header_range": f"{column}3",
+                                "data_range": f"{column}4",
+                                "sub_headers": [],
+                            }
+                            for column, label in zip(("E", "F"), ("Number", "Percent"))
+                        ],
                     },
                 ],
             }],

@@ -18,7 +18,7 @@ from TableAgent.pipeline.common import has_workbook_sources, safe_name
 from TableAgent.schema import EvalSample
 from TableAgent.structure.layout.parsing import _is_valid_structure
 
-LAYOUT_WORKFLOW_VERSION = 4
+LAYOUT_WORKFLOW_VERSION = 5
 
 
 class SourcePreparer:

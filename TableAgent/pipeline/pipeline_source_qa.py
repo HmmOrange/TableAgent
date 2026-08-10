@@ -46,7 +46,7 @@ class PipelineSourceQAMixin:
                 if is_metadata_retrieval
                 else "retrieved_structure.yaml"
             )
-            structure_path = self._sample_dir(sample) / filename
+            structure_path = self._qa_sample_dir(sample) / filename
             structure_path.parent.mkdir(parents=True, exist_ok=True)
             structure_path.write_text(candidate.structure_text, encoding="utf-8")
         related_structure_paths = self._related_structure_paths(candidate)
@@ -83,7 +83,7 @@ class PipelineSourceQAMixin:
                 question=sample.question,
                 structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
-                qa_artifact_dir=self._sample_dir(sample) / "qa",
+                qa_artifact_dir=self._qa_sample_dir(sample),
                 fallback_prompt=image_prompt,
                 fallback_image_path=candidate.image_path,
                 fallback_text_prompt=fallback_prompt,
@@ -244,7 +244,14 @@ class PipelineSourceQAMixin:
     ) -> str:
         return self.prompts.answer_prompt(sample, table_context, structure_text)
 
-    def _sample_dir(self, sample: EvalSample) -> Path:
+    @staticmethod
+    def _sample_relative_dir(sample: EvalSample) -> Path:
         raw = f"{sample.sample_id}:{sample.table_id}:{sample.question}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-        return self._artifact_dir / safe_name(sample.sample_id)[:80] / digest
+        return Path(safe_name(sample.sample_id)[:80]) / digest
+
+    def _sample_dir(self, sample: EvalSample) -> Path:
+        return self._artifact_dir / self._sample_relative_dir(sample)
+
+    def _qa_sample_dir(self, sample: EvalSample) -> Path:
+        return self._artifact_dir / "qa" / self._sample_relative_dir(sample)
