@@ -13,11 +13,17 @@ from service.runtime import TableAgentService
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run TableAgent or delete saved CLI runs.")
     parser.add_argument("--config", default="config.yaml", help="Path to the private service configuration.")
-    parser.add_argument(
+    stage_group = parser.add_mutually_exclusive_group()
+    stage_group.add_argument(
         "--stage",
-        choices=("structure", "qa", "all"),
+        choices=("structure", "qa", "understanding", "all"),
         default="all",
         help="Processing stage to run (default: all).",
+    )
+    stage_group.add_argument(
+        "--understanding",
+        action="store_true",
+        help="Run only the spreadsheet header understanding stage.",
     )
     parser.add_argument(
         "--workbook",
@@ -99,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    stage = "understanding" if args.understanding else args.stage
     cleanup_requested = bool(args.delete_job or args.delete_all_jobs)
     if cleanup_requested and (
         args.workbook
@@ -107,13 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         or args.sheet
         or args.artifacts
         or args.max_workers is not None
+        or args.understanding
     ):
         parser.error("cleanup flags cannot be combined with workbook processing flags")
     if not cleanup_requested and not args.workbook:
         parser.error("--workbook is required unless deleting saved jobs")
-    if not cleanup_requested and args.stage in {"qa", "all"} and not any(query.strip() for query in args.query):
+    if not cleanup_requested and stage in {"qa", "all"} and not any(query.strip() for query in args.query):
         parser.error("--query is required when --stage is qa or all")
-    if args.artifacts and args.stage != "qa":
+    if args.artifacts and stage != "qa":
         parser.error("--artifacts requires --stage qa")
     if args.artifacts and args.embed:
         parser.error("--embed cannot be combined with indexed --artifacts")
@@ -144,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             run_kwargs = {
-                "stage": args.stage,
+                "stage": stage,
                 "workbooks": args.workbook,
                 "queries": args.query,
                 "embed": args.embed,

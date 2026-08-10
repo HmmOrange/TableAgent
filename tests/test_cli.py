@@ -68,6 +68,44 @@ def test_cli_parser_accepts_embed_and_sheet_flags():
     assert args.sheet == ["Summary,Detail", "Archive"]
 
 
+def test_cli_parser_accepts_understanding_flag():
+    args = cli.build_parser().parse_args(["--understanding", "--workbook", "book.xlsx"])
+
+    assert args.understanding is True
+    assert args.stage == "all"
+
+
+def test_cli_rejects_understanding_with_stage():
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(
+            ["--understanding", "--stage", "qa", "--workbook", "book.xlsx"]
+        )
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_understanding_requires_no_query(monkeypatch, capsys):
+    captured = {}
+
+    class FakeTableAgentService:
+        @staticmethod
+        def from_config(*args, **kwargs):
+            return FakeTableAgentService()
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return {"stage": kwargs["stage"]}
+
+    monkeypatch.setattr(cli, "TableAgentService", FakeTableAgentService)
+
+    result = cli.main(["--understanding", "--workbook", "book.xlsx"])
+
+    assert result == 0
+    assert captured["stage"] == "understanding"
+    assert captured["queries"] == []
+    assert json.loads(capsys.readouterr().out) == {"stage": "understanding"}
+
+
 def test_cli_parser_accepts_repeatable_artifact_files():
     args = cli.build_parser().parse_args(
         [
