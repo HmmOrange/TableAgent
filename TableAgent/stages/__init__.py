@@ -16,6 +16,10 @@ _EXPORTS = {
     "StructureInput": "TableAgent.stages.structure",
     "StructureOutput": "TableAgent.stages.structure",
     "StructureStage": "TableAgent.stages.structure",
+    "HeaderUnderstanding": "TableAgent.stages.understanding",
+    "UnderstandingInput": "TableAgent.stages.understanding",
+    "UnderstandingOutput": "TableAgent.stages.understanding",
+    "UnderstandingStage": "TableAgent.stages.understanding",
 }
 
 

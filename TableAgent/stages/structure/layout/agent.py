@@ -66,8 +66,7 @@ class LayoutAgent(BaseTableAgent):
             system_prompt=LAYOUT_MAS_SYSTEM_PROMPT,
         )
         iteration_dir.joinpath("layout_response.txt").write_text(response.content, encoding="utf-8")
-        updated, discarded, directions, model_changelog = extract_layout_structure(response.content)
-        directions = _normalize_remaining_directions(directions, direction)
+        updated, discarded, _, model_changelog = extract_layout_structure(response.content)
         if not _is_valid_structure(updated):
             updated = structure_text
         else:
@@ -81,33 +80,9 @@ class LayoutAgent(BaseTableAgent):
             sent_to="deterministic_verifier",
             content=changelog,
             iteration=iteration,
-            metadata={"viewport": viewport_range, "directions": directions, "changed": changed},
+            metadata={"viewport": viewport_range, "changed": changed},
         ))
-        return LayoutResult(updated, changelog, directions, changed, response, discarded)
-
-
-def _normalize_remaining_directions(directions: list[str], current_direction: str) -> list[str]:
-    current = str(current_direction).strip().lower()
-    opposites = {
-        "right": "left",
-        "left": "right",
-        "down": "up",
-        "up": "down",
-    }
-    blocked = {current}
-    opposite = opposites.get(current)
-    if opposite is not None:
-        blocked.add(opposite)
-
-    normalized: list[str] = []
-    for direction in directions:
-        value = str(direction).strip().lower()
-        if value not in opposites or value in blocked or value in normalized:
-            continue
-        normalized.append(value)
-        if len(normalized) == 2:
-            break
-    return normalized
+        return LayoutResult(updated, changelog, [], changed, response, discarded)
 
 
 def _canonical_yaml(text: str) -> Any:

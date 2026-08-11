@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
@@ -23,7 +25,7 @@ from TableAgent.artifacts import (
     sheet_artifact_dir,
     workbook_artifact_dir,
 )
-from TableAgent.configs import load_config
+from TableAgent.configs import TableAgentConfig, load_config
 from TableAgent.pipeline import TableAgentPipeline
 from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.utils.paths import safe_name
@@ -40,9 +42,11 @@ from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
 from TableAgent.stages.retrieval import RetrievalInput
 from TableAgent.stages.structure import StructureStage
+from TableAgent.rendering.workbook import WorkbookRenderer
+from TableAgent.stages.understanding import UnderstandingInput, UnderstandingStage
 
 
-Stage = Literal["structure", "qa", "all"]
+Stage = Literal["structure", "qa", "understanding", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
 
 
@@ -135,6 +139,29 @@ class TableAgentService:
                 output_dir.mkdir(parents=True, exist_ok=True)
                 normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
                 self._validate_sheet_filters(normalized, selected_sheets)
+
+                if stage == "understanding":
+                    understandings = self._run_understanding(
+                        normalized,
+                        selected_sheets=selected_sheets,
+                        output_dir=output_dir,
+                        max_workers=worker_count,
+                        include_artifact_paths=persist,
+                    )
+                    result = {
+                        "job_id": run_id,
+                        "stage": stage,
+                        "workbooks": [item["name"] for item in normalized],
+                        "understandings": understandings,
+                        "artifacts": self._artifact_paths(output_dir) if persist else [],
+                    }
+                    if persist:
+                        (output_dir / "run.json").write_text(
+                            json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
+                            encoding="utf-8",
+                        )
+                        result["artifacts"] = self._artifact_paths(output_dir)
+                    return result
 
                 structures: list[dict[str, Any]] = []
                 answers: list[dict[str, Any]] = []
@@ -1014,6 +1041,78 @@ class TableAgentService:
         self._validate_workbook(path)
         return path
 
+    def _run_understanding(
+        self,
+        normalized: list[dict[str, Any]],
+        *,
+        selected_sheets: tuple[str, ...],
+        output_dir: Path,
+        max_workers: int,
+        include_artifact_paths: bool,
+    ) -> list[dict[str, Any]]:
+        understanding_root = output_dir / "understanding"
+        understanding_config = self._pipeline_config(
+            "understanding",
+            output_dir,
+            understanding_root,
+            max_workers=max_workers,
+        )
+        understanding_config.setdefault("max_refinement_rounds", 1)
+        understanding_config.setdefault("max_context_chars", 100000)
+        understanding_config.setdefault("render_timeout_seconds", 60)
+        understanding_config.setdefault("image_tile_overlap", 0)
+        settings = replace(
+            TableAgentConfig.from_config(understanding_config),
+            workbook_show_coordinates=False,
+        )
+        tasks = [
+            (item, sheet_name)
+            for item in normalized
+            for sheet_name in self._selected_sheet_names(item["path"], selected_sheets)
+        ]
+
+        def run_one(task: tuple[dict[str, Any], str]) -> dict[str, Any]:
+            item, sheet_name = task
+            vlm_client, owned = self._worker_client("vlm")
+            try:
+                artifact_dir = workbook_artifact_dir(
+                    understanding_root,
+                    str(item["name"]),
+                    str(item["sha256"]),
+                    sources=False,
+                ) / safe_name(sheet_name)
+                stage = UnderstandingStage(
+                    WorkbookRenderer(settings, logging.getLogger("table-agent.understanding")),
+                    vlm_client,
+                )
+                output = stage.run(
+                    UnderstandingInput(
+                        workbook_path=Path(item["path"]),
+                        sheet_name=sheet_name,
+                        artifact_dir=artifact_dir,
+                    )
+                )
+                record = {
+                    "workbook": str(item["name"]),
+                    "sheet": sheet_name,
+                    **output.understanding.to_dict(),
+                    "artifact": (
+                        output.result_path.relative_to(output_dir).as_posix()
+                        if include_artifact_paths
+                        else None
+                    ),
+                }
+                return record
+            finally:
+                self._close_worker_client(vlm_client, owned)
+
+        if max_workers > 1 and len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                records = list(executor.map(run_one, tasks))
+        else:
+            records = [run_one(task) for task in tasks]
+        return records
+
     def _answer_client(self) -> Any:
         if self._llm_client is None:
             self._llm_client = create_model_client(
@@ -1647,8 +1746,8 @@ class TableAgentService:
 
 def _validate_stage(stage: str) -> Stage:
     value = str(stage).strip().lower()
-    if value not in {"structure", "qa", "all"}:
-        raise ValueError("stage must be one of: structure, qa, all")
+    if value not in {"structure", "qa", "understanding", "all"}:
+        raise ValueError("stage must be one of: structure, qa, understanding, all")
     return value  # type: ignore[return-value]
 
 

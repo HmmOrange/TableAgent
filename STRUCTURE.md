@@ -1,14 +1,16 @@
 # Repository Structure
 
 TableAgent extracts verified table structure from Excel workbooks, retrieves the
-most relevant workbook context, and answers natural-language questions. The code
-is organized around three business stages: structure, retrieval, and QA.
+most relevant workbook context, and answers natural-language questions. Its main
+pipeline has three stages--structure, retrieval, and QA--with understanding as an
+independently runnable header-analysis stage.
 
 ## Runtime Flow
 
 ```text
 CLI or HTTP API (`service/`)
     -> configuration and model clients (`TableAgent/configs/`, `TableAgent/llm.py`)
+    -> optional standalone understanding stage (`TableAgent/stages/understanding/`)
     -> pipeline composition (`TableAgent/pipeline/`)
     -> structure stage (`TableAgent/stages/structure/`)
     -> retrieval stage (`TableAgent/stages/retrieval/`)
@@ -195,6 +197,20 @@ aggregation. Phase-specific helpers should stay with their stage.
 
 Each stage exposes an explicit entry point in `stage.py` and typed handoff objects
 in `contracts.py`. The stage package is the canonical owner of its business logic.
+
+### `TableAgent/stages/understanding/`
+
+Independently renders the top-left worksheet viewport, capped at 50 rows by 50
+columns, and asks the layout VLM for four lists of visible header labels: row
+headers, column headers, row-group headers, and column-group headers.
+
+- `contracts.py` defines the four-list result and stage input/output objects.
+- `prompts.py` defines the strict JSON-only VLM contract.
+- `parsing.py` validates and deduplicates the returned label lists.
+- `stage.py` owns viewport selection, rendering, one repair attempt, and artifacts.
+
+This stage is explicit-only through `--stage understanding` or `--understanding`.
+It is not part of the current structure, retrieval, QA, or `all` execution flow.
 
 ### `TableAgent/stages/structure/`
 

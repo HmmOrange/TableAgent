@@ -241,6 +241,6 @@ def _bool(value: Any) -> bool:
 
 def _phase(value: Any) -> str:
     phase = str(value).strip().lower()
-    if phase not in {"structure", "qa", "all"}:
-        raise ValueError("table_agent.phase must be one of: structure, qa, all")
+    if phase not in {"structure", "qa", "understanding", "all"}:
+        raise ValueError("table_agent.phase must be one of: structure, qa, understanding, all")
     return phase

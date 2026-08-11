@@ -4,6 +4,11 @@ The stage packages are the canonical home for phase-specific business logic.
 
 ```text
 stages/
+  understanding/
+    contracts.py            four-list header understanding contract
+    prompts.py              header classification VLM prompts
+    parsing.py              strict response parsing and validation
+    stage.py                top-left 50x50 viewport understanding
   structure/
     layout/                 VLM layout extraction
     verification/           deterministic structure checks

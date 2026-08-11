@@ -1011,6 +1011,8 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
     for iteration_dir in (tmp_path / "artifacts" / "iterations").iterdir():
         assert (iteration_dir / "viewport.png").is_file()
         assert (iteration_dir / "layout_prompt.txt").is_file()
+        assert (iteration_dir / "directions" / "prompt.txt").is_file()
+        assert (iteration_dir / "directions" / "result.json").is_file()
         assert not (iteration_dir / "verification.py").exists()
         assert (iteration_dir / "verification_output.json").is_file()
 

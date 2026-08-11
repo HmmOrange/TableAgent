@@ -122,7 +122,7 @@ def test_table_agent_phase_is_named_structure():
     assert TableAgentConfig.from_config(table_agent_config).phase == "structure"
 
     table_agent_config["phase"] = "verification"
-    with pytest.raises(ValueError, match="structure, qa, all"):
+    with pytest.raises(ValueError, match="structure, qa, understanding, all"):
         TableAgentConfig.from_config(table_agent_config)
 
 
