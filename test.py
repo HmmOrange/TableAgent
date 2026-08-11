@@ -1,5 +1,4 @@
-from TableAgent.stages.structure.compression.compressor import SheetCompressor
-from TableAgent.stages.structure.compression.imager import SheetImager
+from TableAgent.stages.compression import SheetCompressor, SheetImager
 
 sheet_compressor = SheetCompressor()
 
@@ -17,4 +16,3 @@ SheetImager.to_image(
     sheet_name=sheet_name,
     output_path="abc.jpg"
 )
-

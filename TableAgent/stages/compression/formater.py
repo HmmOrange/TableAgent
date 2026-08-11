@@ -2,7 +2,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import PatternFill, Alignment, Font, Side, Border
 from openpyxl.utils import get_column_letter
 
-from TableAgent.stages.structure.compression.helper import SheetHelper
+from .helper import SheetHelper
 
 class SheetFormater:
     @staticmethod

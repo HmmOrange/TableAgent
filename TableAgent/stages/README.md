@@ -4,6 +4,11 @@ The stage packages are the canonical home for phase-specific business logic.
 
 ```text
 stages/
+  compression/
+    compressor.py          repeated-row workbook compaction
+    formater.py            worksheet index and width formatting
+    helper.py              merged-cell-safe worksheet mutations
+    imager.py              compressed worksheet image generation
   understanding/
     contracts.py            four-list header understanding contract
     prompts.py              header classification VLM prompts

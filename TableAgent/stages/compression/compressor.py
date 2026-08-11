@@ -4,8 +4,8 @@ from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment
 
-from TableAgent.stages.structure.compression.helper import SheetHelper
-from TableAgent.stages.structure.compression.formater import SheetFormater
+from .formater import SheetFormater
+from .helper import SheetHelper
 
 
 class SheetCompressor:

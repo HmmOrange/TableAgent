@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from PIL import Image
 
-from TableAgent.stages.structure.compression.helper import SheetHelper
+from .helper import SheetHelper
 
 class SheetImager:
     @staticmethod
