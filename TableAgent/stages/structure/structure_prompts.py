@@ -5,9 +5,8 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "quote every free-text scalar, including names, labels, descriptions, worksheet names, and changelog text. "
     "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
-    "when visible cells show a distinct table start. Report a concise changelog and "
-    "cardinal directions only when the visible edge shows potential headers continuing "
-    "in that direction, never merely because more data cells continue."
+    "when visible cells show a distinct table start. Report a concise changelog. "
+    "Do not decide viewport traversal or output traversal directions."
 )
 
 LAYOUT_MAS_USER_PROMPT_TEMPLATE = """\
@@ -101,26 +100,8 @@ structure:
   regional_breakdown:
     <table details here if exists>
 changelog: "<concise changes, or No change.>"
-remaining_directions: [<right|down|left|up as supported by visible evidence>]
-
-Rules for remaining_directions:
-- `remaining_directions` is only for unexplored perpendicular branches visible from
-  the current viewport. It is not for continuing the current movement axis.
-- Include a direction only when cells at that visible edge show a potential header:
-  a label-bearing, merged/spanned, or distinctly header-formatted row or column that
-  appears to continue beyond the viewport in that direction.
-- Think about headers only. Do not include a direction just because there are more
-  data rows, schedule marks, blank grid cells, formulas, borders, or worksheet area.
-- Data values, blank cells, worksheet bounds, or table content without potential
-  header evidence are not sufficient. If no direction has such evidence, return `[]`.
-- If Movement direction is `right`, do not include `right` or `left`.
-- If Movement direction is `left`, do not include `left` or `right`.
-- If Movement direction is `down`, do not include `down` or `up`.
-- If Movement direction is `up`, do not include `up` or `down`.
-- The orchestrator separately applies deterministic workbook checks before rendering
-  any suggested range, so never suggest directions for data-only continuation.
-- Do not repeat directions. Output at most two directions.
 
 If the viewport does not show a table or only shows empty/non-table context, keep the
-current structure unchanged and use changelog: "No change.".
+current structure unchanged and use changelog: "No change.". Return only the YAML
+envelope above.
 """

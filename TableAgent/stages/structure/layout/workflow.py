@@ -20,6 +20,7 @@ from TableAgent.stages.structure.traversal import (
 )
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.stages.structure.layout.agent import LayoutAgent
+from TableAgent.stages.structure.layout.direction_agent import DirectionAgent
 from TableAgent.stages.structure.layout.parsing import nullify_structure_ranges
 from TableAgent.stages.structure.verification import DeterministicVerifier
 
@@ -45,10 +46,13 @@ class TableLayoutWorkflow:
         layout_agent: LayoutAgent,
         verifier: DeterministicVerifier,
         progress_callback: Callable[..., None] | None = None,
+        *,
+        direction_agent: DirectionAgent | None = None,
     ):
         self.settings = settings
         self.renderer = renderer
         self.layout_agent = layout_agent
+        self.direction_agent = direction_agent or DirectionAgent(layout_agent.vlm)
         self.verifier = verifier
         self.progress_callback = progress_callback
 
@@ -97,6 +101,7 @@ class TableLayoutWorkflow:
             "feedback": "No viewport has been verified.",
         }
         responses: list[Any] = []
+        direction_cache: dict[tuple[int, int], list[str]] = {}
         first_image: Path | None = None
         iteration = 0
 
@@ -149,6 +154,19 @@ class TableLayoutWorkflow:
                     )
 
             (iteration_dir / "structure_before.yaml").write_text(structure_text, encoding="utf-8")
+            suggested_directions = direction_cache.get(task.viewport.key)
+            if suggested_directions is None:
+                self._progress("directions", **progress_fields)
+                direction_result = self.direction_agent.run(
+                    workbook_name=workbook_path.name,
+                    sheet_name=sheet_name,
+                    viewport_range=viewport_range,
+                    direction=task.direction.name.lower(),
+                    image_path=image_path,
+                    iteration_dir=iteration_dir,
+                )
+                suggested_directions = direction_result.directions
+                direction_cache[task.viewport.key] = suggested_directions
             self._progress("layout", **progress_fields)
             layout = self.layout_agent.run(
                 metadata_text=metadata_text,
@@ -186,7 +204,7 @@ class TableLayoutWorkflow:
                 "viewport": viewport_range,
                 "changed": layout.changed,
                 "layout_token_capped": layout.response.token_capped,
-                "layout_directions": layout.directions,
+                "layout_directions": suggested_directions,
                 "verification": last_verification,
                 "queue_size": len(queue),
             })
@@ -210,7 +228,7 @@ class TableLayoutWorkflow:
                     successful_viewports.add(task.viewport.key)
                     successful_ranges.add(viewport_range)
                     frontier = frontier_directions(table_range, task.viewport)
-                    suggested = [Direction.parse(value) for value in layout.directions]
+                    suggested = [Direction.parse(value) for value in suggested_directions]
                     discovered = [direction for direction in suggested if direction in frontier]
                     for direction in discovered:
                         if direction != Direction.STAY:
@@ -256,7 +274,7 @@ class TableLayoutWorkflow:
                 else:
                     zero_change_runs[task.direction] += 1
 
-            suggested = [Direction.parse(value) for value in layout.directions]
+            suggested = [Direction.parse(value) for value in suggested_directions]
             discovered = [direction for direction in suggested if direction in frontier]
             for direction in discovered:
                 if direction in {Direction.STAY, task.direction}:

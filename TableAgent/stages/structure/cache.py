@@ -15,10 +15,14 @@ from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import SheetMetadata
 from TableAgent.utils.paths import safe_name
 from TableAgent.stages.structure.structure_prompts import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
+from TableAgent.stages.structure.layout.direction_prompts import (
+    DIRECTION_SYSTEM_PROMPT,
+    DIRECTION_USER_PROMPT_TEMPLATE,
+)
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 
 
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -93,7 +97,7 @@ class StructureCache:
                 "source_sha256": source_hash,
                 "sheet_name": sheet_name,
                 "status": result.verification.get("status", "not_good"),
-                "workflow_version": 5,
+                "workflow_version": 6,
                 "artifacts": {"structure": "structure.yaml", "workbook": "workbook.xlsx"},
             }
             (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -141,7 +145,7 @@ class StructureCache:
             "schema": CACHE_SCHEMA_VERSION,
             "source_sha256": source_hash,
             "sheet_name": sheet_name,
-            "workflow_version": 5,
+            "workflow_version": 6,
             "viewport_rows": self.settings.viewport_rows,
             "viewport_columns": self.settings.viewport_columns,
             "shift_cells": self.settings.shift_cells,
@@ -149,7 +153,12 @@ class StructureCache:
             "structure_data_only": self.settings.structure_data_only,
             "layout_model": self.settings.layout_model_identity,
             "layout_prompt_sha256": hashlib.sha256(
-                (LAYOUT_MAS_SYSTEM_PROMPT + LAYOUT_MAS_USER_PROMPT_TEMPLATE).encode("utf-8")
+                (
+                    DIRECTION_SYSTEM_PROMPT
+                    + DIRECTION_USER_PROMPT_TEMPLATE
+                    + LAYOUT_MAS_SYSTEM_PROMPT
+                    + LAYOUT_MAS_USER_PROMPT_TEMPLATE
+                ).encode("utf-8")
             ).hexdigest(),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]

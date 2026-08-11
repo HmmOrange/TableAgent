@@ -224,7 +224,9 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert Path(output.metadata["changelog_path"]).is_file()
     assert Path(output.metadata["events_path"]).is_file()
     assert output.metadata["workbook_sheets"] == ["table-1"]
-    assert len(layout_vlm.calls) == 1
+    assert len(layout_vlm.calls) == 2
+    assert "remaining_directions" in layout_vlm.calls[0][0]
+    assert "remaining_directions" not in layout_vlm.calls[1][0]
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert output.metadata["qa"]["token_usage"] == {"prompt": 72, "completion": 12}
     assert output.token_usage == {"prompt": 78, "completion": 13}
@@ -296,7 +298,7 @@ remaining_directions: []
         "Metric: Name",
         "Value: Current",
     ]
-    assert "quote every free-text scalar" in layout_vlm.calls[0][2]
+    assert "quote every free-text scalar" in layout_vlm.calls[1][2]
 
 
 def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
@@ -1344,6 +1346,10 @@ def test_is_valid_structure_rules():
 
 
 def test_table_agent_layout_prompt_uses_deterministic_feedback():
+    from TableAgent.stages.structure.layout.direction_prompts import (
+        DIRECTION_SYSTEM_PROMPT,
+        DIRECTION_USER_PROMPT_TEMPLATE,
+    )
     from TableAgent.stages.structure.structure_prompts import (
         LAYOUT_MAS_SYSTEM_PROMPT,
         LAYOUT_MAS_USER_PROMPT_TEMPLATE,
@@ -1361,6 +1367,9 @@ def test_table_agent_layout_prompt_uses_deterministic_feedback():
     assert "Wrap every free-text scalar in double quotes" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "`sub_headers` is recursive" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
     assert "never discard grandchildren or deeper descendants" in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "remaining_directions" not in LAYOUT_MAS_USER_PROMPT_TEMPLATE
+    assert "remaining_directions" in DIRECTION_USER_PROMPT_TEMPLATE
+    assert "unexplored table branches" in DIRECTION_SYSTEM_PROMPT
 
 
 def test_strict_structure_normalizes_uncertain_ranges_to_null():
@@ -1765,8 +1774,8 @@ def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
         config={**common, "cache_namespace": "realhitbench"},
     )
 
-    assert siflex.structure_cache.root == cache_dir / "v5" / "datasets" / "siflex"
-    assert realhitbench.structure_cache.root == cache_dir / "v5" / "datasets" / "realhitbench"
+    assert siflex.structure_cache.root == cache_dir / "v6" / "datasets" / "siflex"
+    assert realhitbench.structure_cache.root == cache_dir / "v6" / "datasets" / "realhitbench"
     assert siflex.structure_cache.root != realhitbench.structure_cache.root
 
 
