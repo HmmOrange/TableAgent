@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -263,8 +264,23 @@ def _header_extras(header: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+@dataclass(frozen=True)
+class LayoutParseResult:
+    structure_text: str
+    discarded: str
+    directions: list[str]
+    changelog: str
+    rejected_headers: list[str]
+
+
 def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
     """Parse a LayoutAgent response without persisting its control envelope."""
+    result = extract_layout_structure_result(content)
+    return result.structure_text, result.discarded, result.directions, result.changelog
+
+
+def extract_layout_structure_result(content: str) -> LayoutParseResult:
+    """Parse a response and report headers rejected during normalization."""
     text = content.strip()
     candidates = [(match.group(1).strip(), match.span()) for match in _YAML_FENCE.finditer(text)]
     if not candidates:
@@ -277,22 +293,24 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
             recovered = _recover_layout_envelope(candidate)
             if recovered is None:
                 continue
-            normalized, candidate_discarded, directions, changelog = recovered
+            normalized, candidate_discarded, directions, changelog, rejected_headers = recovered
             discarded = "\n".join(part for part in (
                 (text[:span[0]] + "\n" + text[span[1]:]).strip(),
                 candidate_discarded,
             ) if part)
-            return (
+            return LayoutParseResult(
                 yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
                 discarded,
                 directions,
                 changelog,
+                rejected_headers,
             )
         if not isinstance(parsed, dict):
             continue
 
         source = parsed.get("structure") or parsed.get("updated_structure") or parsed
-        normalized = _normalize_layout_structure(source)
+        rejected_headers: list[str] = []
+        normalized = _normalize_layout_structure(source, rejected_headers=rejected_headers)
         if normalized is None:
             continue
 
@@ -301,20 +319,21 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
             directions = []
         changelog = str(parsed.get("changelog") or "").strip()
         discarded = (text[:span[0]] + "\n" + text[span[1]:]).strip()
-        return (
+        return LayoutParseResult(
             yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
             discarded,
             [str(direction).strip().lower() for direction in directions],
             changelog,
+            rejected_headers,
         )
 
     legacy, discarded = extract_strict_structure(content)
-    return legacy, discarded, [], ""
+    return LayoutParseResult(legacy, discarded, [], "", [])
 
 
 def _recover_layout_envelope(
     candidate: str,
-) -> tuple[dict[str, Any], str, list[str], str] | None:
+) -> tuple[dict[str, Any], str, list[str], str, list[str]] | None:
     structure_block = _extract_top_level_block(candidate, _LAYOUT_STRUCTURE_KEYS)
     if structure_block is None:
         return None
@@ -327,7 +346,8 @@ def _recover_layout_envelope(
         return None
 
     source = parsed.get("structure") or parsed.get("updated_structure")
-    normalized = _normalize_layout_structure(source)
+    rejected_headers: list[str] = []
+    normalized = _normalize_layout_structure(source, rejected_headers=rejected_headers)
     if normalized is None:
         return None
 
@@ -359,7 +379,7 @@ def _recover_layout_envelope(
         else:
             changelog = changelog_block[0].splitlines()[0].partition(":")[2].strip()
 
-    return normalized, discarded, directions, changelog
+    return normalized, discarded, directions, changelog, rejected_headers
 
 
 def _extract_top_level_block(
@@ -422,7 +442,11 @@ def _set_range_path_to_null(structure: dict[str, Any], field_path: str) -> bool:
     return False
 
 
-def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
+def _normalize_layout_structure(
+    parsed: Any,
+    *,
+    rejected_headers: list[str] | None = None,
+) -> dict[str, Any] | None:
     legacy = _normalize_structure(parsed)
     if legacy is not None:
         return legacy
@@ -436,14 +460,22 @@ def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
     for key, table in tables.items():
         headers = table.get("headers")
         if not isinstance(headers, list) or not headers:
-            return None
+            continue
         normalized_headers = []
         used_ids: set[str] = set()
-        for header in headers:
-            normalized = _normalize_layout_header(header, include_sub_headers=True, used_ids=used_ids)
+        for index, header in enumerate(headers):
+            normalized = _normalize_layout_header(
+                header,
+                include_sub_headers=True,
+                used_ids=used_ids,
+                path=f"{key}.headers[{index}]",
+                rejected_headers=rejected_headers,
+            )
             if normalized is None:
-                return None
+                continue
             normalized_headers.append(normalized)
+        if not normalized_headers:
+            continue
         normalized_tables[key] = {
             "id": str(table.get("id") or key).strip(),
             "name": str(table.get("name") or "").strip() or None,
@@ -451,7 +483,7 @@ def _normalize_layout_structure(parsed: Any) -> dict[str, Any] | None:
             "sheet": str(table.get("sheet") or "").strip() or None,
             "headers": normalized_headers,
         }
-    return normalized_tables
+    return normalized_tables or None
 
 
 def _table_mappings(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -477,11 +509,21 @@ def _normalize_layout_header(
     *,
     include_sub_headers: bool,
     used_ids: set[str],
+    path: str,
+    rejected_headers: list[str] | None,
 ) -> dict[str, Any] | None:
     if not isinstance(header, dict):
+        _reject_layout_header(rejected_headers, path, "header is not a mapping")
         return None
     label = str(header.get("label") or "").strip()
     if not label:
+        identity = ", ".join(
+            f"{key}={header[key]!r}"
+            for key in ("id", "header_range", "data_range")
+            if header.get(key) not in (None, "")
+        )
+        detail = f" ({identity})" if identity else ""
+        _reject_layout_header(rejected_headers, path, f"label is empty{detail}")
         return None
     orientation = str(header.get("orientation") or "column").strip().lower()
     if orientation not in {"row", "column"}:
@@ -506,19 +548,32 @@ def _normalize_layout_header(
     if include_sub_headers:
         sub_headers = header.get("sub_headers") or []
         if not isinstance(sub_headers, list):
-            return None
+            _reject_layout_header(rejected_headers, f"{path}.sub_headers", "value is not a list")
+            sub_headers = []
         normalized_sub_headers = []
-        for sub_header in sub_headers:
+        for index, sub_header in enumerate(sub_headers):
             child = _normalize_layout_header(
                 sub_header,
                 include_sub_headers=isinstance(sub_header, dict) and "sub_headers" in sub_header,
                 used_ids=used_ids,
+                path=f"{path}.sub_headers[{index}]",
+                rejected_headers=rejected_headers,
             )
             if child is None:
-                return None
+                continue
             normalized_sub_headers.append(child)
         normalized["sub_headers"] = normalized_sub_headers
     return normalized
+
+
+def _reject_layout_header(rejected_headers: list[str] | None, path: str, reason: str) -> None:
+    if rejected_headers is None:
+        return
+    rejected_headers.append(
+        f"{path} was rejected because {reason}. The candidate was removed; add it back only if "
+        "the workbook shows a meaningful label, using that exact visible text. Otherwise leave it "
+        "omitted. Preserve all accepted headers."
+    )
 
 
 def _normalize_range_value(value: Any) -> str | None:

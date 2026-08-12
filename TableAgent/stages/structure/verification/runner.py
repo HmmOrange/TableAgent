@@ -36,11 +36,21 @@ class DeterministicVerifier:
         sheet_name: str,
         structure_text: str,
         iteration_dir: Path,
+        preflight_errors: list[str] | None = None,
     ) -> DeterministicVerificationResult:
         structure_path = iteration_dir / "structure_after.yaml"
-        report = self._execute(workbook_path, sheet_name, structure_path)
         if not _is_valid_structure(structure_text):
             report = {"status": "not_good", "errors": ["Candidate structure is empty or invalid."]}
+        elif preflight_errors:
+            parser_errors = [str(error) for error in preflight_errors]
+            report = {
+                "status": "not_good",
+                "errors": parser_errors,
+                "parser_errors": parser_errors,
+                "feedback": "\n".join(parser_errors),
+            }
+        else:
+            report = self._execute(workbook_path, sheet_name, structure_path)
         repaired = str(report.get("repaired_structure_yaml") or structure_text)
         if repaired != structure_text:
             structure_path.write_text(repaired, encoding="utf-8")

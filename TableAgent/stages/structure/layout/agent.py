@@ -17,7 +17,7 @@ from TableAgent.llm import BaseLLM, LLMResponse
 
 from TableAgent.stages.structure.layout.parsing import (
     _is_valid_structure,
-    extract_layout_structure,
+    extract_layout_structure_result,
 )
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class LayoutResult:
     changed: bool
     response: LLMResponse
     discarded: str
+    rejected_headers: list[str]
 
 
 class LayoutAgent(BaseTableAgent):
@@ -66,13 +67,14 @@ class LayoutAgent(BaseTableAgent):
             system_prompt=LAYOUT_MAS_SYSTEM_PROMPT,
         )
         iteration_dir.joinpath("layout_response.txt").write_text(response.content, encoding="utf-8")
-        updated, discarded, _, model_changelog = extract_layout_structure(response.content)
+        parsed = extract_layout_structure_result(response.content)
+        updated = parsed.structure_text
         if not _is_valid_structure(updated):
             updated = structure_text
         else:
             updated = _union_existing_data_ranges(structure_text, updated)
         changed = bool(updated.strip()) and _canonical_yaml(updated) != _canonical_yaml(structure_text)
-        changelog = model_changelog or ("Structure updated." if changed else "No change.")
+        changelog = parsed.changelog or ("Structure updated." if changed else "No change.")
         if not changed:
             changelog = "No change."
         self.remember(AgentMessage(
@@ -82,7 +84,7 @@ class LayoutAgent(BaseTableAgent):
             iteration=iteration,
             metadata={"viewport": viewport_range, "changed": changed},
         ))
-        return LayoutResult(updated, changelog, [], changed, response, discarded)
+        return LayoutResult(updated, changelog, [], changed, response, parsed.discarded, parsed.rejected_headers)
 
 
 def _canonical_yaml(text: str) -> Any:

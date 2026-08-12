@@ -3,6 +3,8 @@ LAYOUT_MAS_SYSTEM_PROMPT = (
     "viewport and update the supplied structure. Return only YAML. Keep verified "
     "existing information, add or correct only evidence visible in the image, and "
     "quote every free-text scalar, including names, labels, descriptions, worksheet names, and changelog text. "
+    "The letters above the grid and numbers beside the grid are renderer-added coordinate guides, not workbook cells; "
+    "never turn them into headers or data. "
     "never output null, UNKNOWN, or placeholder range values. The first viewport starts at the upper-left "
     "cell of the sheet used_range, not necessarily at a table. Create a new table entry "
     "when visible cells show a distinct table start. Report a concise changelog. "
@@ -20,9 +22,24 @@ Current structure.yaml:
 {structure_text}
 {feedback_block}
 Range rules:
+- Ignore the renderer-added coordinate guides outside the cell grid: column letters
+  across the top and row numbers down the left. They are not workbook content and
+  must never become a header such as `row_index`, a label, or part of any range.
+  Cell A1 is the first actual workbook cell inside those guides.
 - `orientation` describes where the governed data extends from the header: use
   `column` when values continue downward (including a leftmost label column), and
   `row` only when values continue horizontally to the right.
+- Determine orientation from the header's semantic relationship to its values, not
+  from the shape of `header_range`. Before choosing it, identify representative
+  visible values that answer "what values does this header name?" Those values must
+  be inside `data_range`. Choose `column` when the governed values are successive
+  entries of that semantic field down the sheet, and choose `row` when they are
+  successive entries of that semantic field across the sheet. The shape or merged
+  extent of the header cell does not determine orientation.
+- Perform a final semantic self-check for every header: its label and description
+  must truthfully describe representative cells in `data_range`; `column` values
+  must be below the header and `row` values must be to its right. Correct any header
+  that fails this check before returning YAML.
 - `header_range` is only the cell or merged/spanned cells that visibly contain the
   header label. It must not include data cells, neighboring headers, or an entire
   visible column/row block.

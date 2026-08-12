@@ -406,6 +406,35 @@ def _adjacent_merged_header_workbook(path: Path) -> None:
     workbook.save(path)
 
 
+def _wrapped_merged_header_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("B1:B3")
+    worksheet["B1"] = "Civilian\nnoninstitu-\ntional\npopulation"
+    worksheet["B4"] = 100
+    workbook.save(path)
+
+
+def _layered_merged_header_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:D1")
+    worksheet.merge_cells("A2:A3")
+    worksheet.merge_cells("B2:B3")
+    worksheet.merge_cells("C2:D2")
+    worksheet["A1"] = "Group"
+    worksheet["A2"] = "Total"
+    worksheet["B2"] = "Percent"
+    worksheet["C2"] = "Breakdown"
+    worksheet["C3"] = "First"
+    worksheet["D3"] = "Second"
+    for column, value in zip("ABCD", (10, 20, 30, 40)):
+        worksheet[f"{column}4"] = value
+    workbook.save(path)
+
+
 def _run_verifier(tmp_path: Path, workbook_path: Path, structure: dict) -> dict:
     structure_path = tmp_path / "structure_after.yaml"
     structure_path.write_text(yaml.safe_dump(structure, sort_keys=False), encoding="utf-8")
@@ -757,7 +786,156 @@ def test_verifier_repairs_header_label_and_ranges_from_workbook(tmp_path: Path):
     assert header["data_range"] == "A2:B2"
 
 
-def test_verifier_moves_blank_merged_follower_to_next_matching_header(tmp_path: Path):
+def test_verifier_repairs_merged_children_before_parent_coverage(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _layered_merged_header_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "headers": [{
+                "label": "Group",
+                "orientation": "column",
+                "header_range": "A1:D1",
+                "data_range": "A4:D4",
+                "sub_headers": [
+                    {
+                        "label": "Total",
+                        "orientation": "column",
+                        "header_range": "A3",
+                        "data_range": "A4",
+                        "sub_headers": [],
+                    },
+                    {
+                        "label": "Percent",
+                        "orientation": "column",
+                        "header_range": "B3",
+                        "data_range": "B4",
+                        "sub_headers": [],
+                    },
+                    {
+                        "label": "Breakdown",
+                        "orientation": "column",
+                        "header_range": "C2:D2",
+                        "data_range": "C4:D4",
+                        "sub_headers": [
+                            {
+                                "label": "First",
+                                "orientation": "column",
+                                "header_range": "C3",
+                                "data_range": "C4",
+                                "sub_headers": [],
+                            },
+                            {
+                                "label": "Second",
+                                "orientation": "column",
+                                "header_range": "D3",
+                                "data_range": "D4",
+                                "sub_headers": [],
+                            },
+                        ],
+                    },
+                ],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    children = repaired["table1"]["headers"][0]["sub_headers"]
+
+    assert report["status"] == "good"
+    assert children[0]["header_range"] == "A2:A3"
+    assert children[1]["header_range"] == "B2:B3"
+    assert not any("do not cover visible layered header cells" in error for error in report["errors"])
+
+
+def test_verifier_corrects_label_only_at_or_above_similarity_threshold(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    structure = {
+        "table1": {
+            "headers": [{
+                "label": "Regoin",
+                "description": "Sales region",
+                "orientation": "column",
+                "header_range": "A1",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    header = yaml.safe_load(report["repaired_structure_yaml"])["table1"]["headers"][0]
+
+    assert report["status"] == "good"
+    assert header["label"] == "Region"
+    assert header["header_range"] == "A1"
+    assert header["data_range"] == "A2:A10"
+
+
+def test_verifier_rejects_header_when_label_similarity_is_below_threshold(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    structure = {
+        "table1": {
+            "headers": [{
+                "id": "year",
+                "label": "Year",
+                "description": "Year of the data",
+                "orientation": "column",
+                "header_range": "A1",
+                "data_range": "A2:A10",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    header = yaml.safe_load(report["repaired_structure_yaml"])["table1"]["headers"][0]
+
+    assert report["status"] == "not_good"
+    assert header["id"] == "year"
+    assert header["label"] == "Year"
+    assert header["description"] == "Year of the data"
+    assert header["header_range"] is None
+    assert header["data_range"] is None
+    assert "matches label 'Year' by only" in report["feedback"]
+    assert "at least 80% is required" in report["feedback"]
+
+
+def test_verifier_feedback_excludes_completed_repairs(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    structure = {
+        "table1": {
+            "headers": [
+                {
+                    "label": "Regoin",
+                    "orientation": "column",
+                    "header_range": "A1",
+                    "data_range": "A2:A10",
+                    "sub_headers": [],
+                },
+                {
+                    "label": "Year",
+                    "orientation": "column",
+                    "header_range": "A1",
+                    "data_range": "A2:A10",
+                    "sub_headers": [],
+                },
+            ],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+
+    assert report["actions"] == ["table1.headers[0].label corrected to workbook text 'Region'"]
+    assert "corrected to workbook text" not in report["feedback"]
+    assert report["feedback"].startswith("Fix the following structure errors.")
+    assert "1. table1.headers[1].header_range A1 contains workbook text 'Region'" in report["feedback"]
+
+
+def test_verifier_rejects_blank_merged_follower_without_using_neighbor(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     _adjacent_merged_header_workbook(workbook_path)
     structure = {
@@ -779,9 +957,40 @@ def test_verifier_moves_blank_merged_follower_to_next_matching_header(tmp_path: 
     repaired = yaml.safe_load(report["repaired_structure_yaml"])
     header = repaired["table1"]["headers"][0]
 
+    assert report["status"] == "not_good"
+    assert header["label"] == "Second"
+    assert header["description"] == "Second group"
+    assert header["header_range"] is None
+    assert header["data_range"] is None
+    assert "merged range A1:B1" in report["feedback"]
+    assert "workbook text is 'First'" in report["feedback"]
+    assert "Select the exact range containing 'Second'" in report["feedback"]
+
+
+def test_verifier_expands_similar_blank_merged_follower_to_full_range(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    _wrapped_merged_header_workbook(workbook_path)
+    structure = {
+        "table1": {
+            "headers": [{
+                "label": "Civilian noninstitutional population",
+                "description": "Population",
+                "orientation": "column",
+                "header_range": "B3",
+                "data_range": "B4",
+                "sub_headers": [],
+            }],
+        }
+    }
+
+    report = _run_verifier(tmp_path, workbook_path, structure)
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    header = repaired["table1"]["headers"][0]
+
     assert report["status"] == "good"
-    assert header["header_range"] == "C1:D1"
-    assert header["data_range"] == "C2:D2"
+    assert header["label"] == "Civilian noninstitu- tional population"
+    assert header["header_range"] == "B1:B3"
+    assert header["data_range"] == "B4"
 
 
 def removed_semantic_verifier_applies_updated_structure(tmp_path: Path):
@@ -979,6 +1188,30 @@ def test_data_range_updates_preserve_union_with_existing_range():
     assert merged["table1"]["headers"][0]["data_range"] == "A2:A35"
 
 
+def test_layout_prompt_excludes_renderer_coordinate_guides(tmp_path: Path):
+    agent = LayoutAgent(StaticLayoutVLM())
+    image_path = tmp_path / "viewport.png"
+    Image.new("RGB", (100, 80), "white").save(image_path)
+    iteration_dir = tmp_path / "iteration"
+    iteration_dir.mkdir()
+
+    agent.run(
+        metadata_text="sheet_name: Sheet1\nused_range: A1:A10",
+        structure_text="",
+        image_path=image_path,
+        viewport_range="A1:A10",
+        direction="stay",
+        feedback="",
+        iteration=1,
+        iteration_dir=iteration_dir,
+    )
+
+    prompt = (iteration_dir / "layout_prompt.txt").read_text(encoding="utf-8")
+    assert "row numbers down the left" in prompt
+    assert "must never become a header such as `row_index`" in prompt
+    assert "Cell A1 is the first actual workbook cell" in prompt
+
+
 def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monkeypatch):
     _patch_libreoffice_workbook_render(monkeypatch)
     workbook_path = tmp_path / "book.xlsx"
@@ -1043,6 +1276,89 @@ def test_workflow_nulls_ranges_after_max_retry(tmp_path: Path, monkeypatch):
     assert header["header_range"] is None
     assert header["data_range"] is None
     assert "retries exhausted" in (tmp_path / "retry-artifacts" / "changelog.md").read_text().lower()
+
+
+def test_workflow_retries_with_feedback_for_only_rejected_header(tmp_path: Path, monkeypatch):
+    _patch_libreoffice_workbook_render(monkeypatch)
+
+    class RepairingLayoutVLM:
+        model_name = "layout"
+        temperature = 0.0
+
+        def __init__(self):
+            self.prompts = []
+
+        def generate_with_image(self, prompt, image_path, system_prompt=None):
+            self.prompts.append(prompt)
+            row_label = "" if len(self.prompts) == 1 else "Row index"
+            return LLMResponse(content=yaml.safe_dump({
+                "structure": {
+                    "table1": {
+                        "name": "Sales",
+                        "headers": [
+                            {
+                                "id": "row_index",
+                                "label": row_label,
+                                "orientation": "column",
+                                "header_range": "A1",
+                                "data_range": "A2:A10",
+                                "sub_headers": [],
+                            },
+                            {
+                                "id": "region",
+                                "label": "Region",
+                                "orientation": "column",
+                                "header_range": "A1",
+                                "data_range": "A2:A10",
+                                "sub_headers": [],
+                            },
+                        ],
+                    }
+                },
+                "remaining_directions": [],
+            }, sort_keys=False))
+
+    class NoDirections:
+        def run(self, **kwargs):
+            return types.SimpleNamespace(directions=[])
+
+    class PassingVerifier(DeterministicVerifier):
+        executions = 0
+
+        def _execute(self, workbook_path, sheet_name, structure_path):
+            self.executions += 1
+            return {"status": "good"}
+
+    workbook_path = tmp_path / "book.xlsx"
+    _workbook(workbook_path)
+    vlm = RepairingLayoutVLM()
+    verifier = PassingVerifier()
+    workflow = TableLayoutWorkflow(
+        _settings(tmp_path, max_retry=2),
+        WorkbookRenderer(_settings(tmp_path), logger=None),
+        LayoutAgent(vlm),
+        verifier,
+        direction_agent=NoDirections(),
+    )
+
+    result = workflow.run(
+        workbook_path=workbook_path,
+        sheet_name="Sheet1",
+        metadata=SheetMetadata("Sheet1", "A1:A10", []),
+        output_dir=tmp_path / "header-repair-artifacts",
+    )
+
+    first_iteration = tmp_path / "header-repair-artifacts" / "iterations" / "0001_stay_A1_A10"
+    first_structure = yaml.safe_load((first_iteration / "structure_after.yaml").read_text())
+    first_verification = json.loads((first_iteration / "verification_output.json").read_text())
+    final_headers = yaml.safe_load(result.structure_text)["table1"]["headers"]
+
+    assert [header["id"] for header in first_structure["table1"]["headers"]] == ["region"]
+    assert first_verification["status"] == "not_good"
+    assert verifier.executions == 1
+    assert "table1.headers[0] was rejected because label is empty" in vlm.prompts[1]
+    assert "label: Region" in vlm.prompts[1]
+    assert [header["id"] for header in final_headers] == ["row_index", "region"]
 
 
 def test_workflow_ignores_suggested_direction_outside_used_range(tmp_path: Path, monkeypatch):

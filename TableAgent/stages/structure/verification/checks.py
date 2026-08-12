@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterator
 
 import openpyxl
 import yaml
 from openpyxl.utils.cell import get_column_letter, range_boundaries
+
+
+_LABEL_MATCH_THRESHOLD = 0.80
 
 
 def verify_structure(
@@ -41,21 +45,20 @@ def verify_structure(
     finally:
         workbook.close()
 
-    feedback_parts = []
-    if actions:
-        feedback_parts.append("Deterministic verifier repaired workbook-backed fields: " + "; ".join(actions))
     if errors:
-        feedback_parts.append(
-            "Deterministic verifier could not repair these fields. "
-            "LayoutAgent must fill only these exact null fields with concrete A1 ranges/text: "
-            + "; ".join(errors)
+        feedback = (
+            "Fix the following structure errors. Preserve every field not named below. "
+            "Update each referenced header or range using the visible workbook cells:\n"
+            + "\n".join(f"{index}. {error}" for index, error in enumerate(errors, start=1))
         )
+    else:
+        feedback = "Structure verified by workbook-backed code."
     return {
         "status": "not_good" if errors or null_fields else "good",
         "errors": errors,
         "actions": actions,
         "null_fields": list(dict.fromkeys(null_fields)),
-        "feedback": " ".join(feedback_parts) if feedback_parts else "Structure verified by workbook-backed code.",
+        "feedback": feedback,
         "repaired_structure_yaml": yaml.safe_dump(structure, sort_keys=False, allow_unicode=True).strip(),
     }
 
@@ -118,16 +121,6 @@ def _merged_box_for(worksheet: Any, box: tuple[int, int, int, int]) -> tuple[int
     return None
 
 
-def _next_text_box_right(worksheet: Any, box: tuple[int, int, int, int], used_box: tuple[int, int, int, int]):
-    row = box[1]
-    for col in range(box[2] + 1, used_box[2] + 1):
-        value = worksheet.cell(row=row, column=col).value
-        if value is not None and str(value).strip():
-            candidate = (col, row, col, row)
-            return _merged_box_for(worksheet, candidate) or candidate
-    return None
-
-
 def _effective_value(worksheet: Any, row: int, col: int) -> Any:
     value = worksheet.cell(row=row, column=col).value
     if value is not None:
@@ -156,9 +149,10 @@ def _set_null(header: dict[str, Any], path: str, field_name: str, null_fields: l
     null_fields.append(f"{path}.{field_name}")
 
 
-def _header_at_path(root: dict[str, Any], child_path: str) -> dict[str, Any] | None:
+def _header_at_path(root: dict[str, Any], child_path: str, root_path: str = "") -> dict[str, Any] | None:
     child: Any = root
-    for token in re.findall(r"sub_headers\[(\d+)\]", child_path):
+    relative_path = child_path[len(root_path):] if root_path and child_path.startswith(root_path) else child_path
+    for token in re.findall(r"sub_headers\[(\d+)\]", relative_path):
         sub_headers = child.get("sub_headers", [])
         index = int(token)
         if not isinstance(sub_headers, list) or index >= len(sub_headers):
@@ -167,14 +161,26 @@ def _header_at_path(root: dict[str, Any], child_path: str) -> dict[str, Any] | N
     return child if isinstance(child, dict) else None
 
 
-def _repair_label(header: dict[str, Any], texts: list[str], actions: list[str], path: str) -> None:
+def _label_similarity(label: str, text: str) -> float:
+    return SequenceMatcher(
+        None,
+        _clean_text(label).casefold(),
+        _clean_text(text).casefold(),
+    ).ratio()
+
+
+def _repair_label(header: dict[str, Any], texts: list[str], actions: list[str], path: str) -> float:
     if not texts:
-        return
+        return 0.0
     extracted = _clean_text(" ".join(texts))
     current = str(header.get("label") or "")
+    similarity = _label_similarity(current, extracted)
+    if similarity < _LABEL_MATCH_THRESHOLD:
+        return similarity
     if extracted and (_norm(extracted) != _norm(current) or _clean_text(current) != current):
         actions.append(f"{path}.label corrected to workbook text {extracted!r}")
         header["label"] = extracted
+    return similarity
 
 
 def _repair_data_box(header_box, data_box, orientation, used_box):
@@ -197,11 +203,12 @@ def _walk_headers(structure: dict[str, Any]):
 def _walk_header(header: Any, path: str):
     if not isinstance(header, dict):
         return
-    yield path, header
     sub_headers = header.get("sub_headers") or []
     if isinstance(sub_headers, list):
         for index, child in enumerate(sub_headers):
             yield from _walk_header(child, f"{path}.sub_headers[{index}]")
+    # Normalize descendants before checking parent containment and coverage.
+    yield path, header
 
 
 def _header_text_boxes_in_band(worksheet: Any, band_box):
@@ -286,18 +293,26 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
             if merged_box and merged_box != header_box:
                 merged_texts = _cell_texts(worksheet, merged_box)
                 direct_value = worksheet.cell(row=original_header_box[1], column=original_header_box[0]).value
-                if direct_value is None and label and merged_texts and not any(_norm(label) in _norm(text) for text in merged_texts):
-                    next_box = _next_text_box_right(worksheet, merged_box, used_box)
-                    if next_box is not None:
-                        actions.append(f"{path}.header_range moved from blank merged follower {header_range} to next workbook header {_box_to_range(next_box)}")
-                        header_box = next_box
-                    else:
-                        header_box = merged_box
+                merged_similarity = max((_label_similarity(label, text) for text in merged_texts), default=0.0)
+                if direct_value is None and label and merged_texts and merged_similarity < _LABEL_MATCH_THRESHOLD:
+                    workbook_text = " / ".join(merged_texts)
+                    _set_null(header, path, "header_range", null_fields)
+                    if data_range is not None:
+                        _set_null(header, path, "data_range", null_fields)
+                    errors.append(
+                        f"{path}.header_range {header_range} is a blank cell inside merged range "
+                        f"{_box_to_range(merged_box)}, whose workbook text is {workbook_text!r}, "
+                        f"not label {label!r}. Select the exact range containing {label!r}."
+                    )
+                    header_box = None
                 else:
                     actions.append(f"{path}.header_range expanded from {header_range} to {_box_to_range(merged_box)} using workbook merged cells")
                     header_box = merged_box
-                header["header_range"] = _box_to_range(header_box)
-                header_range = header["header_range"]
+                if header_box is not None:
+                    header["header_range"] = _box_to_range(header_box)
+                    header_range = header["header_range"]
+            if header_box is None:
+                return
             if not _contains(used_box, header_box):
                 errors.append(f"{path}.header_range is outside used range: {header_range}")
             texts = _cell_texts(worksheet, header_box)
@@ -306,13 +321,27 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                 if data_range is not None:
                     _set_null(header, path, "data_range", null_fields)
                 errors.append(f"{path}.header_range contains no visible header text: {header_range}")
-            else:
-                _repair_label(header, texts, actions, path)
+            elif len(texts) == 1:
+                similarity = _repair_label(header, texts, actions, path)
+                if similarity < _LABEL_MATCH_THRESHOLD:
+                    workbook_text = " / ".join(texts)
+                    _set_null(header, path, "header_range", null_fields)
+                    if data_range is not None:
+                        _set_null(header, path, "data_range", null_fields)
+                    errors.append(
+                        f"{path}.header_range {header_range} contains workbook text {workbook_text!r}, "
+                        f"which matches label {label!r} by only {similarity:.0%}; at least "
+                        f"{_LABEL_MATCH_THRESHOLD:.0%} is required. Select the exact range containing {label!r}."
+                    )
+                    header_box = None
             if len(texts) > 1:
                 _set_null(header, path, "header_range", null_fields)
                 if data_range is not None:
                     _set_null(header, path, "data_range", null_fields)
                 errors.append(f"{path}.header_range contains multiple unrelated texts {texts!r}: {header_range}")
+                header_box = None
+            if header_box is None:
+                return
 
     if data_range is not None:
         try:
@@ -401,7 +430,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                     errors.append(f"{path}.data_range overlaps {child_path}.header_range: {data_range} vs {child_header_range}")
         for child_path, child_data_range, child_data_box in child_data_boxes:
             if not _contains(data_box, child_data_box):
-                child = _header_at_path(header, child_path)
+                child = _header_at_path(header, child_path, path)
                 if child is not None:
                     _set_null(child, child_path, "data_range", null_fields)
                 errors.append(f"{child_path}.data_range is not contained by parent {path}.data_range: {child_data_range} vs {data_range}")
@@ -414,7 +443,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
             else:
                 invalid = child_header_box[1] < header_box[1] or child_header_box[3] > header_box[3] or child_header_box[0] <= header_box[2]
             if invalid:
-                child = _header_at_path(header, child_path)
+                child = _header_at_path(header, child_path, path)
                 if child is not None:
                     _set_null(child, child_path, "header_range", null_fields)
                 errors.append(f"{child_path}.header_range is outside the parent header hierarchy: {child_header_range} vs {header_range}")

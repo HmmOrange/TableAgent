@@ -191,6 +191,7 @@ class TableLayoutWorkflow:
                 sheet_name=sheet_name,
                 structure_text=structure_text,
                 iteration_dir=iteration_dir,
+                preflight_errors=layout.rejected_headers,
             )
             structure_text = verification.structure_text
             last_verification = {
