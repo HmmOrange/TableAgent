@@ -58,8 +58,13 @@ Range rules:
   headers, data starts to the right of all header and sub-header columns.
 - If a parent header has `sub_headers`, the parent `data_range` should cover the
   child data ranges only; it must not include child `header_range` cells.
-- A child `header_range` must sit inside the parent header span: below it for column
-  orientation, or to the right of it for row orientation.
+- Use `sub_headers` only for visible parent-child groups. For column orientation,
+  a child's header and data columns must be contained within the parent's columns;
+  for row orientation, its rows must be contained within the parent's rows.
+  Adjacent non-contained spans are siblings, even when semantically related.
+- Before returning, check every child against this containment rule. If it fails,
+  move the intact header to the nearest containing ancestor or the top-level
+  `headers` list; do not alter correct coordinates merely to force containment.
 - `sub_headers` is recursive and may contain any number of header levels. Every child
   uses the same header schema and may declare its own `sub_headers`. Use
   `sub_headers: []` only when that header has no visible children.

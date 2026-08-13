@@ -754,7 +754,7 @@ def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
     report = _run_verifier(tmp_path, workbook_path, structure)
 
     assert report["status"] == "not_good"
-    assert any("header_range contains multiple unrelated texts" in error for error in report["errors"])
+    assert any("contains multiple unrelated texts" in error for error in report["errors"])
     assert "table1.headers[0].data_range" in report["null_fields"]
 
 
@@ -899,8 +899,8 @@ def test_verifier_rejects_header_when_label_similarity_is_below_threshold(tmp_pa
     assert header["description"] == "Year of the data"
     assert header["header_range"] is None
     assert header["data_range"] is None
-    assert "matches label 'Year' by only" in report["feedback"]
-    assert "at least 80% is required" in report["feedback"]
+    assert "Header 'year' was incorrectly put at A1" in report["feedback"]
+    assert "Find 'Year' and try again" in report["feedback"]
 
 
 def test_verifier_feedback_excludes_completed_repairs(tmp_path: Path):
@@ -931,8 +931,8 @@ def test_verifier_feedback_excludes_completed_repairs(tmp_path: Path):
 
     assert report["actions"] == ["table1.headers[0].label corrected to workbook text 'Region'"]
     assert "corrected to workbook text" not in report["feedback"]
-    assert report["feedback"].startswith("Fix the following structure errors.")
-    assert "1. table1.headers[1].header_range A1 contains workbook text 'Region'" in report["feedback"]
+    assert report["feedback"].startswith("Fix these header problems.")
+    assert "Header 'Year' was incorrectly put at A1" in report["feedback"]
 
 
 def test_verifier_rejects_blank_merged_follower_without_using_neighbor(tmp_path: Path):
@@ -962,9 +962,9 @@ def test_verifier_rejects_blank_merged_follower_without_using_neighbor(tmp_path:
     assert header["description"] == "Second group"
     assert header["header_range"] is None
     assert header["data_range"] is None
-    assert "merged range A1:B1" in report["feedback"]
-    assert "workbook text is 'First'" in report["feedback"]
-    assert "Select the exact range containing 'Second'" in report["feedback"]
+    assert "merged header A1:B1" in report["feedback"]
+    assert "containing 'First'" in report["feedback"]
+    assert "Find 'Second' and try again" in report["feedback"]
 
 
 def test_verifier_expands_similar_blank_merged_follower_to_full_range(tmp_path: Path):
@@ -1210,6 +1210,31 @@ def test_layout_prompt_excludes_renderer_coordinate_guides(tmp_path: Path):
     assert "row numbers down the left" in prompt
     assert "must never become a header such as `row_index`" in prompt
     assert "Cell A1 is the first actual workbook cell" in prompt
+
+
+def test_layout_retry_prompt_forbids_reusing_rejected_ranges(tmp_path: Path):
+    agent = LayoutAgent(StaticLayoutVLM())
+    image_path = tmp_path / "viewport.png"
+    Image.new("RGB", (100, 80), "white").save(image_path)
+    iteration_dir = tmp_path / "iteration"
+    iteration_dir.mkdir()
+
+    agent.run(
+        metadata_text="sheet_name: Sheet1\nused_range: A1:B10",
+        structure_text="table1:\n  headers: []",
+        image_path=image_path,
+        viewport_range="A1:B10",
+        direction="stay",
+        feedback="Year header was not at B3. Select the exact range containing 'Year'.",
+        iteration=2,
+        iteration_dir=iteration_dir,
+    )
+
+    prompt = (iteration_dir / "layout_prompt.txt").read_text(encoding="utf-8")
+    assert "RETRY THIS CORRECTION:" in prompt
+    assert "Do not use them again" in prompt
+    assert "Change every flagged field" in prompt
+    assert "Year header was not at B3" in prompt
 
 
 def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monkeypatch):

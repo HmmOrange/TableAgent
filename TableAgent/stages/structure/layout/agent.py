@@ -52,7 +52,18 @@ class LayoutAgent(BaseTableAgent):
         iteration: int,
         iteration_dir: Path,
     ) -> LayoutResult:
-        feedback_block = f"\nDeterministic verifier feedback:\n{feedback}\n" if feedback else ""
+        feedback_block = ""
+        if feedback:
+            # Lead with a short correction rule so weaker models do not anchor on
+            # the rejected coordinate in the previous YAML.
+            feedback_block = (
+                "\nRETRY THIS CORRECTION:\n"
+                "The ranges named below are wrong. Do not use them again. "
+                "Find each label in the image and try again. "
+                "Change every flagged field before returning YAML.\n\n"
+                "Deterministic verifier feedback:\n"
+                f"{feedback}\n"
+            )
         prompt = LAYOUT_MAS_USER_PROMPT_TEMPLATE.format(
             metadata_text=metadata_text,
             viewport_range=viewport_range,

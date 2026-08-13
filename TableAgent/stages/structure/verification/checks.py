@@ -13,6 +13,83 @@ from openpyxl.utils.cell import get_column_letter, range_boundaries
 _LABEL_MATCH_THRESHOLD = 0.80
 
 
+def _header_display_map(structure: Any) -> dict[str, str]:
+    """Map internal YAML paths to short names suitable for model feedback."""
+    display: dict[str, str] = {}
+    for path, header in _walk_headers(structure):
+        if not isinstance(header, dict):
+            continue
+        identifier = str(header.get("id") or header.get("label") or "header").strip()
+        display[path] = f"Header '{identifier}'"
+    return display
+
+
+def _simplify_feedback(errors: list[str], structure: Any) -> list[str]:
+    display = _header_display_map(structure)
+    simplified: list[str] = []
+    for error in errors:
+        message = str(error)
+        for path in sorted(display, key=len, reverse=True):
+            message = message.replace(path, display[path])
+        message = re.sub(r" by only \d+%", "", message)
+        message = message.replace("; at least 80% is required", "")
+        message = message.replace(
+            "is required when a sub-header is declared",
+            "is missing. Add its data range.",
+        )
+        message = re.sub(
+            r"(Header '[^']+')\.header_range ([^ ]+) contains workbook text (.+?), which matches label (.+?)\. Select the exact range containing (.+?)\.",
+            r"\1 was incorrectly put at \2; it contains \3. Find \5 and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+')\.header_range ([^ ]+) is a blank cell inside merged range ([^,]+), whose workbook text is (.+?), not label (.+?)\. Select the exact range containing (.+?)\.",
+            r"\1 was incorrectly put at \2; that cell belongs to merged header \3 containing \4. Find \6 and try again.",
+            message,
+        )
+        message = re.sub(r"(Header '[^']+')\.header_range", r"\1", message)
+        message = re.sub(r"(Header '[^']+')\.data_range", r"\1 data range", message)
+        message = re.sub(r"(Header '[^']+')\.orientation", r"\1 orientation", message)
+        message = re.sub(r"(Header '[^']+')\.sub_headers", r"\1", message)
+        message = re.sub(
+            r"^(Header '.+?')(?:\.sub_headers)? do not cover visible layered header cells under parent (.*?): (.*)$",
+            r"\1 is missing these visible child headers under \2: \3. Add them and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') is outside used range: (.+)",
+            r"\1 was incorrectly put at \2, outside the table. Find the header and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') contains no visible header text: (.+)",
+            r"\1 was incorrectly put at \2, where no header text is visible. Find the header and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') data range is outside used range: (.+)",
+            r"\1 data range \2 is outside the table. Correct it and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') data range contains no visible data: (.+)",
+            r"\1 data range \2 contains no visible data. Correct it and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') data range is not contained by parent (Header '[^']+') data range: (.+)",
+            r"\1 data range is outside \2. Correct the hierarchy and try again.",
+            message,
+        )
+        message = re.sub(
+            r"(Header '[^']+') is outside the parent header hierarchy: (.+)",
+            r"\1 is under the wrong parent. Correct the hierarchy and try again.",
+            message,
+        )
+        simplified.append(message)
+    return simplified
+
+
 def verify_structure(
     workbook_path: str | Path,
     sheet_name: str,
@@ -45,17 +122,18 @@ def verify_structure(
     finally:
         workbook.close()
 
+    feedback_errors = _simplify_feedback(errors, structure)
     if errors:
         feedback = (
-            "Fix the following structure errors. Preserve every field not named below. "
-            "Update each referenced header or range using the visible workbook cells:\n"
-            + "\n".join(f"{index}. {error}" for index, error in enumerate(errors, start=1))
+            "Fix these header problems. Do not reuse a rejected range. Find the named header "
+            "in the image and try again:\n"
+            + "\n".join(f"{index}. {error}" for index, error in enumerate(feedback_errors, start=1))
         )
     else:
         feedback = "Structure verified by workbook-backed code."
     return {
         "status": "not_good" if errors or null_fields else "good",
-        "errors": errors,
+        "errors": feedback_errors,
         "actions": actions,
         "null_fields": list(dict.fromkeys(null_fields)),
         "feedback": feedback,
