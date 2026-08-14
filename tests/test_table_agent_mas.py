@@ -665,7 +665,7 @@ def test_verifier_rejects_missing_visible_layered_subheaders(tmp_path: Path):
     report = _run_verifier(tmp_path, workbook_path, structure)
 
     assert report["status"] == "not_good"
-    assert any("do not cover visible layered header cells" in error for error in report["errors"])
+    assert any("is missing these visible child headers" in error for error in report["errors"])
 
 
 def test_verifier_rejects_subheader_without_data_range(tmp_path: Path):
