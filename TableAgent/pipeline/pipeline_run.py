@@ -78,6 +78,13 @@ class PipelineRunner(RuntimeComponent):
 
     def _run_cached_qa(self, sample, record) -> PipelineOutput:
         start_time = self.start_timer()
+        materialize = getattr(
+            self.runtime,
+            "_materialize_structure_artifact",
+            None,
+        )
+        if callable(materialize):
+            record = materialize(record)
         structure_text = record.structure_path.read_text(encoding="utf-8")
         qa_output = self.stages.qa.run(QAInput(
             question=sample.question,
