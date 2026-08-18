@@ -221,6 +221,13 @@ def test_environment_and_operators():
     assert len(score_hdrs) > 0
     assert score_hdrs[0].id == "score"
 
+    score_hdr = env.operators.get_header("table1", "score")
+    assert score_hdr is not None
+    assert score_hdr.description == "Numeric score assigned to each person."
+    assert range_to_a1(score_hdr.data_range) == "G3:G22"
+    assert "description='Numeric score assigned to each person.'" in repr(score_hdr)
+    assert "data_range='G3:G22'" in repr(score_hdr)
+
     # Read range
     val = env.operators.read_range("B3:C4")
     assert val == [["Ha", "Minh"], ["An", "Gia"]]
