@@ -152,7 +152,9 @@ class PerfectRetrievalMixin:
     @classmethod
     def _perfect_question_score(cls, question: str, candidate: SourceCandidate) -> float:
         score = float(candidate.lexical_score)
-        compact_question = cls._normalized_name(question)
+        normalized_question = " ".join(re.findall(
+            r"[\w]+", unicodedata.normalize("NFKC", str(question)).casefold(), flags=re.UNICODE
+        ))
         try:
             structure = yaml.safe_load(candidate.structure_text) or {}
         except yaml.YAMLError:
@@ -162,8 +164,10 @@ class PerfectRetrievalMixin:
 
         def reward_exact_label(value: Any, weight: float) -> None:
             nonlocal score
-            normalized = cls._normalized_name(str(value or ""))
-            if len(normalized) >= 3 and normalized in compact_question:
+            normalized = " ".join(re.findall(
+                r"[\w]+", unicodedata.normalize("NFKC", str(value or "")).casefold(), flags=re.UNICODE
+            ))
+            if len(normalized) >= 3 and f" {normalized} " in f" {normalized_question} ":
                 score += weight
 
         def reward_headers(headers: Any) -> None:
@@ -178,6 +182,11 @@ class PerfectRetrievalMixin:
             if isinstance(table, dict):
                 reward_exact_label(table.get("name"), 6.0)
                 reward_headers(table.get("headers"))
+                groups = table.get("groups")
+                if isinstance(groups, list):
+                    for group in groups:
+                        if isinstance(group, dict):
+                            reward_exact_label(group.get("label"), 8.0)
         return score
 
     def _explicit_sheet_candidate(self, sample) -> SourceCandidate | None:

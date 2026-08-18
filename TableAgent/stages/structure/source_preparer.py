@@ -21,7 +21,7 @@ from TableAgent.stages.structure.layout.parsing import _is_valid_structure
 
 from .retrieval_artifacts import write_sheet_retrieval_cards
 
-LAYOUT_WORKFLOW_VERSION = 6
+LAYOUT_WORKFLOW_VERSION = 7
 
 
 class SourcePreparer:

@@ -16,7 +16,7 @@ def workbook_artifact_dir(
 ) -> Path:
     """Return the nested workbook directory used by cache or job artifacts."""
     base = safe_name(workbook_name)
-    if sha256:
+    if sha256 and not sources:
         base = f"{base}_{sha256[:8]}"
     return root / "sources" / base if sources else root / base
 

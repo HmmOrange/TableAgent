@@ -64,7 +64,7 @@ class FilterOperator(BaseOperator):
         case_sensitive: bool = False,
         ignore_accents: bool = False,
     ) -> pd.Series:
-        """Apply one condition across every leaf column under a parent header."""
+        """Apply one condition across every leaf column under a layered parent header."""
         if not isinstance(dataframe, pd.DataFrame):
             raise TypeError("group_header_mask requires a pandas DataFrame.")
         mode = str(mode).strip().lower()

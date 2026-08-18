@@ -1,6 +1,7 @@
 from __future__ import annotations
 import yaml
 from typing import Any, Dict, List
+from TableAgent.domain.group import StructureGroup
 from TableAgent.domain.structure import Header
 from TableAgent.utils.excel_utils import parse_a1_range
 
@@ -36,6 +37,17 @@ def parse_header_dict(d: Dict[str, Any], sheet_name: str = "") -> Header:
         sub_headers=sub_headers
     )
 
+
+def parse_group_dict(d: Dict[str, Any], sheet_name: str = "") -> StructureGroup:
+    return StructureGroup(
+        id=str(d["id"]),
+        label=str(d["label"]),
+        group_range=_parse_optional_a1_range(d.get("group_range"), sheet_name),
+        data_range=_parse_optional_a1_range(d.get("data_range"), sheet_name),
+        axis=str(d["axis"]),
+        description=str(d["description"]),
+    )
+
 def load_table_structures(yaml_path: str) -> Dict[str, Dict[str, Any]]:
     """
     Load table configurations from structure.yaml and parse into Header and CellRange objects.
@@ -59,7 +71,11 @@ def load_table_structures(yaml_path: str) -> Dict[str, Dict[str, Any]]:
             "name": table_data.get("name", table_key),
             "description": table_data.get("description", ""),
             "sheet": sheet_name,
-            "headers": headers
+            "headers": headers,
+            "groups": [
+                parse_group_dict(group, sheet_name)
+                for group in table_data.get("groups") or []
+            ],
         }
     return parsed
 

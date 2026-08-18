@@ -1,11 +1,12 @@
 from __future__ import annotations
 from typing import List, Optional
+from TableAgent.domain.group import StructureGroup
 from TableAgent.domain.structure import Header
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.utils import flatten_headers, _lexical_overlap_score
 
 class StructureOperator(BaseOperator):
-    """Operator for querying table structures and headers."""
+    """Operator for querying table structures, headers, and semantic groups."""
     name = "structure"
     description = "Query table ids and header metadata from the loaded structure.yaml."
     examples = (
@@ -14,6 +15,10 @@ class StructureOperator(BaseOperator):
         "operators.find_headers(table_id, query) -> list[Header]",
         "operators.get_header(table_id, header_id) -> Header | None",
         "operators.resolve_header_columns(table_id, parent_header_id) -> list[str]",
+        "operators.list_groups(table_id) -> list[StructureGroup]",
+        "operators.find_groups(table_id, query) -> list[StructureGroup]",
+        "operators.get_group(table_id, group_id) -> StructureGroup | None",
+        "operators.intersect_group_with_header(table_id, group_id, header_id) -> CellRange | None",
     )
 
     def list_tables(self) -> List[str]:
@@ -70,6 +75,40 @@ class StructureOperator(BaseOperator):
             return result
 
         return leaf_ids(header)
+
+    def list_groups(self, table_id: str) -> List[StructureGroup]:
+        table = self.env.get_table_structure(table_id)
+        return list(table.get("groups") or []) if table else []
+
+    def find_groups(self, table_id: str, query: str) -> List[StructureGroup]:
+        import re
+        import unicodedata
+
+        def normalize(value: str) -> str:
+            text = unicodedata.normalize("NFKC", str(value)).casefold()
+            return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
+
+        normalized_query = normalize(query)
+        query_tokens = set(normalized_query.split())
+        scored = []
+        for group in self.list_groups(table_id):
+            fields = [normalize(group.id), normalize(group.label), normalize(group.description)]
+            exact = any(field and f" {field} " in f" {normalized_query} " for field in fields[:2])
+            overlap = max((len(query_tokens & set(field.split())) for field in fields), default=0)
+            if exact or overlap:
+                scored.append((10 if exact else 0, overlap, group))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [group for _, _, group in scored]
+
+    def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
+        return next((group for group in self.list_groups(table_id) if group.id == group_id), None)
+
+    def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str):
+        group = self.get_group(table_id, group_id)
+        header = self.get_header(table_id, header_id)
+        if group is None or header is None or group.data_range is None or header.data_range is None:
+            return None
+        return group.data_range.intersection(header.data_range)
 
 if __name__ == "__main__":
     import argparse

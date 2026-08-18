@@ -6,6 +6,7 @@ import pandas as pd
 
 from TableAgent.domain.ranges import AxisSelection, Cell, CellRange
 from TableAgent.domain.structure import Header
+from TableAgent.domain.group import StructureGroup
 from TableAgent.stages.qa.experience import ExperiencePool
 from TableAgent.utils.structure_utils import load_formula_relations, load_table_structures
 from TableAgent.stages.qa.environment.notebook import Notebook
@@ -67,6 +68,7 @@ class QAEnvironment:
             "CellRange": CellRange,
             "AxisSelection": AxisSelection,
             "Header": Header,
+            "StructureGroup": StructureGroup,
         }
         if np is not None:
             initial_ns["np"] = np

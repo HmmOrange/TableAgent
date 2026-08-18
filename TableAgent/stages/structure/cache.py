@@ -20,9 +20,14 @@ from TableAgent.stages.structure.layout.direction_prompts import (
     DIRECTION_USER_PROMPT_TEMPLATE,
 )
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
+from TableAgent.stages.structure.group_enrichment import (
+    GROUP_REPAIR_PROMPT_TEMPLATE,
+    GROUP_SYSTEM_PROMPT,
+    GROUP_USER_PROMPT_TEMPLATE,
+)
 
 
-CACHE_SCHEMA_VERSION = 6
+CACHE_SCHEMA_VERSION = 7
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -97,7 +102,7 @@ class StructureCache:
                 "source_sha256": source_hash,
                 "sheet_name": sheet_name,
                 "status": result.verification.get("status", "not_good"),
-                "workflow_version": 6,
+                "workflow_version": 7,
                 "artifacts": {"structure": "structure.yaml", "workbook": "workbook.xlsx"},
             }
             (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -145,7 +150,7 @@ class StructureCache:
             "schema": CACHE_SCHEMA_VERSION,
             "source_sha256": source_hash,
             "sheet_name": sheet_name,
-            "workflow_version": 6,
+            "workflow_version": 7,
             "viewport_rows": self.settings.viewport_rows,
             "viewport_columns": self.settings.viewport_columns,
             "shift_cells": self.settings.shift_cells,
@@ -158,6 +163,9 @@ class StructureCache:
                     + DIRECTION_USER_PROMPT_TEMPLATE
                     + LAYOUT_MAS_SYSTEM_PROMPT
                     + LAYOUT_MAS_USER_PROMPT_TEMPLATE
+                    + GROUP_SYSTEM_PROMPT
+                    + GROUP_USER_PROMPT_TEMPLATE
+                    + GROUP_REPAIR_PROMPT_TEMPLATE
                 ).encode("utf-8")
             ).hexdigest(),
         }

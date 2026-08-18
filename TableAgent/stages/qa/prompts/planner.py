@@ -22,6 +22,7 @@ When a requested field is a parent header, plan to resolve all applicable childr
 `operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with
 `operators.group_header_mask(...)`. A month/year in a sheet title or report name is context, not permission to replace
 the requested business field with a monthly tracking column unless the question explicitly asks for that tracking data.
+When the question explicitly names a structure group, preserve that group ID and range scope in the planned subtask.
 
 Provide your plan as JSON only, preferably inside a ```json code block.
 Use a DAG: each subtask may depend on earlier subtasks by id. Keep layers to:

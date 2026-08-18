@@ -3,11 +3,12 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+import yaml
 
 from TableAgent.llm import LLMResponse
 from TableAgent.stages.understanding import UnderstandingInput, UnderstandingStage
 from TableAgent.stages.understanding.parsing import parse_understanding
-from TableAgent.stages.understanding.stage import _top_left_viewport
+from TableAgent.stages.understanding.stage import _used_range
 from service.runtime import TableAgentService
 
 
@@ -42,46 +43,39 @@ def _workbook(path: Path, *, rows: int = 1, columns: int = 1) -> Path:
     return path
 
 
-def test_top_left_viewport_is_clipped_to_50_by_50(tmp_path: Path):
-    assert _top_left_viewport(_workbook(tmp_path / "large.xlsx", rows=80, columns=60), "Summary") == "A1:AX50"
-    assert _top_left_viewport(_workbook(tmp_path / "small.xlsx", rows=7, columns=4), "Summary") == "A1:D7"
+def test_understanding_uses_complete_worksheet_range(tmp_path: Path):
+    assert _used_range(_workbook(tmp_path / "large.xlsx", rows=80, columns=60), "Summary") == "A1:BH80"
+    assert _used_range(_workbook(tmp_path / "small.xlsx", rows=7, columns=4), "Summary") == "A1:D7"
 
 
-def test_parser_requires_exactly_four_string_lists_and_deduplicates():
+def test_parser_returns_flat_lists_and_deduplicates():
     result = parse_understanding(
-        json.dumps(
+        yaml.safe_dump(
             {
-                "row_headers": ["North", "North", "South"],
-                "column_headers": ["January"],
-                "row_group_headers": [],
-                "column_group_headers": ["Q1"],
+                "headers": ["Indexes", "June", "June"],
+                "groups": ["North", "North"],
             }
         )
     )
 
-    assert result.row_headers == ("North", "South")
-    assert result.column_headers == ("January",)
-    assert result.row_group_headers == ()
-    assert result.column_group_headers == ("Q1",)
+    assert result.headers == ("Indexes", "June")
+    assert result.groups == ("North",)
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"row_headers": []},
+        {"headers": []},
         {
-            "row_headers": [],
-            "column_headers": [],
-            "row_group_headers": [],
-            "column_group_headers": [],
+            "headers": [],
+            "groups": [],
             "extra": [],
         },
         {
-            "row_headers": [1],
-            "column_headers": [],
-            "row_group_headers": [],
-            "column_group_headers": [],
+            "headers": [1],
+            "groups": [],
         },
+        {"headers": [{"label": "Amount"}], "groups": []},
     ],
 )
 def test_parser_rejects_invalid_contracts(payload):
@@ -92,12 +86,10 @@ def test_parser_rejects_invalid_contracts(payload):
 def test_stage_renders_writes_artifacts_and_repairs_once(tmp_path: Path):
     workbook_path = _workbook(tmp_path / "book.xlsx", rows=8, columns=5)
     renderer = FakeRenderer()
-    valid = json.dumps(
+    valid = yaml.safe_dump(
         {
-            "row_headers": ["Region"],
-            "column_headers": ["Revenue"],
-            "row_group_headers": [],
-            "column_group_headers": ["2026"],
+            "headers": ["2026", "Revenue"],
+            "groups": ["Region"],
         }
     )
     vlm = FakeVLM(["not json", valid])
@@ -107,21 +99,20 @@ def test_stage_renders_writes_artifacts_and_repairs_once(tmp_path: Path):
 
     assert renderer.calls[0][2] == "A1:E8"
     assert len(vlm.calls) == 2
-    assert output.understanding.row_headers == ("Region",)
+    assert output.understanding.groups[0] == "Region"
     assert output.result_path.is_file()
-    assert (tmp_path / "artifacts" / "viewport.png").is_file()
+    assert (tmp_path / "artifacts" / "worksheet.png").is_file()
     assert (tmp_path / "artifacts" / "repair_response.txt").is_file()
-    assert json.loads(output.result_path.read_text(encoding="utf-8"))["column_headers"] == ["Revenue"]
+    result = yaml.safe_load(output.result_path.read_text(encoding="utf-8"))
+    assert result["headers"] == ["2026", "Revenue"]
 
 
 def test_service_runs_understanding_without_structure_or_query(tmp_path: Path, monkeypatch):
     source = _workbook(tmp_path / "book.xlsx", rows=3, columns=2)
-    response = json.dumps(
+    response = yaml.safe_dump(
         {
-            "row_headers": ["Product"],
-            "column_headers": ["Amount"],
-            "row_group_headers": [],
-            "column_group_headers": [],
+            "headers": ["Amount"],
+            "groups": ["Product"],
         }
     )
     vlm = FakeVLM([response])
@@ -160,7 +151,7 @@ def test_service_runs_understanding_without_structure_or_query(tmp_path: Path, m
 
     assert result["stage"] == "understanding"
     assert renderer_settings[0].workbook_show_coordinates is False
-    assert result["understandings"][0]["row_headers"] == ["Product"]
+    assert result["understandings"][0]["groups"] == ["Product"]
     assert "viewport" not in result["understandings"][0]
-    assert result["understandings"][0]["artifact"].endswith("headers.json")
+    assert result["understandings"][0]["artifact"].endswith("understanding.yaml")
     assert (tmp_path / "output" / "understanding-run" / "run.json").is_file()

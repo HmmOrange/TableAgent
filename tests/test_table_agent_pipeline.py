@@ -139,6 +139,12 @@ class FakeLayoutVLM:
 
     def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None) -> LLMResponse:
         self.calls.append((prompt, Path(image_path), system_prompt))
+        if system_prompt and "already been extracted" in system_prompt:
+            return LLMResponse(
+                content="groups: []\n",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
         structure = yaml.safe_dump(
             {
                 "structure": {
@@ -224,10 +230,14 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert Path(output.metadata["changelog_path"]).is_file()
     assert Path(output.metadata["events_path"]).is_file()
     assert output.metadata["workbook_sheets"] == ["table-1"]
-    assert len(layout_vlm.calls) == 2
+    assert len(layout_vlm.calls) == 3
     assert "remaining_directions" in layout_vlm.calls[0][0]
     assert "remaining_directions" not in layout_vlm.calls[1][0]
+    assert "group_range" not in layout_vlm.calls[1][0]
+    assert "Completed table from structure.yaml" in layout_vlm.calls[2][0]
+    assert "group_range" in layout_vlm.calls[2][0]
     assert layout_vlm.calls[0][1].name == "viewport.png"
+    assert layout_vlm.calls[2][1].name == "worksheet.png"
     assert output.metadata["qa"]["token_usage"] == {"prompt": 72, "completion": 12}
     assert output.token_usage == {"prompt": 78, "completion": 13}
 
@@ -241,6 +251,12 @@ def test_table_agent_repairs_unquoted_colon_text_end_to_end(tmp_path: Path):
             system_prompt: str | None = None,
         ) -> LLMResponse:
             self.calls.append((prompt, Path(image_path), system_prompt))
+            if system_prompt and "already been extracted" in system_prompt:
+                return LLMResponse(
+                    content="groups: []\n",
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                )
             return LLMResponse(
                 content="""structure:
   table1:
@@ -1774,8 +1790,8 @@ def test_table_agent_separates_structure_caches_by_dataset(tmp_path: Path):
         config={**common, "cache_namespace": "realhitbench"},
     )
 
-    assert siflex.structure_cache.root == cache_dir / "v6" / "datasets" / "siflex"
-    assert realhitbench.structure_cache.root == cache_dir / "v6" / "datasets" / "realhitbench"
+    assert siflex.structure_cache.root == cache_dir / "v7" / "datasets" / "siflex"
+    assert realhitbench.structure_cache.root == cache_dir / "v7" / "datasets" / "realhitbench"
     assert siflex.structure_cache.root != realhitbench.structure_cache.root
 
 

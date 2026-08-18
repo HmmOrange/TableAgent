@@ -28,7 +28,7 @@ class LayoutResult:
     changed: bool
     response: LLMResponse
     discarded: str
-    rejected_headers: list[str]
+    preflight_errors: list[str]
 
 
 class LayoutAgent(BaseTableAgent):
@@ -80,10 +80,11 @@ class LayoutAgent(BaseTableAgent):
         iteration_dir.joinpath("layout_response.txt").write_text(response.content, encoding="utf-8")
         parsed = extract_layout_structure_result(response.content)
         updated = parsed.structure_text
+        group_errors: list[str] = []
         if not _is_valid_structure(updated):
             updated = structure_text
         else:
-            updated = _union_existing_data_ranges(structure_text, updated)
+            updated, group_errors = _merge_existing_structure(structure_text, updated)
         changed = bool(updated.strip()) and _canonical_yaml(updated) != _canonical_yaml(structure_text)
         changelog = parsed.changelog or ("Structure updated." if changed else "No change.")
         if not changed:
@@ -95,7 +96,115 @@ class LayoutAgent(BaseTableAgent):
             iteration=iteration,
             metadata={"viewport": viewport_range, "changed": changed},
         ))
-        return LayoutResult(updated, changelog, [], changed, response, parsed.discarded, parsed.rejected_headers)
+        return LayoutResult(
+            updated,
+            changelog,
+            [],
+            changed,
+            response,
+            parsed.discarded,
+            parsed.preflight_errors + group_errors,
+        )
+
+
+def _merge_existing_structure(previous_text: str, updated_text: str) -> tuple[str, list[str]]:
+    merged = _union_existing_data_ranges(previous_text, updated_text)
+    try:
+        previous = yaml.safe_load(previous_text) if previous_text.strip() else None
+        updated = yaml.safe_load(merged) if merged.strip() else None
+    except yaml.YAMLError:
+        return merged, []
+    if not isinstance(previous, dict) or not isinstance(updated, dict):
+        return merged, []
+    errors: list[str] = []
+    changed = _merge_existing_groups(previous, updated, errors)
+    if not changed:
+        return merged, errors
+    return yaml.safe_dump(updated, sort_keys=False, allow_unicode=True).strip(), errors
+
+
+def _merge_existing_groups(
+    previous: dict[str, Any],
+    updated: dict[str, Any],
+    preflight_errors: list[str] | None = None,
+) -> bool:
+    changed = False
+    for table_id, previous_table in previous.items():
+        updated_table = updated.get(table_id)
+        if not isinstance(previous_table, dict) or not isinstance(updated_table, dict):
+            continue
+        old_groups = previous_table.get("groups") or []
+        new_groups = updated_table.get("groups") or []
+        if not isinstance(old_groups, list) or not isinstance(new_groups, list):
+            continue
+        new_by_id = {
+            str(group.get("id")): group
+            for group in new_groups
+            if isinstance(group, dict) and group.get("id")
+        }
+        for old_group in old_groups:
+            if not isinstance(old_group, dict) or not old_group.get("id"):
+                continue
+            group_id = str(old_group["id"])
+            new_group = new_by_id.get(group_id)
+            if new_group is None:
+                new_groups.append(dict(old_group))
+                changed = True
+                continue
+            for field in ("label", "description", "axis"):
+                if not new_group.get(field) and old_group.get(field):
+                    new_group[field] = old_group[field]
+                    changed = True
+            for field in ("group_range", "data_range"):
+                old_range = old_group.get(field)
+                new_range = new_group.get(field)
+                if not new_range and old_range:
+                    new_group[field] = old_range
+                    changed = True
+                    continue
+                if not old_range or not new_range:
+                    continue
+                try:
+                    old_box = range_boundaries(str(old_range))
+                    new_box = range_boundaries(str(new_range))
+                except (TypeError, ValueError):
+                    continue
+                if _boxes_overlap_or_touch(old_box, new_box):
+                    unioned = _box_to_range((
+                        min(old_box[0], new_box[0]), min(old_box[1], new_box[1]),
+                        max(old_box[2], new_box[2]), max(old_box[3], new_box[3]),
+                    ))
+                    if unioned != new_range:
+                        new_group[field] = unioned
+                        changed = True
+                elif preflight_errors is not None:
+                    preflight_errors.append(
+                        f"{table_id}.groups[{group_id}].{field}: disjoint viewport ranges; "
+                        "use separate group IDs or correct the range"
+                    )
+        old_ids = [
+            str(group.get("id"))
+            for group in old_groups
+            if isinstance(group, dict) and group.get("id")
+        ]
+        reordered = []
+        for group_id in old_ids:
+            match = next(
+                (group for group in new_groups if isinstance(group, dict) and str(group.get("id")) == group_id),
+                None,
+            )
+            if match is not None:
+                reordered.append(match)
+        reordered.extend(
+            group
+            for group in new_groups
+            if not isinstance(group, dict) or str(group.get("id")) not in old_ids
+        )
+        if reordered != new_groups:
+            new_groups[:] = reordered
+            changed = True
+        updated_table["groups"] = new_groups
+    return changed
 
 
 def _canonical_yaml(text: str) -> Any:

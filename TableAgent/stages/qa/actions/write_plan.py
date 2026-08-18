@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 from TableAgent.stages.qa.actions.base_action import BasePlanAction, PlanGenerationRequest, PlanGenerationResult
 from TableAgent.stages.qa.actions.llm_code_generation import get_structure_summary, get_table_catalog_summary
 from TableAgent.stages.qa.header_hints import question_header_hints
+from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.stages.qa.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.stages.qa.models.subtask import SubTask
 
@@ -176,6 +177,8 @@ class WriteQAPlanAction(BasePlanAction):
         prompt += (
             "\n\nExact question-to-header matches:\n"
             f"{question_header_hints(self.env, request.question, table_ids)}\n"
+            "\nExact question-to-group matches:\n"
+            f"{question_group_hints(self.env, request.question, table_ids)}\n"
             "Treat these matches as authoritative during inspection and synthesis."
         )
         if request.failure_context:
