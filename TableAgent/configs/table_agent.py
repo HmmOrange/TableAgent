@@ -10,6 +10,8 @@ from TableAgent.configs.routing import RoutingConfig
 @dataclass(frozen=True)
 class TableAgentConfig:
     phase: str
+    reuse_structure: bool
+    force_structure: bool
     structure_cache_dir: Path
     cache_namespace: str
     layout_model_identity: str | None
@@ -52,6 +54,13 @@ class TableAgentConfig:
         merged = table_agent_config_dict(config)
         return cls(
             phase=_phase(merged.get("phase", "all")),
+            reuse_structure=_bool(merged.get("reuse_structure", False)),
+            force_structure=_bool(
+                merged["force_structure"]
+            ) if "force_structure" in merged else (
+                not _bool(merged.get("reuse_structure", False))
+                and _phase(merged.get("phase", "all")) in {"all", "structure"}
+            ),
             structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
             cache_namespace=str(merged.get("cache_namespace", "default")),
             layout_model_identity=(str(merged["layout_model_identity"]) if merged.get("layout_model_identity") else None),

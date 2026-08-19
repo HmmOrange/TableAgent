@@ -613,6 +613,7 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     assert selected_path.parent == qa_artifact_dir
     assert relative_qa_dir.parts[0] == "qa"
     assert relative_qa_dir.parts[1].startswith("siflex_table-level")
+    assert relative_qa_dir.parts[2].startswith("source_")
     assert len(relative_qa_dir.parts) == 3
     assert selected_path.read_text(encoding="utf-8") == selected_structure
     assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
@@ -652,7 +653,10 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     relative_qa_run = qa_run_dir.relative_to(tmp_path / "qa")
     assert relative_qa_run.parts[0] == "qa"
     assert relative_qa_run.parts[1].startswith("cache_1")
+    assert relative_qa_run.parts[2].startswith("table-1_")
     assert len(relative_qa_run.parts) == 4
+    structure_path = Path(first.metadata["structure_path"])
+    assert structure_path.parent.name.startswith("table-1_")
 
 
 def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run(

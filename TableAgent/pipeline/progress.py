@@ -19,6 +19,7 @@ _LABELS = {
     "layout": "layout",
     "verify": "verify",
     "structure_done": "structure:done",
+    "directions": "directions",
     "qa": "qa",
     "answer": "answer",
     "done": "done",
@@ -41,6 +42,7 @@ _DEFAULT_FIELDS = (
     ("range", "range"),
     ("iteration", "iter"),
     ("direction", "dir"),
+    ("status", "status"),
 )
 
 

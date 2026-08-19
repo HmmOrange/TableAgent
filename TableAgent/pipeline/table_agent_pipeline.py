@@ -172,10 +172,12 @@ class TableAgentPipeline(BasePipeline):
             self.settings,
             self.layout_workflow,
             self._metadata_for_workbook_sheet,
+            progress_callback=self._progress,
         )
         self._verified_samples: dict[str, StructureCacheRecord] = {}
         self._prepared_source_samples: set[str] = set()
         self._progress_callback: Callable[[str], None] | None = None
+        self._structure_prepared = False
         self.structure_stage = StructureStage(self._structure_pipeline._verify_samples_impl)
         self.qa_stage = QAStage(lambda **kwargs: self._run_verified_qa(**kwargs))
         self.stages = PipelineStages(
@@ -252,14 +254,37 @@ class TableAgentPipeline(BasePipeline):
                 record = self.structure_cache.load(sample)
                 if record is None or not record.valid:
                     missing.append(sample.sample_id)
+                    self._progress(
+                        "prepare_error",
+                        sample=sample.sample_id,
+                        workbook=Path(str(sample.table_path or sample.table_id or sample.sample_id)).name,
+                        sheet="<missing>",
+                    )
+                    continue
+                self._progress(
+                    "structure_done",
+                    sample=sample.sample_id,
+                    workbook=record.workbook_path.name,
+                    sheet=record.sheet_name,
+                    status="cached",
+                )
             if missing:
                 raise RuntimeError(
                     "Missing or stale TableAgent structure caches for: "
                     + ", ".join(missing[:20])
                     + ". Run with --table-agent-phase structure or all first."
                 )
+            self._structure_prepared = True
             return
-        records = self.verify_samples(samples, force=self.settings.phase == "all")
+        if bool(getattr(self.settings, "reuse_structure", False)) or bool(
+            getattr(self, "_structure_prepared", False)
+        ):
+            force_structure = False
+        elif bool(getattr(self.settings, "force_structure", False)):
+            force_structure = True
+        else:
+            force_structure = self.settings.phase in {"all", "structure"}
+        records = self.verify_samples(samples, force=force_structure)
         failed = [record for record in records if not record.valid]
         if failed:
             raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
@@ -269,9 +294,17 @@ class TableAgentPipeline(BasePipeline):
                 for sample in samples
                 if has_workbook_sources(sample) and self.settings.should_retrieve(sample)
             )
+        self._structure_prepared = True
 
     def set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
         self._progress_callback = callback
+        if self.layout_workflow is not None and hasattr(self.layout_workflow, "set_progress_callback"):
+            # Keep workflow events flowing through the same formatter.
+            self.layout_workflow.set_progress_callback(self._progress if callback is not None else None)
+        if hasattr(self, "structure_cache") and hasattr(self.structure_cache, "set_progress_callback"):
+            self.structure_cache.set_progress_callback(self._progress if callback is not None else None)
+        if hasattr(self, "source_preparer"):
+            self.source_preparer.progress_callback = self._progress if callback is not None else None
 
     def _progress(self, stage: str, **fields: Any) -> None:
         if self._progress_callback is None:

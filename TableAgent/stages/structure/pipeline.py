@@ -17,6 +17,7 @@ from .cache import StructureCacheRecord
 from .contracts import StructureInput
 from .metadata import SheetMetadata
 from .source_preparer import SourcePreparer
+from TableAgent.utils.paths import safe_name
 
 
 class StructurePipeline(RuntimeComponent):
@@ -54,14 +55,11 @@ class StructurePipeline(RuntimeComponent):
         ]
         records = []
         for sample in standard_samples:
+            # StructureCache.prepare already emits structure_done with the real
+            # source workbook name. Do not emit again here: record.workbook_path
+            # is often the staged copy named workbook.xlsx and double-counts.
             record = self.structure_cache.prepare(sample, force=force)
             records.append(record)
-            self._progress(
-                "structure_done",
-                sample=sample.sample_id,
-                workbook=record.workbook_path.name,
-                sheet=record.sheet_name,
-            )
         self._verified_samples.update(
             {
                 sample.sample_id: record
@@ -87,9 +85,9 @@ class StructurePipeline(RuntimeComponent):
                         self.settings.source_artifact_dir
                         or self.settings.structure_cache_dir
                     )
-                    key = hashlib.sha256(
-                        sample.sample_id.encode("utf-8")
-                    ).hexdigest()[:24]
+                    table_part = safe_name(sample.table_id or sample.sample_id)[:80] or "table"
+                    digest = hashlib.sha256(sample.sample_id.encode("utf-8")).hexdigest()[:8]
+                    key = f"{table_part}_{digest}"
                     records.append(
                         StructureCacheRecord(
                             key=key,
@@ -107,9 +105,17 @@ class StructurePipeline(RuntimeComponent):
                     if candidate.directory in seen:
                         continue
                     seen.add(candidate.directory)
-                    key = hashlib.sha256(
+                    workbook_stem = (
+                        Path(candidate.workbook_path).stem
+                        if candidate.workbook_path
+                        else Path(candidate.directory).parent.name
+                    )
+                    sheet_part = safe_name(candidate.sheet_name or candidate.directory.name)[:40] or "sheet"
+                    table_part = safe_name(workbook_stem or sample.table_id or "table")[:80] or "table"
+                    digest = hashlib.sha256(
                         str(candidate.directory.resolve()).encode("utf-8")
-                    ).hexdigest()[:24]
+                    ).hexdigest()[:8]
+                    key = f"{table_part}_{sheet_part}_{digest}"
                     verification = prepared_verification(candidate.directory)
                     records.append(
                         StructureCacheRecord(

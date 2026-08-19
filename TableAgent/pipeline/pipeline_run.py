@@ -34,18 +34,36 @@ class PipelineRunner(RuntimeComponent):
     def __init__(self, runtime: PipelineRuntimeContract):
         super().__init__(runtime)
 
+    def _force_structure(self) -> bool:
+        if bool(getattr(self.settings, "reuse_structure", False)):
+            return False
+        # Structure already prepared once for this pipeline instance (e.g. earlier repeat).
+        if bool(getattr(self.runtime, "_structure_prepared", False)):
+            return False
+        if bool(getattr(self.settings, "force_structure", False)):
+            return True
+        # Default: regenerate structure once for structure/all runs.
+        return self.settings.phase in {"all", "structure"}
+
     def run(self, sample: EvalSample) -> PipelineOutput:
         if self.settings.phase == "structure":
             raise RuntimeError("structure phase does not run question answering")
+        force_structure = self._force_structure()
         if has_workbook_sources(sample) and self.settings.should_retrieve(sample):
+            structure_runtime = 0.0
             if self.settings.phase == "all" and not self.settings.perfect_retrieval:
                 if sample.sample_id in self._prepared_source_samples:
                     self._prepared_source_samples.discard(sample.sample_id)
                 else:
+                    structure_started = self.start_timer()
                     self.source_preparer.prepare(
-                        [sample], regenerate_invalid=True, force=True
+                        [sample],
+                        regenerate_invalid=True,
+                        force=force_structure,
                     )
+                    structure_runtime = self.stop_timer(structure_started)
             responses: list[LLMResponse] = []
+            retrieval_started = self.start_timer()
             candidate = self.stages.retrieval.run(
                 RetrievalInput(
                     sample=sample,
@@ -54,19 +72,80 @@ class PipelineRunner(RuntimeComponent):
                     perfect=self.settings.perfect_retrieval,
                 )
             ).candidate
+            retrieval_runtime = self.stop_timer(retrieval_started)
             if candidate is None:
                 raise RuntimeError(
                     f"Missing or stale structure cache for sample {sample.sample_id!r}; "
                     "run structure or all first"
                 )
-            return self._run_prepared_source(
-                sample, candidate, responses, self.start_timer()
-            )
+            qa_started = self.start_timer()
+            run_prepared = self._run_prepared_source
+            try:
+                output = run_prepared(
+                    sample,
+                    candidate,
+                    responses,
+                    qa_started,
+                    structure_runtime=structure_runtime,
+                    retrieval_runtime=retrieval_runtime,
+                )
+            except TypeError:
+                # Older/mocked callables may not accept stage-runtime kwargs.
+                output = run_prepared(sample, candidate, responses, qa_started)
+            # Backfill stage timings if the source-QA path ignored kwargs (tests/mocks).
+            if getattr(output, "metadata", None) is not None:
+                metadata = dict(output.metadata)
+                structure_seconds = float(
+                    metadata.get("structure_runtime") or structure_runtime or 0.0
+                )
+                retrieval_seconds = float(
+                    metadata.get("retrieval_runtime")
+                    or (metadata.get("stage_runtimes") or {}).get("retrieval")
+                    or retrieval_runtime
+                    or 0.0
+                )
+                qa_seconds = float(
+                    metadata.get("qa_runtime")
+                    or (metadata.get("stage_runtimes") or {}).get("qa")
+                    or metadata.get("qa", {}).get("execution_time")
+                    or 0.0
+                )
+                if qa_seconds <= 0:
+                    # Prefer pure QA time by subtracting known non-QA stages from total latency.
+                    total_latency = float(output.latency or 0.0)
+                    qa_seconds = max(total_latency - structure_seconds - retrieval_seconds, 0.0)
+                stage_runtimes = {
+                    "structure": structure_seconds,
+                    "retrieval": retrieval_seconds,
+                    "qa": qa_seconds,
+                    "total": structure_seconds + retrieval_seconds + qa_seconds,
+                }
+                metadata.update(
+                    {
+                        # structure_runtime covers understanding + structure extraction.
+                        "structure_runtime": structure_seconds,
+                        "understanding_runtime": structure_seconds,
+                        "retrieval_runtime": retrieval_seconds,
+                        "qa_runtime": qa_seconds,
+                        "stage_runtimes": stage_runtimes,
+                    }
+                )
+                output.metadata = metadata
+                output.latency = stage_runtimes["total"]
+            return output
+        structure_runtime = 0.0
         if self.settings.phase == "all":
             record = self._verified_samples.get(sample.sample_id)
             if record is None:
-                record = self.structure_cache.prepare(sample, force=True)
+                structure_started = self.start_timer()
+                record = self.structure_cache.prepare(sample, force=force_structure)
+                structure_runtime = self.stop_timer(structure_started)
                 self._verified_samples[sample.sample_id] = record
+            elif getattr(record, "cache_hit", False) is False:
+                # Record was freshly built earlier in this process.
+                structure_runtime = float(
+                    getattr(record, "structure_runtime", 0.0) or 0.0
+                )
         else:
             record = self.structure_cache.load(sample)
         if record is None or not record.valid:
@@ -74,10 +153,20 @@ class PipelineRunner(RuntimeComponent):
                 f"Missing or stale structure cache for sample {sample.sample_id!r}; "
                 "run structure or all first"
             )
-        return self._run_cached_qa(sample, record)
+        return self._run_cached_qa(
+            sample,
+            record,
+            structure_runtime=structure_runtime,
+        )
 
-    def _run_cached_qa(self, sample, record) -> PipelineOutput:
-        start_time = self.start_timer()
+    def _run_cached_qa(
+        self,
+        sample,
+        record,
+        *,
+        structure_runtime: float = 0.0,
+    ) -> PipelineOutput:
+        qa_started = self.start_timer()
         materialize = getattr(
             self.runtime,
             "_materialize_structure_artifact",
@@ -96,11 +185,20 @@ class PipelineRunner(RuntimeComponent):
             ),
         ))
         answer_response, qa_info = qa_output.response, qa_output.metadata
+        qa_runtime = self.stop_timer(qa_started)
+        if isinstance(qa_info, dict):
+            qa_runtime = float(qa_info.get("execution_time") or qa_runtime or 0.0)
+        stage_runtimes = {
+            "structure": float(structure_runtime or 0.0),
+            "retrieval": 0.0,
+            "qa": float(qa_runtime or 0.0),
+            "total": float(structure_runtime or 0.0) + float(qa_runtime or 0.0),
+        }
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=structure_text,
             predicted_answer=answer_response.content,
-            latency=self.stop_timer(start_time),
+            latency=stage_runtimes["total"],
             token_usage=token_usage([answer_response]),
             metadata={
                 "structure_path": display_path(record.structure_path),
@@ -125,6 +223,11 @@ class PipelineRunner(RuntimeComponent):
                 "cache_hit": record.cache_hit,
                 "verification": {"status": record.status},
                 "qa": qa_info,
+                "structure_runtime": stage_runtimes["structure"],
+                "understanding_runtime": stage_runtimes["structure"],
+                "retrieval_runtime": stage_runtimes["retrieval"],
+                "qa_runtime": stage_runtimes["qa"],
+                "stage_runtimes": stage_runtimes,
             },
         )
 

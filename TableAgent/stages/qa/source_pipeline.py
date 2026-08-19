@@ -31,6 +31,9 @@ class SourceQAPipeline(RuntimeComponent):
         candidate: SourceCandidate,
         responses: list[LLMResponse],
         start_time: float,
+        *,
+        structure_runtime: float = 0.0,
+        retrieval_runtime: float = 0.0,
     ) -> PipelineOutput:
         is_metadata_retrieval = candidate.retrieval_type == "metadata"
         image_prompt = self.prompts.answer_prompt(
@@ -133,13 +136,32 @@ class SourceQAPipeline(RuntimeComponent):
                 candidate, "reranker_rationale", ""
             )
 
+        qa_runtime = self.stop_timer(start_time)
+        if isinstance(qa_info, dict):
+            qa_runtime = float(qa_info.get("execution_time") or qa_runtime or 0.0)
+        stage_runtimes = {
+            "structure": float(structure_runtime or 0.0),
+            "retrieval": float(retrieval_runtime or 0.0),
+            "qa": float(qa_runtime or 0.0),
+            "total": (
+                float(structure_runtime or 0.0)
+                + float(retrieval_runtime or 0.0)
+                + float(qa_runtime or 0.0)
+            ),
+        }
         return PipelineOutput(
             sample_id=sample.sample_id,
             structured_table=candidate.structure_text,
             predicted_answer=answer_response.content,
-            latency=self.stop_timer(start_time),
+            latency=stage_runtimes["total"],
             token_usage=token_usage(responses),
             metadata={
+                "structure_runtime": stage_runtimes["structure"],
+                "understanding_runtime": stage_runtimes["structure"],
+                "retrieval_runtime": stage_runtimes["retrieval"],
+                "qa_runtime": stage_runtimes["qa"],
+                "stage_runtimes": stage_runtimes,
+
                 "structure_path": display_path(structure_path),
                 "thinking_trace_path": display_path(
                     candidate.directory / "thinking_trace.txt"
@@ -241,7 +263,8 @@ class SourceQAPipeline(RuntimeComponent):
     def _sample_relative_dir(sample: EvalSample) -> Path:
         raw = f"{sample.sample_id}:{sample.table_id}:{sample.question}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-        return Path(safe_name(sample.sample_id)[:80]) / digest
+        table_name = safe_name(sample.table_id or "table")[:80] or "table"
+        return Path(safe_name(sample.sample_id)[:80]) / f"{table_name}_{digest}"
 
     def _sample_dir(self, sample: EvalSample) -> Path:
         return self._artifact_dir / self._sample_relative_dir(sample)
