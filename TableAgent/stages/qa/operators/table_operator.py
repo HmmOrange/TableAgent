@@ -60,6 +60,18 @@ class TableOperators(BaseOperator):
     def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
         return self._structure.resolve_header_columns(table_id, header_id)
 
+    def list_groups(self, table_id: str):
+        return self._structure.list_groups(table_id)
+
+    def find_groups(self, table_id: str, query: str):
+        return self._structure.find_groups(table_id, query)
+
+    def get_group(self, table_id: str, group_id: str):
+        return self._structure.get_group(table_id, group_id)
+
+    def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str):
+        return self._structure.intersect_group_with_header(table_id, group_id, header_id)
+
     def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
         """Read the bounding range covered by a table's verified headers and data."""
         headers = self.list_headers(table_id)
