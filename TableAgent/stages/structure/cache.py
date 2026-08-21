@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -114,8 +115,7 @@ class StructureCache:
                 return replace(existing, key=key) if existing.key != key else existing
 
             staging = directory.with_name(f".{directory.name}.staging-{threading.get_ident()}")
-            if staging.exists():
-                shutil.rmtree(staging)
+            self._remove_tree_with_retry(staging)
             staging.mkdir(parents=True, exist_ok=True)
             workbook_path = staging / "workbook.xlsx"
             shutil.copy2(source_path, workbook_path)
@@ -154,10 +154,9 @@ class StructureCache:
                 json.dumps(manifest, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            if directory.exists():
-                shutil.rmtree(directory)
+            self._remove_tree_with_retry(directory)
             directory.parent.mkdir(parents=True, exist_ok=True)
-            staging.replace(directory)
+            self._promote_staging(staging, directory)
             self._progress(
                 "structure_done",
                 sample=sample.sample_id,
@@ -495,6 +494,37 @@ class StructureCache:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _remove_tree_with_retry(path: Path, attempts: int = 8) -> None:
+        if not path.exists():
+            return
+        last_error: OSError | None = None
+        for attempt in range(attempts):
+            try:
+                shutil.rmtree(path)
+                return
+            except OSError as exc:
+                last_error = exc
+                if attempt + 1 < attempts:
+                    time.sleep(0.25 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+
+    @classmethod
+    def _promote_staging(cls, staging: Path, directory: Path, attempts: int = 8) -> None:
+        last_error: OSError | None = None
+        for attempt in range(attempts):
+            try:
+                staging.replace(directory)
+                return
+            except OSError as exc:
+                last_error = exc
+                if attempt + 1 < attempts:
+                    time.sleep(0.25 * (attempt + 1))
+                    cls._remove_tree_with_retry(directory)
+        if last_error is not None:
+            raise last_error
 
     @staticmethod
     def _read_record(
