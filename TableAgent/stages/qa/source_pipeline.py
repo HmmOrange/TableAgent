@@ -18,6 +18,7 @@ from TableAgent.utils.llm_metrics import token_usage
 from TableAgent.utils.paths import display_path, safe_name
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
+from TableAgent.stages.qa.workbook_paths import original_workbook_for_sample
 
 
 class SourceQAPipeline(RuntimeComponent):
@@ -38,7 +39,7 @@ class SourceQAPipeline(RuntimeComponent):
     ) -> PipelineOutput:
         # Structure may be generated from a compressed workbook, but QA reads
         # values from the user's original workbook.
-        original_workbook = self._original_workbook_for_sample(sample, candidate.workbook_path)
+        original_workbook = original_workbook_for_sample(sample, candidate.workbook_path)
         if original_workbook is not None:
             candidate = replace(candidate, workbook_path=original_workbook)
         is_metadata_retrieval = candidate.retrieval_type == "metadata"
@@ -202,15 +203,6 @@ class SourceQAPipeline(RuntimeComponent):
                 "qa": qa_info,
             },
         )
-
-    @staticmethod
-    def _original_workbook_for_sample(sample: EvalSample, current: Path) -> Path | None:
-        values = [Path(value.strip()) for value in str(sample.table_path or "").split(";") if value.strip()]
-        current_name = safe_name(current.name)
-        for value in values:
-            if value.is_file() and (value.name == current.name or safe_name(value.name) == current_name):
-                return value
-        return values[0] if len(values) == 1 and values[0].is_file() else None
 
     def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
         source_root = candidate.directory.parent

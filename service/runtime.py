@@ -150,6 +150,8 @@ class TableAgentService:
                     if compress_before_structure is None else compress_before_structure
                 )
                 compression_artifacts = []
+                structure_workbooks = normalized
+                original_workbook_paths: dict[str, str] = {}
                 if compression_enabled:
                     compression_artifacts = self._compress_workbooks(
                         normalized,
@@ -168,12 +170,17 @@ class TableAgentService:
                             (output_dir / "run.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
                             result["artifacts"] = self._artifact_paths(output_dir)
                         return result
+                    structure_workbooks = []
                     for item, artifact in zip(normalized, compression_artifacts):
-                        item["path"] = Path(artifact["compressed_workbook"])
+                        compressed_path = Path(artifact["compressed_workbook"])
+                        structure_workbooks.append({**item, "path": compressed_path})
+                        original_workbook_paths[str(compressed_path.resolve())] = str(
+                            Path(item["path"]).resolve()
+                        )
 
                 if stage == "understanding":
                     understandings = self._run_understanding(
-                        normalized,
+                        structure_workbooks,
                         selected_sheets=selected_sheets,
                         output_dir=output_dir,
                         max_workers=worker_count,
@@ -197,8 +204,14 @@ class TableAgentService:
                 structures: list[dict[str, Any]] = []
                 answers: list[dict[str, Any]] = []
                 source_dir = workspace_dir / "structure"
-                table_path = ";".join(str(item["path"]) for item in normalized)
-                workbook_identities = self._workbook_identities(normalized)
+                structure_table_path = ";".join(
+                    str(item["path"]) for item in structure_workbooks
+                )
+                qa_table_path = ";".join(str(item["path"]) for item in normalized)
+                structure_workbook_identities = self._workbook_identities(
+                    structure_workbooks
+                )
+                qa_workbook_identities = self._workbook_identities(normalized)
                 prepare_retrieval_embeddings = self._prepare_retrieval_embeddings(
                     stage,
                     requested=embed,
@@ -208,10 +221,10 @@ class TableAgentService:
                     base_sample = self._sample(
                         sample_id=f"{run_id}-structure",
                         question=query_list[0] if query_list else "Generate workbook structure",
-                        table_path=table_path,
+                        table_path=structure_table_path,
                         workbook_names=[item["name"] for item in normalized],
                         selected_sheets=selected_sheets,
-                        workbook_identities=workbook_identities,
+                        workbook_identities=structure_workbook_identities,
                     )
                     pipeline = self._create_pipeline(
                         llm_client=self._answer_client(),
@@ -228,7 +241,7 @@ class TableAgentService:
                     records = pipeline.verify_samples([base_sample], force=True)
                 else:
                     structure_samples = []
-                    for workbook_index, item in enumerate(normalized, start=1):
+                    for workbook_index, item in enumerate(structure_workbooks, start=1):
                         identity = self._workbook_identities([item])
                         for sheet_index, sheet_name in enumerate(
                             self._selected_sheet_names(item["path"], selected_sheets),
@@ -266,11 +279,13 @@ class TableAgentService:
                         records = [record for group in record_groups for record in group]
                 structures = self._structure_results(
                     records,
-                    normalized,
+                    structure_workbooks,
                     output_dir,
                     include_artifact_paths=persist,
                 )
-                structures = self._complete_structure_results(structures, normalized, selected_sheets)
+                structures = self._complete_structure_results(
+                    structures, structure_workbooks, selected_sheets
+                )
                 if compression_artifacts:
                     self._remap_structure_results(structures, compression_artifacts)
                 failed = [record for record in structures if not record["structure"]]
@@ -301,10 +316,11 @@ class TableAgentService:
                         self._sample(
                             sample_id=f"{run_id}-query-{index}",
                             question=query,
-                            table_path=table_path,
+                            table_path=qa_table_path,
                             workbook_names=[item["name"] for item in normalized],
                             selected_sheets=selected_sheets,
-                            workbook_identities=workbook_identities,
+                            workbook_identities=qa_workbook_identities,
+                            original_workbook_paths=original_workbook_paths,
                         )
                         for index, query in enumerate(query_list, start=1)
                     ]
@@ -1635,6 +1651,7 @@ class TableAgentService:
         workbook_names: list[str],
         selected_sheets: tuple[str, ...],
         workbook_identities: dict[str, dict[str, str]],
+        original_workbook_paths: dict[str, str] | None = None,
     ) -> EvalSample:
         return EvalSample(
             index=0,
@@ -1650,6 +1667,7 @@ class TableAgentService:
                 "workbooks": workbook_names,
                 "selected_sheets": list(selected_sheets),
                 "workbook_identities": workbook_identities,
+                "original_workbook_paths": original_workbook_paths or {},
             },
         )
 

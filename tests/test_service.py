@@ -185,6 +185,32 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "structure").exists()
 
 
+def test_compression_never_passes_compressed_workbook_to_qa(tmp_path: Path):
+    FakePipeline.instances = []
+    source = _workbook(tmp_path / "book.xlsx")
+    service = TableAgentService(
+        {
+            "service": {"root_dir": str(tmp_path / "service")},
+            "table_agent": {"compression_before_structure": True},
+        },
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(
+        stage="all",
+        workbooks=[source],
+        queries=["question"],
+        job_id="compressed-qa",
+    )
+
+    qa_path = Path(FakePipeline.instances[1].runs[0].table_path)
+    assert Path(result["compression_artifacts"][0]["compressed_workbook"]).name == "compressed.xlsx"
+    assert qa_path == source
+    assert result["answers"][0]["workbook"] == source.name
+
+
 def test_service_prepares_corpus_embeddings_for_injected_client(tmp_path: Path):
     service = TableAgentService(
         {"service": {"root_dir": str(tmp_path / "service")}},

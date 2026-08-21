@@ -622,6 +622,60 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     assert "table1:" not in output.structured_table
 
 
+def test_prepared_source_qa_maps_compressed_structure_to_original_workbook(
+    tmp_path: Path, monkeypatch
+):
+    from TableAgent.stages.retrieval.contracts import SourceCandidate
+
+    original = tmp_path / "book.xlsx"
+    compressed = tmp_path / "compression" / "book.xlsx" / "compressed.xlsx"
+    original.touch()
+    compressed.parent.mkdir(parents=True)
+    compressed.touch()
+    structure_path = compressed.parent / "structure.yaml"
+    structure_path.write_text("table1:\n  name: Sheet1\n", encoding="utf-8")
+    candidate = SourceCandidate(
+        directory=compressed.parent,
+        workbook_path=compressed,
+        sheet_name="Sheet1",
+        image_path=compressed.parent / "table.png",
+        html_path=None,
+        structure_text=structure_path.read_text(encoding="utf-8"),
+        sheet_text="value",
+        score=1.0,
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="compression/original-qa",
+        table_id="workbook_set",
+        table_content="",
+        question="What is the value?",
+        answer=[],
+        table_path=str(original),
+        raw={
+            "original_workbook_paths": {
+                str(compressed.resolve()): str(original.resolve())
+            }
+        },
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=FakeLayoutVLM(),
+        config={"artifact_dir": str(tmp_path / "artifacts")},
+    )
+    captured = {}
+
+    def fake_run_verified_qa(**kwargs):
+        captured.update(kwargs)
+        return LLMResponse(content="value"), {"success": True}
+
+    monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
+
+    pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
+
+    assert captured["workbook_path"] == original
+
+
 def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     sample = EvalSample(
         index=0,
