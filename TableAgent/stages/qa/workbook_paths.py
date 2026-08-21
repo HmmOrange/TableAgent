@@ -22,6 +22,13 @@ def original_workbook_for_sample(sample: EvalSample, current: Path) -> Path | No
         for value in str(sample.table_path or "").split(";")
         if value.strip()
     ]
+    if isinstance(path_map, dict):
+        for value in values:
+            mapped = path_map.get(str(value.resolve()))
+            if mapped:
+                original = Path(str(mapped))
+                if original.is_file():
+                    return original
     current_name = safe_name(current.name)
     for value in values:
         if value.is_file() and (
