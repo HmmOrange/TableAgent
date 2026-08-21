@@ -166,6 +166,18 @@ class SheetCompressor:
             else:
                 for col, value in enumerate(row_values or [], start=1):
                     worksheet.cell(target, col).value = value
+
+        # openpyxl keeps stale cells and merged ranges after delete_rows().
+        # Remove anything outside the rebuilt compressed rectangle so layout
+        # metadata and viewport traversal cannot see original tail rows.
+        final_rows = len(values)
+        for merged_range in list(worksheet.merged_cells.ranges):
+            if merged_range.max_row > final_rows or merged_range.max_col > max_col:
+                worksheet.merged_cells.ranges.remove(merged_range)
+        for coordinate in list(worksheet._cells):
+            if coordinate[0] > final_rows or coordinate[1] > max_col:
+                del worksheet._cells[coordinate]
+
         mapping = tuple(RowMap(index, start, end, marker) for index, (_, start, end, marker, _) in enumerate(values, start=1))
         return SheetCompressionResult(worksheet.title, original_rows, len(mapping), mapping)
 
