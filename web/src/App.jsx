@@ -111,6 +111,7 @@ function App() {
   const [processState, setProcessState] = useState("idle");
   const [qaState, setQaState] = useState("idle");
   const [dragging, setDragging] = useState(false);
+  const [compressBeforeStructure, setCompressBeforeStructure] = useState(false);
   const fileInputRef = useRef(null);
   const chatRef = useRef(null);
 
@@ -193,7 +194,7 @@ function App() {
     ]);
 
     try {
-      const result = await postJob({ stage: "structure" });
+      const result = await postJob({ stage: "structure", compress_before_structure: compressBeforeStructure });
       const runtime = performance.now() - startedAt;
       const schemas = result.schema_artifacts || [];
       const structuresBySheet = new Map(
@@ -335,6 +336,15 @@ function App() {
             <strong>Drop files here</strong>
             <span>or choose from your computer</span>
           </button>
+          <label className="compression-option">
+            <input
+              checked={compressBeforeStructure}
+              disabled={busy}
+              onChange={(event) => setCompressBeforeStructure(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Compress sheets before structure</span>
+          </label>
           <input
             ref={fileInputRef}
             className="sr-only"
@@ -381,7 +391,7 @@ function App() {
           <div className="pipeline">
             <div className={`pipeline-step ${processState === "done" ? "complete" : ""}`}>
               <span>{processState === "done" ? <Icon name="check" size={14} /> : "1"}</span>
-              Process schema
+              {compressBeforeStructure && processState === "running" ? "Compress sheets" : "Process schema"}
             </div>
             <div className={`pipeline-line ${processed ? "complete" : ""}`} />
             <div className={`pipeline-step ${qaState === "done" ? "complete" : ""}`}>

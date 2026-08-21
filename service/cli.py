@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage_group = parser.add_mutually_exclusive_group()
     stage_group.add_argument(
         "--stage",
-        choices=("structure", "qa", "understanding", "all"),
+        choices=("structure", "qa", "understanding", "compression", "all"),
         default="all",
         help="Processing stage to run (default: all).",
     )

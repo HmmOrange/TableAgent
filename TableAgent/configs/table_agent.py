@@ -13,6 +13,7 @@ class TableAgentConfig:
     reuse_structure: bool
     force_structure: bool
     structure_cache_dir: Path
+    compression_cache_dir: Path
     cache_namespace: str
     layout_model_identity: str | None
     artifact_dir: Path
@@ -48,6 +49,10 @@ class TableAgentConfig:
     qa_max_value_repr_chars: int
     embed_retrieval_cards: bool
     prepare_retrieval_embeddings: bool
+    compression_similarity_threshold: float
+    compression_keep_rows: int
+    compression_insert_ellipsis: bool
+    compression_before_structure: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -62,6 +67,7 @@ class TableAgentConfig:
                 and _phase(merged.get("phase", "all")) in {"all", "structure"}
             ),
             structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
+            compression_cache_dir=Path(str(merged.get("compression_cache_dir", "cache/table_agent/compression"))),
             cache_namespace=str(merged.get("cache_namespace", "default")),
             layout_model_identity=(str(merged["layout_model_identity"]) if merged.get("layout_model_identity") else None),
             artifact_dir=Path(str(_required(merged, "artifact_dir"))),
@@ -101,6 +107,12 @@ class TableAgentConfig:
             prepare_retrieval_embeddings=_bool(
                 merged.get("prepare_retrieval_embeddings", False)
             ),
+            compression_similarity_threshold=float(merged.get("compression_similarity_threshold", 0.8)),
+            compression_keep_rows=int(merged.get("compression_keep_rows", 2)),
+            compression_insert_ellipsis=_bool(
+                merged.get("compression_insert_ellipsis", merged.get("compression_include_ellipsis", False))
+            ),
+            compression_before_structure=_bool(merged.get("compression_before_structure", False)),
         )
 
     @property
@@ -250,6 +262,6 @@ def _bool(value: Any) -> bool:
 
 def _phase(value: Any) -> str:
     phase = str(value).strip().lower()
-    if phase not in {"structure", "qa", "understanding", "all"}:
-        raise ValueError("table_agent.phase must be one of: structure, qa, understanding, all")
+    if phase not in {"structure", "qa", "understanding", "compression", "all"}:
+        raise ValueError("table_agent.phase must be one of: structure, qa, understanding, compression, all")
     return phase

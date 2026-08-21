@@ -25,6 +25,7 @@ class PathJobRequest(BaseModel):
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
     qa_max_replans: int | None = Field(default=None, ge=0)
+    compress_before_structure: bool | None = None
 
     @model_validator(mode="after")
     def validate_queries(self) -> "PathJobRequest":
@@ -43,6 +44,7 @@ class UploadJobRequest(BaseModel):
     qa_enable_final_review: bool | None = None
     mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    compress_before_structure: bool | None = None
 
     @model_validator(mode="after")
     def validate_queries(self) -> "UploadJobRequest":
@@ -119,6 +121,7 @@ def create_app(
                 embed=request.embed,
                 sheets=request.sheets,
                 qa_max_replans=request.qa_max_replans,
+                compress_before_structure=request.compress_before_structure,
                 persist=False,
             )
         except (RuntimeError, ValueError) as exc:
@@ -181,6 +184,7 @@ def create_app(
                     workbooks=saved,
                     embed=request.embed,
                     sheets=request.sheets,
+                    compress_before_structure=request.compress_before_structure,
                     qa_max_replans=request.qa_max_replans,
                     persist=False,
                 )

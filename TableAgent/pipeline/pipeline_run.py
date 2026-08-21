@@ -175,10 +175,16 @@ class PipelineRunner(RuntimeComponent):
         if callable(materialize):
             record = materialize(record)
         structure_text = record.structure_path.read_text(encoding="utf-8")
+        workbook_path = record.workbook_path
+        source_values = [Path(value.strip()) for value in str(sample.table_path or "").split(";") if value.strip()]
+        for source_value in source_values:
+            if source_value.is_file() and source_value.name == workbook_path.name:
+                workbook_path = source_value
+                break
         qa_output = self.stages.qa.run(QAInput(
             question=sample.question,
             structure_path=record.structure_path,
-            workbook_path=record.workbook_path,
+            workbook_path=workbook_path,
             qa_artifact_dir=self._qa_sample_dir(sample),
             fallback_prompt=self.prompts.answer_prompt(
                 sample, self._fit_context(sample.table_content), structure_text

@@ -44,9 +44,13 @@ from TableAgent.stages.retrieval import RetrievalInput
 from TableAgent.stages.structure import StructureStage
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.stages.understanding import UnderstandingInput, UnderstandingStage
+from TableAgent.stages.compression import CompressionConfig, SheetCompressor
+import yaml
+from openpyxl.utils.cell import range_boundaries
+from openpyxl.utils import get_column_letter
 
 
-Stage = Literal["structure", "qa", "understanding", "all"]
+Stage = Literal["structure", "qa", "understanding", "compression", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
 
 
@@ -111,6 +115,7 @@ class TableAgentService:
         qa_max_replans: int | None = None,
         max_workers: int | None = None,
         persist: bool = True,
+        compress_before_structure: bool | None = None,
     ) -> dict[str, Any]:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
@@ -139,6 +144,32 @@ class TableAgentService:
                 output_dir.mkdir(parents=True, exist_ok=True)
                 normalized = self._normalize_workbooks(workbook_list, workspace_dir / "normalized")
                 self._validate_sheet_filters(normalized, selected_sheets)
+
+                compression_enabled = stage == "compression" or bool(
+                    (self.config.get("table_agent") or {}).get("compression_before_structure", False)
+                    if compress_before_structure is None else compress_before_structure
+                )
+                compression_artifacts = []
+                if compression_enabled:
+                    compression_artifacts = self._compress_workbooks(
+                        normalized,
+                        selected_sheets=selected_sheets,
+                        output_dir=output_dir,
+                    )
+                    if stage == "compression":
+                        result = {
+                            "job_id": run_id,
+                            "stage": stage,
+                            "workbooks": [item["name"] for item in normalized],
+                            "compression_artifacts": compression_artifacts,
+                            "artifacts": self._artifact_paths(output_dir) if persist else [],
+                        }
+                        if persist:
+                            (output_dir / "run.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                            result["artifacts"] = self._artifact_paths(output_dir)
+                        return result
+                    for item, artifact in zip(normalized, compression_artifacts):
+                        item["path"] = Path(artifact["compressed_workbook"])
 
                 if stage == "understanding":
                     understandings = self._run_understanding(
@@ -240,6 +271,8 @@ class TableAgentService:
                     include_artifact_paths=persist,
                 )
                 structures = self._complete_structure_results(structures, normalized, selected_sheets)
+                if compression_artifacts:
+                    self._remap_structure_results(structures, compression_artifacts)
                 failed = [record for record in structures if not record["structure"]]
                 if failed:
                     raise RuntimeError(f"Structure generation failed for {len(failed)} workbook sheet(s)")
@@ -332,6 +365,7 @@ class TableAgentService:
                     "retrieval_records": retrieval_records,
                     "retrieval_artifacts": retrieval_artifacts,
                     "answers": answers,
+                    "compression_artifacts": compression_artifacts,
                     "artifacts": self._artifact_paths(output_dir) if persist else [],
                 }
                 if persist:
@@ -1021,6 +1055,70 @@ class TableAgentService:
         if path.parent != self.root_dir:
             raise ValueError("Invalid job id")
         return path
+
+    def _compress_workbooks(
+        self,
+        normalized: list[dict[str, Any]],
+        *,
+        selected_sheets: tuple[str, ...],
+        output_dir: Path,
+    ) -> list[dict[str, Any]]:
+        config = self.config.get("table_agent") or {}
+        compressor = SheetCompressor(CompressionConfig(
+            similarity_threshold=float(config.get("compression_similarity_threshold", 0.8)),
+            keep_rows=int(config.get("compression_keep_rows", 2)),
+            insert_ellipsis=bool(config.get("compression_insert_ellipsis", config.get("compression_include_ellipsis", False))),
+        ))
+        results = []
+        for item in normalized:
+            base = output_dir / "compression" / safe_name(str(item["name"]))
+            workbook_path = base / "compressed.xlsx"
+            mapping_path = base / "row_mapping.json"
+            sheets = compressor.compress_workbook(Path(item["path"]), workbook_path, mapping_path, selected_sheets)
+            results.append({
+                "workbook": item["name"],
+                "compressed_workbook": str(workbook_path),
+                "row_mapping": str(mapping_path),
+                "sheets": {name: value.to_dict() for name, value in sheets.items()},
+            })
+        return results
+
+    @staticmethod
+    def _remap_structure_results(structures: list[dict[str, Any]], compression_artifacts: list[dict[str, Any]]) -> None:
+        maps = {
+            (str(item["workbook"]), str(sheet)): {
+                (int(row["compressed_row"])): (int(row["original_start"]), int(row["original_end"]))
+                for row in payload.get("rows", [])
+            }
+            for item in compression_artifacts
+            for sheet, payload in item.get("sheets", {}).items()
+        }
+        for structure in structures:
+            text = structure.get("structure")
+            mapping = maps.get((str(structure.get("workbook")), str(structure.get("sheet"))))
+            if not text or not mapping:
+                continue
+            try:
+                document = yaml.safe_load(text)
+            except yaml.YAMLError:
+                continue
+            def visit(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {key: (remap_range(item, mapping) if key in {"range", "header_range", "data_range", "group_range"} and isinstance(item, str) else visit(item)) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [visit(item) for item in value]
+                return value
+            def remap_range(value: str, row_map: dict[int, tuple[int, int]]) -> str:
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(value)
+                except (TypeError, ValueError):
+                    return value
+                start = row_map.get(min_row, (min_row, min_row))[0]
+                end = row_map.get(max_row, (max_row, max_row))[1]
+                left = f"{get_column_letter(min_col)}{start}"
+                right = f"{get_column_letter(max_col)}{end}"
+                return left if left == right else f"{left}:{right}"
+            structure["structure"] = yaml.safe_dump(visit(document), sort_keys=False, allow_unicode=True).strip()
 
     @staticmethod
     def _is_run_dir(path: Path) -> bool:
@@ -1746,8 +1844,8 @@ class TableAgentService:
 
 def _validate_stage(stage: str) -> Stage:
     value = str(stage).strip().lower()
-    if value not in {"structure", "qa", "understanding", "all"}:
-        raise ValueError("stage must be one of: structure, qa, understanding, all")
+    if value not in {"structure", "qa", "understanding", "compression", "all"}:
+        raise ValueError("stage must be one of: structure, qa, understanding, compression, all")
     return value  # type: ignore[return-value]
 
 

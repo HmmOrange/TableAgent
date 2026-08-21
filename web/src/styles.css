@@ -312,6 +312,16 @@ a:focus-visible {
   opacity: 0.48;
 }
 
+.compression-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .spinner {
   width: 16px;
   height: 16px;

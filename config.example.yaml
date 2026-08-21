@@ -32,6 +32,10 @@ vlm_models:
 
 table_agent:
   phase: "all"
+  compression_before_structure: false
+  compression_similarity_threshold: 0.8
+  compression_keep_rows: 2
+  compression_insert_ellipsis: false
   structure_cache_dir: "cache/table_agent/structure"
   artifact_root: "outputs/table_agent/artifacts"
   run_dir_template: "{run_name}"
