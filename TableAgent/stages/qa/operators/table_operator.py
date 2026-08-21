@@ -2,7 +2,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
-from TableAgent.domain.ranges import AxisSelection, CellRange
+from TableAgent.domain.group import StructureGroup
+from TableAgent.domain.ranges import AxisSelection, Cell, CellRange
 from TableAgent.domain.structure import Header
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.stages.qa.operators.structure_operator import StructureOperator
@@ -60,17 +61,57 @@ class TableOperators(BaseOperator):
     def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
         return self._structure.resolve_header_columns(table_id, header_id)
 
-    def list_groups(self, table_id: str):
+    def list_groups(self, table_id: str) -> List[StructureGroup]:
         return self._structure.list_groups(table_id)
 
-    def find_groups(self, table_id: str, query: str):
+    def find_groups(self, table_id: str, query: str) -> List[StructureGroup]:
         return self._structure.find_groups(table_id, query)
 
-    def get_group(self, table_id: str, group_id: str):
+    def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
         return self._structure.get_group(table_id, group_id)
 
-    def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str):
+    def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str) -> Optional[CellRange]:
         return self._structure.intersect_group_with_header(table_id, group_id, header_id)
+
+    def _require_group(self, table_id: str, group_id: str) -> StructureGroup:
+        group = self.get_group(table_id, group_id)
+        if group is None:
+            raise ValueError(f"Group {group_id!r} was not found in table {table_id!r}.")
+        return group
+
+    def read_group(self, table_id: str, group_id: str) -> List[List[Any]]:
+        group = self._require_group(table_id, group_id)
+        return self._workbook.read_range(group.group_range, expand_merged=True) if group.group_range else []
+
+    def read_group_data(self, table_id: str, group_id: str) -> List[List[Any]]:
+        group = self._require_group(table_id, group_id)
+        return self._workbook.read_range(group.data_range) if group.data_range else []
+
+    def find_in_group(self, table_id: str, group_id: str, query: str) -> list[tuple[Cell, Any]]:
+        import re
+        import unicodedata
+
+        group = self._require_group(table_id, group_id)
+        if group.group_range is None:
+            return []
+        normalized_query = " ".join(re.findall(
+            r"[\w]+", unicodedata.normalize("NFKC", str(query)).casefold(), flags=re.UNICODE
+        ))
+        worksheet = self.env.get_sheet(group.group_range.sheet) or self.env.get_active_sheet()
+        matches = []
+        for row in worksheet.iter_rows(
+            min_row=group.group_range.start_row,
+            max_row=group.group_range.end_row,
+            min_col=group.group_range.start_col,
+            max_col=group.group_range.end_col,
+        ):
+            for cell in row:
+                normalized_value = " ".join(re.findall(
+                    r"[\w]+", unicodedata.normalize("NFKC", str(cell.value or "")).casefold(), flags=re.UNICODE
+                ))
+                if normalized_query and f" {normalized_query} " in f" {normalized_value} ":
+                    matches.append((Cell(cell.row, cell.column), cell.value))
+        return matches
 
     def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
         """Read the bounding range covered by a table's verified headers and data."""

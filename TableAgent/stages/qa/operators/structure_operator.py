@@ -83,19 +83,24 @@ class StructureOperator(BaseOperator):
         return list(table.get("groups", [])) if table else []
 
     def find_groups(self, table_id: str, query: str) -> List[StructureGroup]:
+        import re
+        import unicodedata
+
+        def normalize(value: str) -> str:
+            text = unicodedata.normalize("NFKC", str(value)).casefold()
+            return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
+
+        normalized_query = normalize(query)
+        query_tokens = set(normalized_query.split())
         scored = []
         for group in self.list_groups(table_id):
-            score = max(
-                _lexical_overlap_score(query, group.id),
-                _lexical_overlap_score(query, group.label),
-                _lexical_overlap_score(query, group.description),
-            )
-            if query.lower() in group.label.lower() or query.lower() in group.description.lower():
-                score += 10.0
-            if score > 0:
-                scored.append((score, group))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [group for _, group in scored]
+            fields = [normalize(group.id), normalize(group.label), normalize(group.description)]
+            exact = any(field and f" {field} " in f" {normalized_query} " for field in fields[:2])
+            overlap = max((len(query_tokens & set(field.split())) for field in fields), default=0)
+            if exact or overlap:
+                scored.append((10 if exact else 0, overlap, group))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [group for _, _, group in scored]
 
     def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
         return next((g for g in self.list_groups(table_id) if g.id == group_id), None)
