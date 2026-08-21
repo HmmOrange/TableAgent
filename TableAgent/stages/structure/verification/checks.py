@@ -24,8 +24,17 @@ def _header_display_map(structure: Any) -> dict[str, str]:
     return display
 
 
+def _group_display_map(structure: Any) -> dict[str, str]:
+    display: dict[str, str] = {}
+    for path, group in _walk_groups(structure):
+        if isinstance(group, dict):
+            identifier = str(group.get("id") or group.get("label") or "group").strip()
+            display[path] = f"Group '{identifier}'"
+    return display
+
+
 def _simplify_feedback(errors: list[str], structure: Any) -> list[str]:
-    display = _header_display_map(structure)
+    display = {**_header_display_map(structure), **_group_display_map(structure)}
     simplified: list[str] = []
     for error in errors:
         message = str(error)
@@ -119,13 +128,18 @@ def verify_structure(
                 errors.append(f"{path} is outside Excel worksheet bounds: {value}")
         for path, header in _walk_headers(structure):
             _check_header(worksheet, path, header, used_box, errors, actions, null_fields)
+        for table_path, groups in _walk_group_lists(structure):
+            used_ids: set[str] = set()
+            for index, group in enumerate(groups):
+                path = f"{table_path}.groups[{index}]"
+                _check_group(worksheet, path, group, used_box, used_ids, errors, null_fields)
     finally:
         workbook.close()
 
     feedback_errors = _simplify_feedback(errors, structure)
     if errors:
         feedback = (
-            "Fix these header problems. Do not reuse a rejected range. Find the named header "
+            "Fix these structure problems. Do not reuse a rejected range. Find the named item "
             "in the image and try again:\n"
             + "\n".join(f"{index}. {error}" for index, error in enumerate(feedback_errors, start=1))
         )
@@ -145,7 +159,7 @@ def _walk_ranges(value: Any, path: str = "") -> Iterator[tuple[str, Any]]:
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{path}.{key}" if path else key
-            if key in {"range", "header_range", "data_range"} and child is not None:
+            if key in {"range", "header_range", "group_range", "data_range"} and child is not None:
                 yield child_path, child
             else:
                 yield from _walk_ranges(child, child_path)
@@ -276,6 +290,81 @@ def _walk_headers(structure: dict[str, Any]):
             continue
         for index, header in enumerate(headers):
             yield from _walk_header(header, f"{table_key}.headers[{index}]")
+
+
+def _walk_group_lists(structure: dict[str, Any]):
+    for table_key, table in structure.items():
+        if not isinstance(table, dict):
+            continue
+        groups = table.get("groups") or []
+        if isinstance(groups, list):
+            yield str(table_key), groups
+
+
+def _walk_groups(structure: dict[str, Any]):
+    for table_path, groups in _walk_group_lists(structure):
+        for index, group in enumerate(groups):
+            yield f"{table_path}.groups[{index}]", group
+
+
+def _check_group(worksheet, path, group, used_box, used_ids, errors, null_fields):
+    if not isinstance(group, dict):
+        errors.append(f"{path} must be a mapping")
+        return
+    group_id = str(group.get("id") or "").strip()
+    label = str(group.get("label") or "").strip()
+    description = str(group.get("description") or "").strip()
+    axis = str(group.get("axis") or "").strip().lower()
+    if not group_id:
+        errors.append(f"{path}.id must be nonempty")
+    elif group_id in used_ids:
+        errors.append(f"{path}.id must be unique within the table: {group_id}")
+    else:
+        used_ids.add(group_id)
+    if not label:
+        errors.append(f"{path}.label must be nonempty")
+    if not description:
+        errors.append(f"{path}.description must be nonempty")
+    if axis not in {"row", "column", "region"}:
+        errors.append(f"{path}.axis must be row, column, or region: {axis}")
+
+    group_range = group.get("group_range")
+    data_range = group.get("data_range")
+    group_box = data_box = None
+    if group_range is not None:
+        try:
+            group_box = _range_box(group_range)
+        except (TypeError, ValueError):
+            _set_null(group, path, "group_range", null_fields)
+            if data_range is not None:
+                _set_null(group, path, "data_range", null_fields)
+            errors.append(f"{path}.group_range is not a valid A1 range: {group_range}")
+        else:
+            if not _contains(used_box, group_box):
+                _set_null(group, path, "group_range", null_fields)
+                if data_range is not None:
+                    _set_null(group, path, "data_range", null_fields)
+                errors.append(f"{path}.group_range is outside used range: {group_range}")
+                group_box = None
+            elif label and not any(_norm(text) == _norm(label) for text in _cell_texts(worksheet, group_box)):
+                _set_null(group, path, "group_range", null_fields)
+                if data_range is not None:
+                    _set_null(group, path, "data_range", null_fields)
+                errors.append(f"{path}.group_range does not contain visible label {label!r}: {group_range}")
+                group_box = None
+    if data_range is not None and group.get("data_range") is not None:
+        try:
+            data_box = _range_box(data_range)
+        except (TypeError, ValueError):
+            _set_null(group, path, "data_range", null_fields)
+            errors.append(f"{path}.data_range is not a valid A1 range: {data_range}")
+        else:
+            if not _contains(used_box, data_box):
+                _set_null(group, path, "data_range", null_fields)
+                errors.append(f"{path}.data_range is outside used range: {data_range}")
+            elif group_box is not None and not _contains(group_box, data_box):
+                _set_null(group, path, "data_range", null_fields)
+                errors.append(f"{path}.data_range is not contained by group_range: {data_range} vs {group_range}")
 
 
 def _walk_header(header: Any, path: str):

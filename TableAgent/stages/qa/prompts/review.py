@@ -13,7 +13,7 @@ Reject only when the evidence shows filter drift or does not establish the reque
 Do reject hard-coded constants when the code could compute from available inspected variables.
 Reject attempts that attribute a value to the wrong header, especially when a neighboring column contains similar text.
 Reject unverified fixed-position column selection when verified header IDs, labels, or worksheet headers are available.
-When the requested field is a parent/group header, verify that code uses
+When the requested field is a layered parent header, verify that code uses
 `operators.resolve_header_columns`/`operators.group_header_mask` or explicitly uses every relevant descendant column.
 Reject a monthly tracking field selected only because the sheet/report title contains a month when the question asks
 for a different business field such as actual stock.
@@ -85,13 +85,14 @@ Reject the answer when any of these applies:
 - a numeric answer uses row counts, a neighboring field, or an unfiltered aggregate instead of the requested values;
 - raw data was re-filtered without preserving or verifying the inspected table/sheet, target, and question conditions;
 - fixed physical column positions were assumed without evidence connecting those positions to the requested headers;
-- a parent/group header has multiple `sub_headers` but the code or answer covers only one child without explicit
+- a layered parent header has multiple `sub_headers` but the code or answer covers only one child without explicit
   question evidence;
 - a grouped-field condition does not preserve the required any/all combination across all relevant child headers;
 - code filters a child belonging to an unrelated parent group, including substituting monthly tracking for a requested
   stock/status field merely because the report title contains a month;
 - the answer adds facts that are absent from the verified observations;
 - the answer uses sheet/table descriptions as evidence for record-level facts that were never inspected.
+- if the question names a structure group, evidence must stay inside its group_range and numeric evidence inside its data_range unless groups are explicitly compared.
 
 Return JSON only with `accepted` (boolean), `score` (0.0-1.0), and concise `feedback`. If rejected, state what a
 corrected plan must inspect or calculate. Do not solve the question yourself.
@@ -108,6 +109,9 @@ Verified runtime evidence and code:
 
 Verified grouped-header structure:
 {grouped_headers}
+
+Relevant structure groups:
+{groups}
 
 Final answer:
 {final_answer}

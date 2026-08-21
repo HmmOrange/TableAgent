@@ -42,6 +42,7 @@ from TableAgent.stages.qa import QAStage
 from TableAgent.stages.retrieval import RetrievalStage
 from TableAgent.stages.retrieval.pipeline import RetrievalPipeline
 from TableAgent.stages.structure import StructureStage
+from TableAgent.stages.structure.group_enrichment import GroupEnrichmentStage
 from TableAgent.stages.structure.pipeline import StructurePipeline
 
 if TYPE_CHECKING:
@@ -79,6 +80,11 @@ class TableAgentPipeline(BasePipeline):
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, logger)
         self.layout_agent = LayoutAgent(self.layout_vlm) if self.layout_vlm is not None else None
+        self.group_enrichment_stage = (
+            GroupEnrichmentStage(self.workbook_renderer, self.layout_vlm)
+            if self.layout_vlm is not None
+            else None
+        )
         self.verifier = DeterministicVerifier(
             data_only=self.settings.structure_data_only,
         )
@@ -95,6 +101,7 @@ class TableAgentPipeline(BasePipeline):
                 self.layout_agent,
                 self.verifier,
                 progress_callback=self._progress,
+                group_enrichment_stage=self.group_enrichment_stage,
             )
             if self.layout_agent is not None
             else None

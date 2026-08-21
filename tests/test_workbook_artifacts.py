@@ -8,7 +8,12 @@ import openpyxl
 import pytest
 import yaml
 
-from TableAgent.artifacts import SummaryGenerator, build_workbook_metadata, build_workbook_schema
+from TableAgent.artifacts import (
+    SummaryGenerator,
+    build_workbook_metadata,
+    build_workbook_schema,
+    workbook_artifact_dir,
+)
 from TableAgent.llm import LLMResponse
 
 
@@ -20,6 +25,19 @@ class FakeSummaryLLM:
     def generate(self, prompt, system_prompt=None):
         self.calls.append((prompt, system_prompt))
         return LLMResponse(content=self.responses.pop(0))
+
+
+def test_structure_workbook_directory_does_not_include_content_hash(tmp_path: Path):
+    source_dir = workbook_artifact_dir(tmp_path, "Quarterly Report.xlsx", "abcdef123456")
+    job_dir = workbook_artifact_dir(
+        tmp_path,
+        "Quarterly Report.xlsx",
+        "abcdef123456",
+        sources=False,
+    )
+
+    assert source_dir == tmp_path / "sources" / "Quarterly_Report.xlsx"
+    assert job_dir == tmp_path / "Quarterly_Report.xlsx_abcdef12"
 
 
 def test_schema_embeds_selected_sheet_structures_and_llm_descriptions(tmp_path: Path):

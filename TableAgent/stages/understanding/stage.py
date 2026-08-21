@@ -1,8 +1,8 @@
-import json
 from pathlib import Path
 from typing import Any
 
 import openpyxl
+import yaml
 from openpyxl.utils import get_column_letter
 
 from TableAgent.rendering.workbook import WorkbookRenderer
@@ -10,10 +10,6 @@ from TableAgent.rendering.workbook import WorkbookRenderer
 from .contracts import UnderstandingInput, UnderstandingOutput
 from .parsing import parse_understanding
 from .prompts import REPAIR_PROMPT_TEMPLATE, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-
-MAX_ROWS = 50
-MAX_COLUMNS = 50
-
 
 class UnderstandingStage:
     def __init__(self, renderer: WorkbookRenderer, vlm: Any):
@@ -24,8 +20,8 @@ class UnderstandingStage:
         workbook_path = Path(stage_input.workbook_path)
         artifact_dir = Path(stage_input.artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        viewport_range = _top_left_viewport(workbook_path, stage_input.sheet_name)
-        image_path = artifact_dir / "viewport.png"
+        viewport_range = _used_range(workbook_path, stage_input.sheet_name)
+        image_path = artifact_dir / "worksheet.png"
         self.renderer.source_viewport_to_image(
             workbook_path,
             stage_input.sheet_name,
@@ -64,20 +60,13 @@ class UnderstandingStage:
             understanding = parse_understanding(repair_response.content)
             response = repair_response
 
-        result_path = artifact_dir / "headers.json"
+        result_path = artifact_dir / "understanding.yaml"
         result_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "workbook": workbook_path.name,
-                    "sheet": stage_input.sheet_name,
-                    "viewport": viewport_range,
-                    **understanding.to_dict(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
+            yaml.safe_dump(
+                understanding.to_dict(),
+                sort_keys=False,
+                allow_unicode=True,
+            ),
             encoding="utf-8",
         )
         return UnderstandingOutput(
@@ -89,14 +78,13 @@ class UnderstandingStage:
         )
 
 
-def _top_left_viewport(workbook_path: Path, sheet_name: str) -> str:
+def _used_range(workbook_path: Path, sheet_name: str) -> str:
     workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
     try:
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"Worksheet not found: {sheet_name}")
         worksheet = workbook[sheet_name]
-        max_row = min(MAX_ROWS, max(1, worksheet.max_row))
-        max_column = min(MAX_COLUMNS, max(1, worksheet.max_column))
+        used_range = f"A1:{get_column_letter(max(1, worksheet.max_column))}{max(1, worksheet.max_row)}"
     finally:
         workbook.close()
-    return f"A1:{get_column_letter(max_column)}{max_row}"
+    return used_range

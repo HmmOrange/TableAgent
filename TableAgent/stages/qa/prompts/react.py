@@ -44,10 +44,11 @@ Observation policy:
 - Treat each verified header as the authoritative meaning of the values in its column or range. Preserve header-to-value
   ownership when selecting and naming fields. Never use text from a different header merely because it sounds like the
   requested concept; inspect and return the value under the requested header first.
+- A named structure group scopes the worksheet: search labels in group_range and use numeric evidence from data_range. Multiple named groups may be read for comparisons.
 - `read_table_as_dataframe(..., has_headers=True)` returns one logical column per verified header, combining distinct
   values when that header spans several physical worksheet columns. Use the complete logical value; do not select only
   the first physical component.
-- When a requested field is a parent/group header with `sub_headers`, inspect every relevant child header before
+- When a requested field is a layered parent header with `sub_headers`, inspect every relevant child header before
   filtering or aggregating. Never use the first child as a proxy for the group. For an "any" condition, combine child
   conditions with OR; for an "all" condition, use AND, and report which child columns were covered. Prefer
   `operators.resolve_header_columns(table_id, parent_header_id)` and

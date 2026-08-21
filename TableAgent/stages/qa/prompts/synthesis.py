@@ -23,7 +23,8 @@ Keep output small. Use existing variables, summaries, filters, and aggregates; d
   never return the internal header ID itself.
 - Preserve authoritative header-to-value ownership from inspection. When multiple columns contain semantically similar
   text, use the value from the header explicitly requested by the question; do not relabel a neighboring column's value.
-- If the requested field is a parent/group header, treat all of its `sub_headers` as part of the field. Confirm that
+- Preserve the group ownership of evidence and do not substitute the same label from a different group.
+- If the requested field is a layered parent header, treat all of its `sub_headers` as part of the field. Confirm that
   inspection covered every relevant child and combine them with the question's intended any/all semantics; do not
   silently report only the first child. If synthesis must re-filter, use `operators.resolve_header_columns` and
   `operators.group_header_mask` rather than substituting a similarly named or period-labeled field.

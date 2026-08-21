@@ -931,7 +931,7 @@ def test_verifier_feedback_excludes_completed_repairs(tmp_path: Path):
 
     assert report["actions"] == ["table1.headers[0].label corrected to workbook text 'Region'"]
     assert "corrected to workbook text" not in report["feedback"]
-    assert report["feedback"].startswith("Fix these header problems.")
+    assert report["feedback"].startswith("Fix these structure problems.")
     assert "Header 'Year' was incorrectly put at A1" in report["feedback"]
 
 
@@ -1239,15 +1239,36 @@ def test_layout_retry_prompt_forbids_reusing_rejected_ranges(tmp_path: Path):
 
 def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monkeypatch):
     _patch_libreoffice_workbook_render(monkeypatch)
+
+    class StaticGroupEnrichment:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, **kwargs):
+            self.calls.append(kwargs)
+            kwargs["artifact_dir"].mkdir(parents=True, exist_ok=True)
+            structure = yaml.safe_load(kwargs["structure_text"])
+            structure["table1"]["groups"] = []
+            structure_text = yaml.safe_dump(structure, sort_keys=False)
+            result_path = kwargs["artifact_dir"] / "structure_after.yaml"
+            result_path.write_text(structure_text, encoding="utf-8")
+            return types.SimpleNamespace(
+                structure_text=structure_text,
+                preflight_errors=[],
+                responses=[LLMResponse(content="groups: []\n")],
+            )
+
     workbook_path = tmp_path / "book.xlsx"
     _workbook(workbook_path)
     settings = _settings(tmp_path)
     renderer = WorkbookRenderer(settings, logger=None)
+    group_enrichment = StaticGroupEnrichment()
     workflow = TableLayoutWorkflow(
         settings,
         renderer,
         LayoutAgent(StaticLayoutVLM()),
         DeterministicVerifier(),
+        group_enrichment_stage=group_enrichment,
     )
     metadata = SheetMetadata("Sheet1", "A1:AN10", [])
 
@@ -1259,11 +1280,21 @@ def test_workflow_stops_same_direction_after_good_no_change(tmp_path: Path, monk
     )
 
     events = [json.loads(line) for line in (tmp_path / "artifacts" / "events.jsonl").read_text().splitlines()]
-    assert [(event["direction"], event["viewport"]) for event in events] == [
+    layout_events = [event for event in events if "direction" in event]
+    assert [(event["direction"], event["viewport"]) for event in layout_events] == [
         ("stay", "A1:T10"),
         ("right", "U1:AN10"),
     ]
     assert result.iterations == 2
+    assert len(group_enrichment.calls) == 1
+    assert "table1:" in group_enrichment.calls[0]["structure_text"]
+    prompts = [
+        (iteration_dir / "layout_prompt.txt").read_text(encoding="utf-8")
+        for iteration_dir in sorted((tmp_path / "artifacts" / "iterations").iterdir())
+    ]
+    assert all("Full-sheet understanding" not in prompt for prompt in prompts)
+    assert all("group_range" not in prompt for prompt in prompts)
+    assert events[-1]["stage"] == "groups"
     assert (tmp_path / "artifacts" / "metadata.yaml").is_file()
     assert (tmp_path / "artifacts" / "changelog.md").is_file()
     for iteration_dir in (tmp_path / "artifacts" / "iterations").iterdir():

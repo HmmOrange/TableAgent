@@ -12,24 +12,24 @@ class UnderstandingInput:
 
 
 @dataclass(frozen=True)
-class HeaderUnderstanding:
-    row_headers: tuple[str, ...]
-    column_headers: tuple[str, ...]
-    row_group_headers: tuple[str, ...]
-    column_group_headers: tuple[str, ...]
+class StructureUnderstanding:
+    headers: tuple[str, ...]
+    groups: tuple[str, ...]
 
     def to_dict(self) -> dict[str, list[str]]:
         return {
-            "row_headers": list(self.row_headers),
-            "column_headers": list(self.column_headers),
-            "row_group_headers": list(self.row_group_headers),
-            "column_group_headers": list(self.column_group_headers),
+            "headers": list(self.headers),
+            "groups": list(self.groups),
         }
+
+
+# Preserve the public name while callers migrate to the structure-oriented name.
+HeaderUnderstanding = StructureUnderstanding
 
 
 @dataclass(frozen=True)
 class UnderstandingOutput:
-    understanding: HeaderUnderstanding
+    understanding: StructureUnderstanding
     viewport_range: str
     image_path: Path
     result_path: Path

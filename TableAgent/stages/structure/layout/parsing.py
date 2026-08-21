@@ -270,7 +270,7 @@ class LayoutParseResult:
     discarded: str
     directions: list[str]
     changelog: str
-    rejected_headers: list[str]
+    preflight_errors: list[str]
 
 
 def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
@@ -280,7 +280,7 @@ def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
 
 
 def extract_layout_structure_result(content: str) -> LayoutParseResult:
-    """Parse a response and report headers rejected during normalization."""
+    """Parse a response and report schema entries rejected during normalization."""
     text = content.strip()
     candidates = [(match.group(1).strip(), match.span()) for match in _YAML_FENCE.finditer(text)]
     if not candidates:
@@ -293,7 +293,7 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
             recovered = _recover_layout_envelope(candidate)
             if recovered is None:
                 continue
-            normalized, candidate_discarded, directions, changelog, rejected_headers = recovered
+            normalized, candidate_discarded, directions, changelog, preflight_errors = recovered
             discarded = "\n".join(part for part in (
                 (text[:span[0]] + "\n" + text[span[1]:]).strip(),
                 candidate_discarded,
@@ -303,14 +303,14 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
                 discarded,
                 directions,
                 changelog,
-                rejected_headers,
+                preflight_errors,
             )
         if not isinstance(parsed, dict):
             continue
 
         source = parsed.get("structure") or parsed.get("updated_structure") or parsed
-        rejected_headers: list[str] = []
-        normalized = _normalize_layout_structure(source, rejected_headers=rejected_headers)
+        preflight_errors: list[str] = []
+        normalized = _normalize_layout_structure(source, preflight_errors=preflight_errors)
         if normalized is None:
             continue
 
@@ -324,7 +324,7 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
             discarded,
             [str(direction).strip().lower() for direction in directions],
             changelog,
-            rejected_headers,
+            preflight_errors,
         )
 
     legacy, discarded = extract_strict_structure(content)
@@ -346,8 +346,8 @@ def _recover_layout_envelope(
         return None
 
     source = parsed.get("structure") or parsed.get("updated_structure")
-    rejected_headers: list[str] = []
-    normalized = _normalize_layout_structure(source, rejected_headers=rejected_headers)
+    preflight_errors: list[str] = []
+    normalized = _normalize_layout_structure(source, preflight_errors=preflight_errors)
     if normalized is None:
         return None
 
@@ -379,7 +379,7 @@ def _recover_layout_envelope(
         else:
             changelog = changelog_block[0].splitlines()[0].partition(":")[2].strip()
 
-    return normalized, discarded, directions, changelog, rejected_headers
+    return normalized, discarded, directions, changelog, preflight_errors
 
 
 def _extract_top_level_block(
@@ -428,7 +428,7 @@ def _set_range_path_to_null(structure: dict[str, Any], field_path: str) -> bool:
     tokens = []
     for name, index in re.findall(r"([^.\[\]]+)|\[(\d+)\]", field_path):
         tokens.append(int(index) if index else name)
-    if not tokens or tokens[-1] not in {"range", "header_range", "data_range"}:
+    if not tokens or tokens[-1] not in {"range", "header_range", "group_range", "data_range"}:
         return False
     current: Any = structure
     try:
@@ -445,7 +445,7 @@ def _set_range_path_to_null(structure: dict[str, Any], field_path: str) -> bool:
 def _normalize_layout_structure(
     parsed: Any,
     *,
-    rejected_headers: list[str] | None = None,
+    preflight_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
     legacy = _normalize_structure(parsed)
     if legacy is not None:
@@ -469,19 +469,35 @@ def _normalize_layout_structure(
                 include_sub_headers=True,
                 used_ids=used_ids,
                 path=f"{key}.headers[{index}]",
-                rejected_headers=rejected_headers,
+                rejected_headers=preflight_errors,
             )
             if normalized is None:
                 continue
             normalized_headers.append(normalized)
         if not normalized_headers:
             continue
+        groups = table.get("groups") or []
+        if not isinstance(groups, list):
+            _reject_layout_item(preflight_errors, f"{key}.groups", "value is not a list")
+            groups = []
+        normalized_groups = []
+        used_group_ids: set[str] = set()
+        for index, group in enumerate(groups):
+            normalized_group = _normalize_layout_group(
+                group,
+                used_ids=used_group_ids,
+                path=f"{key}.groups[{index}]",
+                preflight_errors=preflight_errors,
+            )
+            if normalized_group is not None:
+                normalized_groups.append(normalized_group)
         normalized_tables[key] = {
             "id": str(table.get("id") or key).strip(),
             "name": str(table.get("name") or "").strip() or None,
             "description": str(table.get("description") or "").strip(),
             "sheet": str(table.get("sheet") or "").strip() or None,
             "headers": normalized_headers,
+            "groups": normalized_groups,
         }
     return normalized_tables or None
 
@@ -564,6 +580,46 @@ def _normalize_layout_header(
             normalized_sub_headers.append(child)
         normalized["sub_headers"] = normalized_sub_headers
     return normalized
+
+
+def _normalize_layout_group(
+    group: Any,
+    *,
+    used_ids: set[str],
+    path: str,
+    preflight_errors: list[str] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(group, dict):
+        _reject_layout_item(preflight_errors, path, "group is not a mapping")
+        return None
+    label = str(group.get("label") or "").strip()
+    if not label:
+        _reject_layout_item(preflight_errors, path, "label is empty")
+        return None
+    axis = str(group.get("axis") or "").strip().lower()
+    if axis not in {"row", "column", "region"}:
+        _reject_layout_item(preflight_errors, path, f"axis must be row, column, or region: {axis or '<empty>'}")
+        return None
+    base_id = re.sub(r"[^a-z0-9]+", "_", str(group.get("id") or label).strip().lower()).strip("_") or "group"
+    group_id = base_id
+    suffix = 2
+    while group_id in used_ids:
+        group_id = f"{base_id}_{suffix}"
+        suffix += 1
+    used_ids.add(group_id)
+    return {
+        "id": group_id,
+        "label": label,
+        "group_range": _normalize_range_value(group.get("group_range")),
+        "data_range": _normalize_range_value(group.get("data_range")),
+        "axis": axis,
+        "description": str(group.get("description") or "").strip(),
+    }
+
+
+def _reject_layout_item(errors: list[str] | None, path: str, reason: str) -> None:
+    if errors is not None:
+        errors.append(f"{path}: {reason}")
 
 
 def _reject_layout_header(rejected_headers: list[str] | None, path: str, reason: str) -> None:

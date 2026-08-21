@@ -32,6 +32,32 @@ def extract_headers_text(headers_list: list, *, limit: int = 40) -> list[str]:
     return parts
 
 
+def extract_groups_text(groups_list: list, *, limit: int = 24) -> list[str]:
+    parts = []
+    for group in groups_list[:limit]:
+        if not isinstance(group, dict):
+            continue
+        text = str(group.get("label") or "")
+        if group.get("id"):
+            text += f" ({group['id']})"
+        if group.get("description"):
+            text += f": {group['description']}"
+        if group.get("axis"):
+            text += f" [{group['axis']}]"
+        if text:
+            parts.append(text)
+    return parts
+
+
+def _structured_groups(groups_list: list) -> list[dict[str, object]]:
+    fields = ("id", "label", "description", "axis", "group_range", "data_range")
+    return [
+        {field: group.get(field) for field in fields}
+        for group in groups_list
+        if isinstance(group, dict)
+    ]
+
+
 def extract_columns(headers_list: list, *, limit: int = 80, parent: str = "") -> list[dict[str, str]]:
     columns: list[dict[str, str]] = []
     for header in headers_list:
@@ -117,6 +143,11 @@ def build_source_retrieval_card(
                 headers_text = "; ".join(extract_headers_text(headers))
                 if headers_text:
                     table_parts.append(f"Headers: {headers_text}")
+            groups = table_value.get("groups", [])
+            if isinstance(groups, list):
+                groups_text = "; ".join(extract_groups_text(groups))
+                if groups_text:
+                    table_parts.append(f"Groups: {groups_text}")
 
     parts = [f"Workbook: {workbook_path.name}", f"Sheet: {sheet_name}", *table_parts]
     if sheet_text:
@@ -158,6 +189,11 @@ def build_table_retrieval_cards(
             headers_text = "; ".join(extract_headers_text(headers))
             if headers_text:
                 parts.append(f"Headers: {headers_text}")
+        groups = table_value.get("groups", [])
+        if isinstance(groups, list):
+            groups_text = "; ".join(extract_groups_text(groups))
+            if groups_text:
+                parts.append(f"Groups: {groups_text}")
         relations_text = _table_relations_text(structure_data.get("relations"), table_id)
         if relations_text:
             parts.append(f"Relations: {relations_text}")
@@ -237,6 +273,9 @@ def build_sheet_metadata_payload(
             table_payload["headers"] = extract_headers_text(headers)
             table_payload["columns"] = columns
             table_payload["column_count"] = len(columns)
+        groups = table_value.get("groups", [])
+        if isinstance(groups, list):
+            table_payload["groups"] = _structured_groups(groups)
         table_payload["summary"] = _table_summary(table_id, table_name, description, columns)
         payload["tables"].append(table_payload)
     if not payload["description"]:
@@ -325,6 +364,8 @@ def build_metadata_retrieval_card(payload: dict) -> str:
             else:
                 headers = table.get("headers") if isinstance(table.get("headers"), list) else []
                 fields.extend(str(header) for header in headers[:12])
+            groups = table.get("groups") if isinstance(table.get("groups"), list) else []
+            fields.extend(extract_groups_text(groups))
             parts.append("Table detail: " + " | ".join(field for field in fields if field))
     return "\n".join(parts)
 

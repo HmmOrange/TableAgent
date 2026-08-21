@@ -10,6 +10,7 @@ from TableAgent.stages.qa.actions.base_action import (
     CodeGenerationResult,
 )
 from TableAgent.stages.qa.header_hints import question_header_hints
+from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.stages.qa.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
@@ -100,6 +101,13 @@ def get_table_catalog_summary(env: Any) -> str:
             header_bits.append(bit)
         if len(headers) > 20:
             header_bits.append(f"... {len(headers) - 20} more headers")
+        groups = struct.get("groups", []) if struct else []
+        group_bits = [
+            f"{getattr(group, 'label', '')} ({getattr(group, 'id', '')})"
+            for group in groups[:12]
+        ]
+        if len(groups) > 12:
+            group_bits.append(f"... {len(groups) - 12} more groups")
         relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []
         relation_ids = [str(relation.get("id")) for relation in relations[:12] if relation.get("id")]
         lines.append(
@@ -109,6 +117,7 @@ def get_table_catalog_summary(env: Any) -> str:
                 f"  description: {struct.get('description', '') if struct else ''}",
                 f"  sheet: {struct.get('sheet', '') if struct else ''}",
                 f"  headers: {'; '.join(header_bits) if header_bits else '(none)'}",
+                f"  groups: {'; '.join(group_bits) if group_bits else '(none)'}",
                 f"  formula_relations: {', '.join(relation_ids) if relation_ids else '(none)'}",
             ])
         )
@@ -203,7 +212,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
-                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
+                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "StructureGroup", "np", "namespace"}
                 ]
                 prior_outcomes = get_prior_outcomes(self.env)
                 formatted_experience = self.env.experience_pool.format()
@@ -262,10 +271,15 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     request.question,
                     [str(table_id) for table_id in table_ids],
                 )
+                group_hints = question_group_hints(
+                    self.env,
+                    request.question,
+                    [str(table_id) for table_id in table_ids],
+                )
                 available_vars = list(self.env.notebook.namespace.keys())
                 available_vars = [
                     v for v in available_vars
-                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
+                    if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "StructureGroup", "np", "namespace"}
                 ]
 
                 prior_outcomes = get_prior_outcomes(self.env)
@@ -277,6 +291,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                         f"Subtask: {request.subtask_id}.\n"
                         f"Table structure:\n{struct_summary}\n\n"
                         f"Exact question-to-header matches:\n{header_hints}\n\n"
+                        f"Exact question-to-group matches:\n{group_hints}\n\n"
                         f"Experience:\n{formatted_experience}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",
@@ -306,7 +321,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             available_vars = list(self.env.notebook.namespace.keys())
             available_vars = [
                 v for v in available_vars
-                if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "np", "namespace"}
+                if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "StructureGroup", "np", "namespace"}
             ]
             prior_outcomes = get_prior_outcomes(self.env)
             inspection_variables = get_dependency_variable_summary(self.env, request.subtask)

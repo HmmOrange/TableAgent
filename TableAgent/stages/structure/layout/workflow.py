@@ -22,6 +22,7 @@ from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.stages.structure.layout.agent import LayoutAgent
 from TableAgent.stages.structure.layout.direction_agent import DirectionAgent
 from TableAgent.stages.structure.layout.parsing import nullify_structure_ranges
+from TableAgent.stages.structure.group_enrichment import GroupEnrichmentStage
 from TableAgent.stages.structure.verification import DeterministicVerifier
 
 
@@ -48,12 +49,14 @@ class TableLayoutWorkflow:
         progress_callback: Callable[..., None] | None = None,
         *,
         direction_agent: DirectionAgent | None = None,
+        group_enrichment_stage: GroupEnrichmentStage | None = None,
     ):
         self.settings = settings
         self.renderer = renderer
         self.layout_agent = layout_agent
         self.direction_agent = direction_agent or DirectionAgent(layout_agent.vlm)
         self.verifier = verifier
+        self.group_enrichment_stage = group_enrichment_stage
         self.progress_callback = progress_callback
 
     def set_progress_callback(self, callback: Callable[..., None] | None) -> None:
@@ -81,6 +84,7 @@ class TableLayoutWorkflow:
         (output_dir / "metadata.yaml").write_text(metadata_text, encoding="utf-8")
 
         structure_text = structure_path.read_text(encoding="utf-8") if structure_path.is_file() else ""
+        responses: list[Any] = []
         table_range = metadata.used_range
         queue = DirectionQueue()
         queued_ranges: set[str] = set()
@@ -100,7 +104,6 @@ class TableLayoutWorkflow:
             "status": "not_good",
             "feedback": "No viewport has been verified.",
         }
-        responses: list[Any] = []
         direction_cache: dict[tuple[int, int], list[str]] = {}
         first_image: Path | None = None
         iteration = 0
@@ -191,7 +194,7 @@ class TableLayoutWorkflow:
                 sheet_name=sheet_name,
                 structure_text=structure_text,
                 iteration_dir=iteration_dir,
-                preflight_errors=layout.rejected_headers,
+                preflight_errors=layout.preflight_errors,
             )
             structure_text = verification.structure_text
             last_verification = {
@@ -291,6 +294,52 @@ class TableLayoutWorkflow:
                     workbook_path,
                     sheet_name,
                 )
+
+        if self.group_enrichment_stage is not None and structure_text.strip():
+            group_dir = output_dir / "groups"
+            self._progress(
+                "groups",
+                workbook=workbook_path.name,
+                sheet=sheet_name,
+                range=metadata.used_range,
+            )
+            enrichment = self.group_enrichment_stage.run(
+                workbook_path=workbook_path,
+                sheet_name=sheet_name,
+                viewport_range=metadata.used_range,
+                structure_text=structure_text,
+                artifact_dir=group_dir,
+            )
+            responses.extend(enrichment.responses)
+            structure_text = enrichment.structure_text
+            verification = self.verifier.run(
+                workbook_path=workbook_path,
+                sheet_name=sheet_name,
+                structure_text=structure_text,
+                iteration_dir=group_dir,
+                preflight_errors=enrichment.preflight_errors,
+            )
+            structure_text = verification.structure_text
+            if not verification.is_good and verification.null_fields:
+                structure_text = nullify_structure_ranges(structure_text, verification.null_fields)
+                (group_dir / "structure_after.yaml").write_text(structure_text, encoding="utf-8")
+                verification = self.verifier.run(
+                    workbook_path=workbook_path,
+                    sheet_name=sheet_name,
+                    structure_text=structure_text,
+                    iteration_dir=group_dir,
+                )
+                structure_text = verification.structure_text
+            last_verification = {
+                "status": verification.status,
+                "feedback": verification.feedback,
+                "viewport": metadata.used_range,
+                "stage": "groups",
+            }
+            self._append_event(events_path, {
+                "stage": "groups",
+                "verification": last_verification,
+            })
 
         if structure_text.strip():
             structure_path.write_text(structure_text, encoding="utf-8")

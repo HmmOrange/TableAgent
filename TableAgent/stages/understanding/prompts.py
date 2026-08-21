@@ -1,26 +1,35 @@
-SYSTEM_PROMPT = """You inspect a spreadsheet image. Return valid JSON only."""
+SYSTEM_PROMPT = """You inspect an entire spreadsheet image.
+Return YAML only. Identify visible worksheet headers and semantic groups."""
 
-USER_PROMPT_TEMPLATE = """Inspect the viewport of this spreadsheet.
+USER_PROMPT_TEMPLATE = """Inspect the entire worksheet image.
 
-Identify the row headers, row group headers, column headers, and column group
-headers visible in the image. Read the hierarchy before writing the JSON.
+Workbook: {workbook_name}
+Worksheet: {sheet_name}
+Complete used range: {viewport_range}
 
-A leaf header labels one data-bearing row or column. A group header is a
-label-only parent or section whose children are multiple rows or columns. For
-example, a blank-valued "North" section followed by Revenue and Cost rows is a
-row group; Revenue and Cost are row headers. Apply the same rule to columns.
-Do not put one occurrence in both a leaf list and a group list.
+Return exactly these two flat lists:
 
-Return exactly:
-{{
-  "row_headers": ["..."],
-  "row_group_headers": ["..."],
-  "column_headers": ["..."],
-  "column_group_headers": ["..."]
-}}
+headers:
+  - "<exact visible header name>"
+groups:
+  - "<exact visible semantic group name>"
 
-Use exact visible labels and an empty list when a category is absent. Do not
-include titles, notes, ranges, coordinates, explanations, or additional fields.
+A header names what a data field measures. Include visible parent and child
+header names. Do not include titles or individual record labels as headers.
+
+A group is a visible section label whose meaning applies to a contiguous block
+of multiple records or data cells. The label supplies shared context to every
+record in that block. Repeated record sequences beneath peer section labels are
+strong group evidence. Include the first peer when it owns a following detail
+block, including an overall or total section.
+
+Do not return table headers, parent header bands, individual records, internal
+headings that only name the kind of records below them, titles, notes, footnotes,
+or sources as groups.
+
+Double-quote every name. Use an empty list when absent. Do not include ids,
+ranges, descriptions, hierarchy, coordinates, explanations, Markdown fences, or
+additional fields.
 """
 
 REPAIR_PROMPT_TEMPLATE = """Your previous response was invalid.
@@ -30,6 +39,6 @@ Validation error: {error}
 Previous response:
 {response}
 
-Return exactly one valid JSON object with only the four required arrays. Every
-item must be a non-empty string. Return JSON only.
+Return valid YAML with exactly flat headers and groups lists. Every item must be
+a double-quoted non-empty string. Return YAML only.
 """

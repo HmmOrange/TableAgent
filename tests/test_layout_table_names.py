@@ -110,7 +110,7 @@ def test_layout_parser_rejects_only_fc11_header_with_empty_label():
         "year",
         "civilian_labor_force",
     ]
-    assert result.rejected_headers == [
+    assert result.preflight_errors == [
         "labor_statistics.headers[0] was rejected because label is empty (id='row_index', "
         "header_range='A1:A3', data_range='A5:A20'). The candidate was removed; add it back only "
         "if the workbook shows a meaningful label, using that exact visible text. Otherwise leave it "

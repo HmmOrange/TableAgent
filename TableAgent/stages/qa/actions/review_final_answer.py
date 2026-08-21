@@ -44,11 +44,13 @@ class ReviewFinalAnswerAction:
             )
         evidence = "\n\n".join(evidence_sections) or "No successful runtime evidence was produced."
         grouped_headers = self._grouped_header_context()
+        groups = self._group_context(question)
         prompt = FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE.format(
             question=question,
             plan=plan_text,
             evidence=evidence,
             grouped_headers=grouped_headers,
+            groups=groups,
             final_answer=final_answer,
         )
         self.env.logger.log_event("final_answer_review_prompt", {
@@ -121,6 +123,35 @@ class ReviewFinalAnswerAction:
                     f"({getattr(header, 'label', '')}); children=[{child_text}]"
                 )
         return "\n".join(lines) if lines else "No grouped headers were available to the final reviewer."
+
+    def _group_context(self, question: str) -> str:
+        from TableAgent.stages.qa.header_hints import _contains_phrase, _normalize
+        from TableAgent.utils import range_to_a1
+
+        operators = getattr(self.env, "operators", None)
+        if operators is None or not hasattr(operators, "list_groups"):
+            return "No relevant structure groups."
+        namespace = getattr(self.env, "execution_namespace", {})
+        table_ids = namespace.get("selected_table_ids") if isinstance(namespace, dict) else None
+        if isinstance(table_ids, str):
+            table_ids = [table_ids]
+        if not table_ids:
+            table_ids = operators.list_tables()
+        exact = []
+        fallback = []
+        normalized_question = _normalize(question)
+        for table_id in table_ids or []:
+            for group in operators.list_groups(str(table_id)):
+                line = (
+                    f"table={table_id}; group={group.id}; label={group.label}; axis={group.axis}; "
+                    f"group_range={range_to_a1(group.group_range) if group.group_range else None}; "
+                    f"data_range={range_to_a1(group.data_range) if group.data_range else None}"
+                )
+                fallback.append(line)
+                if _contains_phrase(normalized_question, _normalize(group.label)):
+                    exact.append(line)
+        lines = exact or fallback[:8]
+        return "\n".join(lines[:8]) if lines else "No relevant structure groups."
 
 
 __all__ = ["ReviewFinalAnswerAction"]
