@@ -12,10 +12,12 @@ class StructureOperator(BaseOperator):
     examples = (
         "operators.list_tables() -> list[str]",
         "operators.list_headers(table_id) -> list[Header]",
+        "header = operators.get_header(table_id, header_id); header.description, header.header_range, header.data_range",
         "operators.find_headers(table_id, query) -> list[Header]",
         "operators.get_header(table_id, header_id) -> Header | None",
         "operators.resolve_header_columns(table_id, parent_header_id) -> list[str]",
         "operators.list_groups(table_id) -> list[StructureGroup]",
+        "group = operators.get_group(table_id, group_id); group.description, group.group_range, group.data_range",
         "operators.find_groups(table_id, query) -> list[StructureGroup]",
         "operators.get_group(table_id, group_id) -> StructureGroup | None",
         "operators.intersect_group_with_header(table_id, group_id, header_id) -> CellRange | None",

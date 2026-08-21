@@ -15,4 +15,9 @@ class Header:
     sub_headers: List["Header"] = field(default_factory=list)
 
     def __repr__(self) -> str:
-        return f"Header(id='{self.id}', label='{self.label}', orientation='{self.orientation}', sub_headers={len(self.sub_headers)})"
+        return (
+            "Header("
+            f"id={self.id!r}, label={self.label!r}, description={self.description!r}, "
+            f"orientation={self.orientation!r}, header_range={self.header_range!r}, "
+            f"data_range={self.data_range!r}, sub_headers={len(self.sub_headers)})"
+        )

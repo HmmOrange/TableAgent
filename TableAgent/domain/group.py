@@ -16,4 +16,8 @@ class StructureGroup:
     data_range: Optional[CellRange]
 
     def __repr__(self) -> str:
-        return f"StructureGroup(id='{self.id}', label='{self.label}', axis='{self.axis}')"
+        return (
+            "StructureGroup("
+            f"id={self.id!r}, label={self.label!r}, description={self.description!r}, "
+            f"axis={self.axis!r}, group_range={self.group_range!r}, data_range={self.data_range!r})"
+        )
