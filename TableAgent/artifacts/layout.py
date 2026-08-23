@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from pathlib import Path
 from typing import Iterator
 
 from TableAgent.utils.paths import safe_name
+
+
+_ARTIFACT_COPY_LOCK = threading.RLock()
 
 
 def workbook_artifact_dir(
@@ -49,10 +53,11 @@ def copy_artifact_tree(source: Path, target: Path) -> None:
     """Copy a sheet artifact directory without copying unrelated workbook files."""
     if source.resolve() == target.resolve():
         return
-    target.mkdir(parents=True, exist_ok=True)
-    for item in source.iterdir():
-        destination = target / item.name
-        if item.is_dir():
-            shutil.copytree(item, destination, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, destination)
+    with _ARTIFACT_COPY_LOCK:
+        target.mkdir(parents=True, exist_ok=True)
+        for item in source.iterdir():
+            destination = target / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, destination)
