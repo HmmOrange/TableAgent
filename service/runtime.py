@@ -1086,7 +1086,9 @@ class TableAgentService:
             insert_ellipsis=bool(config.get("compression_insert_ellipsis", config.get("compression_include_ellipsis", False))),
         ))
         results = []
-        for item in normalized:
+        total_workbooks = len(normalized)
+        print(f"Compression progress | status=starting | completed=0 | total={total_workbooks} | workbook=", flush=True)
+        for index, item in enumerate(normalized, start=1):
             base = output_dir / "compression" / safe_name(str(item["name"]))
             workbook_path = base / "compressed.xlsx"
             mapping_path = base / "row_mapping.json"
@@ -1097,6 +1099,11 @@ class TableAgentService:
                 "row_mapping": str(mapping_path),
                 "sheets": {name: value.to_dict() for name, value in sheets.items()},
             })
+            print(
+                f"Compression progress | status=running | completed={index} | total={total_workbooks} | workbook={item['name']}",
+                flush=True,
+            )
+        print(f"Compression progress | status=finished | completed={total_workbooks} | total={total_workbooks} | workbook=", flush=True)
         return results
 
     @staticmethod
