@@ -14,6 +14,7 @@ class TableAgentConfig:
     force_structure: bool
     structure_cache_dir: Path
     compression_cache_dir: Path
+    force_compression: bool
     cache_namespace: str
     layout_model_identity: str | None
     artifact_dir: Path
@@ -68,6 +69,7 @@ class TableAgentConfig:
             ),
             structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
             compression_cache_dir=Path(str(merged.get("compression_cache_dir", "cache/table_agent/compression"))),
+            force_compression=_bool(merged.get("force_compression", False)),
             cache_namespace=str(merged.get("cache_namespace", "default")),
             layout_model_identity=(str(merged["layout_model_identity"]) if merged.get("layout_model_identity") else None),
             artifact_dir=Path(str(_required(merged, "artifact_dir"))),
