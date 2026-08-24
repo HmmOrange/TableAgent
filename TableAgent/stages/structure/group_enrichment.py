@@ -41,13 +41,14 @@ a section; an isolated total record is not automatically a group.
 For each group, use exactly these six fields:
 - id: unique stable snake_case identifier within this table
 - label: exact visible worksheet text
-- group_range: complete contiguous footprint including the label and owned block
-- data_range: calculable cells in the block, excluding contextual labels when possible
+- group_range: exact cell or merged range containing the visible group label only
+- data_range: calculable cells owned by the group, excluding the label and other contextual cells
 - axis: row, column, or region
 - description: short semantic explanation
 
-The label must apply beyond its own cell. End the footprint before the next peer
-group, footer, or table boundary. Groups may overlap or have different shapes.
+The label must apply beyond its own cell. `group_range` is only the label's visible
+cell or merged span; do not expand it to include the owned data block. Groups may
+overlap or have different shapes.
 Do not invent members or header references.
 
 Return only:

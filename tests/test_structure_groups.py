@@ -140,7 +140,7 @@ def test_post_structure_group_parser_accepts_only_group_list():
     assert errors == []
     assert groups[0]["id"] == "men"
     assert "Completed table from structure.yaml" in GROUP_USER_PROMPT_TEMPLATE
-    assert "group_range" in GROUP_USER_PROMPT_TEMPLATE
+    assert "group_range: exact cell or merged range containing the visible group label only" in GROUP_USER_PROMPT_TEMPLATE
     assert "Do not return the table key" in GROUP_USER_PROMPT_TEMPLATE
 
     for invalid in (

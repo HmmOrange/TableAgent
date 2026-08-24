@@ -241,6 +241,15 @@ def _set_null(header: dict[str, Any], path: str, field_name: str, null_fields: l
     null_fields.append(f"{path}.{field_name}")
 
 
+def _invalidate_header(header: dict[str, Any], path: str, null_fields: list[str], *, include_data: bool = True) -> None:
+    """Clear all fields whose meaning depends on a rejected header location."""
+    _set_null(header, path, "header_range", null_fields)
+    if include_data and header.get("data_range") is not None:
+        _set_null(header, path, "data_range", null_fields)
+    if header.get("orientation") is not None:
+        _set_null(header, path, "orientation", null_fields)
+
+
 def _header_at_path(root: dict[str, Any], child_path: str, root_path: str = "") -> dict[str, Any] | None:
     child: Any = root
     relative_path = child_path[len(root_path):] if root_path and child_path.startswith(root_path) else child_path
@@ -362,9 +371,6 @@ def _check_group(worksheet, path, group, used_box, used_ids, errors, null_fields
             if not _contains(used_box, data_box):
                 _set_null(group, path, "data_range", null_fields)
                 errors.append(f"{path}.data_range is outside used range: {data_range}")
-            elif group_box is not None and not _contains(group_box, data_box):
-                _set_null(group, path, "data_range", null_fields)
-                errors.append(f"{path}.data_range is not contained by group_range: {data_range} vs {group_range}")
 
 
 def _walk_header(header: Any, path: str):
@@ -442,6 +448,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
     data_range = header.get("data_range")
     orientation = str(header.get("orientation") or "column").strip().lower()
     if orientation not in {"row", "column"}:
+        _invalidate_header(header, path, null_fields)
         errors.append(f"{path}.orientation must be row or column: {orientation}")
 
     header_box = None
@@ -450,9 +457,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
         try:
             header_box = _range_box(header_range)
         except (TypeError, ValueError):
-            _set_null(header, path, "header_range", null_fields)
-            if data_range is not None:
-                _set_null(header, path, "data_range", null_fields)
+            _invalidate_header(header, path, null_fields)
             errors.append(f"{path}.header_range is not a valid A1 range: {header_range}")
         else:
             original_header_box = header_box
@@ -463,9 +468,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                 merged_similarity = max((_label_similarity(label, text) for text in merged_texts), default=0.0)
                 if direct_value is None and label and merged_texts and merged_similarity < _LABEL_MATCH_THRESHOLD:
                     workbook_text = " / ".join(merged_texts)
-                    _set_null(header, path, "header_range", null_fields)
-                    if data_range is not None:
-                        _set_null(header, path, "data_range", null_fields)
+                    _invalidate_header(header, path, null_fields)
                     errors.append(
                         f"{path}.header_range {header_range} is a blank cell inside merged range "
                         f"{_box_to_range(merged_box)}, whose workbook text is {workbook_text!r}, "
@@ -484,29 +487,24 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                 errors.append(f"{path}.header_range is outside used range: {header_range}")
             texts = _cell_texts(worksheet, header_box)
             if not texts:
-                _set_null(header, path, "header_range", null_fields)
-                if data_range is not None:
-                    _set_null(header, path, "data_range", null_fields)
+                _invalidate_header(header, path, null_fields)
                 errors.append(f"{path}.header_range contains no visible header text: {header_range}")
-            elif len(texts) == 1:
+            else:
+                # Header labels may be split across adjacent cells; compare the
+                # accumulated visible text before rejecting the range.
                 similarity = _repair_label(header, texts, actions, path)
                 if similarity < _LABEL_MATCH_THRESHOLD:
                     workbook_text = " / ".join(texts)
-                    _set_null(header, path, "header_range", null_fields)
-                    if data_range is not None:
-                        _set_null(header, path, "data_range", null_fields)
-                    errors.append(
-                        f"{path}.header_range {header_range} contains workbook text {workbook_text!r}, "
-                        f"which matches label {label!r} by only {similarity:.0%}; at least "
-                        f"{_LABEL_MATCH_THRESHOLD:.0%} is required. Select the exact range containing {label!r}."
-                    )
+                    _invalidate_header(header, path, null_fields)
+                    if len(texts) == 1:
+                        errors.append(
+                            f"{path}.header_range {header_range} contains workbook text {workbook_text!r}, "
+                            f"which matches label {label!r} by only {similarity:.0%}; at least "
+                            f"{_LABEL_MATCH_THRESHOLD:.0%} is required. Select the exact range containing {label!r}."
+                        )
+                    else:
+                        errors.append(f"{path}.header_range contains multiple unrelated texts {texts!r}: {header_range}")
                     header_box = None
-            if len(texts) > 1:
-                _set_null(header, path, "header_range", null_fields)
-                if data_range is not None:
-                    _set_null(header, path, "data_range", null_fields)
-                errors.append(f"{path}.header_range contains multiple unrelated texts {texts!r}: {header_range}")
-                header_box = None
             if header_box is None:
                 return
 
@@ -560,7 +558,6 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
 
     sub_headers = header.get("sub_headers") or []
     child_header_boxes = []
-    child_data_boxes = []
     if isinstance(sub_headers, list):
         for index, child in enumerate(sub_headers):
             child_path = f"{path}.sub_headers[{index}]"
@@ -569,38 +566,15 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                 continue
             child_header_range = child.get("header_range") or child.get("range")
             child_data_range = child.get("data_range")
-            if child_data_range is None:
-                null_fields.append(f"{child_path}.data_range")
+            child_data_path = f"{child_path}.data_range"
+            if child_data_range is None and child_data_path not in null_fields:
+                null_fields.append(child_data_path)
                 errors.append(f"{child_path}.data_range is required when a sub-header is declared")
             if child_header_range is not None:
                 try:
                     child_header_boxes.append((child_path, child_header_range, _range_box(child_header_range)))
                 except (TypeError, ValueError):
                     pass
-            if child_data_range is not None:
-                try:
-                    child_data_boxes.append((child_path, child_data_range, _range_box(child_data_range)))
-                except (TypeError, ValueError):
-                    pass
-
-    if data_box is not None:
-        for child_path, child_header_range, child_header_box in child_header_boxes:
-            if _intersects(data_box, child_header_box):
-                repaired = _repair_data_box(child_header_box, data_box, orientation, used_box)
-                if _contains(used_box, repaired):
-                    actions.append(f"{path}.data_range shifted from {data_range} to {_box_to_range(repaired)} to exclude {child_path}.header_range")
-                    data_box = repaired
-                    header["data_range"] = _box_to_range(data_box)
-                    data_range = header["data_range"]
-                else:
-                    _set_null(header, path, "data_range", null_fields)
-                    errors.append(f"{path}.data_range overlaps {child_path}.header_range: {data_range} vs {child_header_range}")
-        for child_path, child_data_range, child_data_box in child_data_boxes:
-            if not _contains(data_box, child_data_box):
-                child = _header_at_path(header, child_path, path)
-                if child is not None:
-                    _set_null(child, child_path, "data_range", null_fields)
-                errors.append(f"{child_path}.data_range is not contained by parent {path}.data_range: {child_data_range} vs {data_range}")
 
     if header_box is not None and child_header_boxes:
         for child_path, child_header_range, child_header_box in child_header_boxes:
@@ -612,7 +586,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
             if invalid:
                 child = _header_at_path(header, child_path, path)
                 if child is not None:
-                    _set_null(child, child_path, "header_range", null_fields)
+                    _invalidate_header(child, child_path, null_fields)
                 errors.append(f"{child_path}.header_range is outside the parent header hierarchy: {child_header_range} vs {header_range}")
         coverage_header_boxes = _descendant_header_boxes(sub_headers, path)
         gaps = _visible_subheader_gaps(worksheet, header_box, coverage_header_boxes, data_box, orientation)

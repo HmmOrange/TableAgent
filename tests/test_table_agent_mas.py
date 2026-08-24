@@ -698,6 +698,54 @@ def test_verifier_rejects_subheader_without_data_range(tmp_path: Path):
     assert "table1.headers[0].sub_headers[0].data_range" in report["null_fields"]
 
 
+def test_verifier_does_not_duplicate_missing_data_after_header_rejection(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    structure_path = tmp_path / "structure.yaml"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet["A1"] = "Parent"
+    worksheet["A2"] = 1
+    worksheet["B2"] = 2
+    worksheet.merge_cells("A1:B1")
+    workbook.save(workbook_path)
+    structure_path.write_text(
+        yaml.safe_dump(
+            {
+                "table1": {
+                    "headers": [
+                        {
+                            "id": "parent",
+                            "label": "Parent",
+                            "orientation": "column",
+                            "header_range": "A1:B1",
+                            "data_range": "A2:B2",
+                            "sub_headers": [
+                                {
+                                    "id": "child",
+                                    "label": "Child",
+                                    "orientation": "column",
+                                    "header_range": "B1:B1",
+                                    "data_range": "B2:B2",
+                                    "sub_headers": [],
+                                }
+                            ],
+                        }
+                    ],
+                    "groups": [],
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_structure(workbook_path, "Sheet1", structure_path)
+
+    assert any("incorrectly put" in error for error in report["errors"])
+    assert not any("data range is missing" in error for error in report["errors"])
+
+
 def test_verifier_outputs_unicode_without_windows_codepage_crash(tmp_path: Path):
     workbook_path = tmp_path / "unicode.xlsx"
     workbook = openpyxl.Workbook()
@@ -756,6 +804,9 @@ def test_verifier_rejects_header_text_and_data_range_mismatches(tmp_path: Path):
     assert report["status"] == "not_good"
     assert any("contains multiple unrelated texts" in error for error in report["errors"])
     assert "table1.headers[0].data_range" in report["null_fields"]
+    assert "table1.headers[0].orientation" in report["null_fields"]
+    repaired = yaml.safe_load(report["repaired_structure_yaml"])
+    assert repaired["table1"]["headers"][0]["orientation"] is None
 
 
 def test_verifier_repairs_header_label_and_ranges_from_workbook(tmp_path: Path):
@@ -991,6 +1042,60 @@ def test_verifier_expands_similar_blank_merged_follower_to_full_range(tmp_path: 
     assert header["label"] == "Civilian noninstitu- tional population"
     assert header["header_range"] == "B1:B3"
     assert header["data_range"] == "B4"
+
+
+def test_verifier_accepts_header_text_split_across_cells(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet["A1"] = "Total"
+    worksheet["B1"] = "Revenue"
+    worksheet["A2"] = 10
+    worksheet["B2"] = 20
+    workbook.save(workbook_path)
+
+    report = _run_verifier(tmp_path, workbook_path, {
+        "table1": {"headers": [{
+            "label": "Total Revenue",
+            "orientation": "column",
+            "header_range": "A1:B1",
+            "data_range": "A2:B2",
+            "sub_headers": [],
+        }]},
+    })
+
+    assert report["status"] == "good"
+    assert report["errors"] == []
+
+
+def test_verifier_does_not_compare_child_data_range_to_parent(tmp_path: Path):
+    workbook_path = tmp_path / "book.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("A1:H1")
+    worksheet["A1"] = "Group"
+    worksheet["A2"] = "Total"
+    for column, value in zip("EFGH", (10, 20, 30, 40)):
+        worksheet[f"{column}2"] = value
+    workbook.save(workbook_path)
+    report = _run_verifier(tmp_path, workbook_path, {
+        "table1": {"headers": [{
+            "label": "Group",
+            "orientation": "column",
+            "header_range": "A1:H1",
+            "data_range": "A3:H3",
+            "sub_headers": [{
+                "label": "Total",
+                "orientation": "row",
+                "header_range": "A2",
+                "data_range": "E2:H2",
+            }],
+        }]},
+    })
+
+    assert not any("contained by parent" in error for error in report["errors"])
 
 
 def removed_semantic_verifier_applies_updated_structure(tmp_path: Path):
