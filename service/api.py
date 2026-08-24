@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import tempfile
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from TableAgent.pipeline.common import safe_name
 from service.runtime import Stage, TableAgentService
+
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 class PathJobRequest(BaseModel):
@@ -129,12 +133,20 @@ def create_app(
         payload: str = Form(...),
         files: list[UploadFile] = File(...),
     ) -> dict[str, Any]:
+        started_at = time.monotonic()
         try:
             request = UploadJobRequest.model_validate_json(payload)
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid payload JSON: {exc}") from exc
         if not files:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one workbook is required")
+        LOGGER.info(
+            "TableAgent upload received stage=%s file_count=%s embed=%s sheets=%s",
+            request.stage,
+            len(files),
+            request.embed,
+            request.sheets,
+        )
         with tempfile.TemporaryDirectory(prefix="table-agent-upload-") as upload_text:
             upload_dir = Path(upload_text)
             saved: list[Path] = []
@@ -156,7 +168,13 @@ def create_app(
                             handle.write(chunk)
                     resolved_service._validate_workbook(target)
                     saved.append(target)
+                    LOGGER.info(
+                        "TableAgent upload saved workbook=%s size_bytes=%s",
+                        filename,
+                        size,
+                    )
             except (OSError, ValueError) as exc:
+                LOGGER.exception("TableAgent upload rejected")
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
             finally:
@@ -164,8 +182,13 @@ def create_app(
                     await upload.close()
 
             try:
+                LOGGER.info(
+                    "TableAgent processing started stage=%s workbooks=%s",
+                    request.stage,
+                    [path.name for path in saved],
+                )
                 if request.stage == "qa" and request.artifacts:
-                    return await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         resolved_service.run_indexed_qa,
                         query=request.queries[0],
                         workbooks=saved,
@@ -174,18 +197,28 @@ def create_app(
                         qa_enable_final_review=request.qa_enable_final_review,
                         mode=request.mode,
                     )
-                return await asyncio.to_thread(
-                    resolved_service.run,
-                    stage=request.stage,
-                    queries=request.queries,
-                    workbooks=saved,
-                    embed=request.embed,
-                    sheets=request.sheets,
-                    qa_max_replans=request.qa_max_replans,
-                    persist=False,
-                )
+                else:
+                    result = await asyncio.to_thread(
+                        resolved_service.run,
+                        stage=request.stage,
+                        queries=request.queries,
+                        workbooks=saved,
+                        embed=request.embed,
+                        sheets=request.sheets,
+                        qa_max_replans=request.qa_max_replans,
+                        persist=False,
+                    )
             except (RuntimeError, ValueError) as exc:
+                LOGGER.exception("TableAgent processing failed")
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            LOGGER.info(
+                "TableAgent processing completed stage=%s workbooks=%s structures=%s elapsed_seconds=%.3f",
+                request.stage,
+                result.get("workbooks"),
+                len(result.get("structures") or []),
+                time.monotonic() - started_at,
+            )
+            return result
 
     @app.post("/v1/retrieval/select")
     def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:
