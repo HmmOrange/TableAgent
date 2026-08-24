@@ -38,7 +38,7 @@ from TableAgent.schema import EvalSample
 
 
 Stage = Literal["structure", "qa", "all"]
-SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
+SUPPORTED_WORKBOOK_EXTENSIONS = {".csv", ".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
 
 
 class TableAgentService:
@@ -1242,7 +1242,7 @@ class TableAgentService:
 
             metadata_path = job_workbook_dir / "metadata.json"
             build_workbook_metadata(
-                item["source_path"],
+                item["path"],
                 item["name"],
                 metadata_path,
                 schema_path=schema_path,
@@ -1351,12 +1351,15 @@ class TableAgentService:
         else:
             workspace_dir.mkdir(parents=True, exist_ok=True)
             destination = workspace_dir / f"{digest[:24]}.xlsx"
-            if source.suffix.lower() == ".xls":
+            if source.suffix.lower() == ".csv":
+                sheets = {source.stem[:31] or "Sheet1": pd.read_csv(source)}
+            elif source.suffix.lower() == ".xls":
                 sheets = pd.read_excel(source, sheet_name=None)
+            if source.suffix.lower() in {".csv", ".xls"}:
                 with pd.ExcelWriter(destination, engine="openpyxl") as writer:
                     for sheet_name, frame in sheets.items():
                         frame.to_excel(writer, sheet_name=str(sheet_name)[:31], index=False)
-            else:
+            elif source.suffix.lower() not in {".csv", ".xls"}:
                 workbook = openpyxl.load_workbook(source, data_only=False, keep_vba=False)
                 try:
                     workbook.save(destination)

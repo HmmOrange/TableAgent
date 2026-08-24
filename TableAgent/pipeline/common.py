@@ -52,7 +52,7 @@ def display_path(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
-_WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+_WORKBOOK_SUFFIXES = {".csv", ".xlsx", ".xlsm", ".xltx", ".xltm"}
 
 
 def has_workbook_sources(sample: EvalSample) -> bool:

@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 const API_KEY = import.meta.env.VITE_TABLE_AGENT_API_KEY || "";
-const SUPPORTED_EXTENSIONS = [".xls", ".xlsx", ".xlsm", ".xltx", ".xltm"];
+const SUPPORTED_EXTENSIONS = [".csv", ".xls", ".xlsx", ".xlsm", ".xltx", ".xltm"];
 
 function Icon({ name, size = 18 }) {
   const paths = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+import json
 import re
 import threading
 import time
@@ -183,6 +184,41 @@ def test_service_runs_structure_once_and_answers_all_queries(tmp_path: Path):
     assert not (service.root_dir / "jobs").exists()
     assert not (service.root_dir / "inputs").exists()
     assert not (service.root_dir / "structure").exists()
+
+
+def test_service_normalizes_csv_to_single_sheet_workbook(tmp_path: Path):
+    source = tmp_path / "sales.csv"
+    source.write_text("region,revenue\nEast,10\nWest,20\n", encoding="utf-8")
+    service = TableAgentService({"service": {"root_dir": str(tmp_path / "service")}})
+
+    normalized = service._normalize_workbook(source, tmp_path / "normalized")
+
+    assert normalized["name"] == "sales.csv"
+    assert normalized["path"].suffix == ".xlsx"
+    workbook = openpyxl.load_workbook(normalized["path"], read_only=True, data_only=True)
+    try:
+        sheet = workbook["sales"]
+        assert list(sheet.values) == [("region", "revenue"), ("East", 10), ("West", 20)]
+    finally:
+        workbook.close()
+
+
+def test_service_builds_csv_metadata_from_normalized_workbook(tmp_path: Path):
+    FakePipeline.instances = []
+    source = tmp_path / "sales.csv"
+    source.write_text("region,revenue\nEast,10\n", encoding="utf-8")
+    service = TableAgentService(
+        {"service": {"root_dir": str(tmp_path / "service")}},
+        llm_client=FakeSummaryClient(),
+        layout_vlm_client=object(),
+        pipeline_factory=FakePipeline,
+    )
+
+    result = service.run(stage="structure", workbooks=[source], job_id="csv-metadata")
+
+    metadata_path = service.root_dir / "csv-metadata" / "workbooks" / "sales.csv" / "metadata.json"
+    assert result["workbooks"] == ["sales.csv"]
+    assert json.loads(metadata_path.read_text(encoding="utf-8"))["sheet_names"] == ["sales"]
 
 
 def test_service_preserves_not_good_structure_artifacts(tmp_path: Path):

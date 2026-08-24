@@ -90,8 +90,9 @@ Use the `structure` stage to ingest one or more workbooks. TableAgent renders ea
 selected worksheet, detects and verifies its table ranges, and writes the resulting
 artifacts into that run's output directory. The structures are not a reusable cache.
 
-- At least one `--workbook` is required. Supported extensions are `.xls`, `.xlsx`,
-  `.xlsm`, `.xltx`, and `.xltm`.
+- At least one `--workbook` is required. Supported extensions are `.csv`, `.xls`,
+  `.xlsx`, `.xlsm`, `.xltx`, and `.xltm`. CSV inputs are normalized to a single-sheet
+  workbook internally.
 - Structure generation requires LibreOffice and the configured layout VLM.
 - Schema generation also requires the configured answer LLM to describe the
   workbook and its worksheets.
