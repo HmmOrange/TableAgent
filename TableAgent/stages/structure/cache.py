@@ -190,7 +190,7 @@ class StructureCache:
         record = self._resolve_record(
             sample,
             source_path=source_path,
-            source_hash=source_hash,
+            source_hash="" if self.settings.trust_structure_cache_path else source_hash,
             sheet_name=sheet_name,
             preferred_directory=directory,
             preferred_key=entry_key,
@@ -205,7 +205,20 @@ class StructureCache:
     def _materialize_source(self, sample: EvalSample) -> tuple[Path, str, str]:
         values = [Path(value.strip()) for value in str(sample.table_path or "").split(";") if value.strip()]
         if values and values[0].is_file() and values[0].suffix.lower() == ".xlsx":
-            return values[0], "xlsx", self._sha256(values[0])
+            source_path = values[0]
+            # Compressed structure inputs carry a map back to the original
+            # workbook. Keep the original hash in the cache key so QA-only
+            # runs can reuse the structure with the original workbook.
+            hash_path = source_path
+            raw = sample.raw if isinstance(sample.raw, dict) else {}
+            original_paths = raw.get("original_workbook_paths")
+            if isinstance(original_paths, dict):
+                original = original_paths.get(str(source_path.resolve()))
+                if original:
+                    candidate = Path(str(original))
+                    if candidate.is_file():
+                        hash_path = candidate
+            return source_path, "xlsx", self._sha256(hash_path)
         temporary = self.root / ".inputs" / f"{safe_name(sample.sample_id)}.xlsx"
         temporary.parent.mkdir(parents=True, exist_ok=True)
         sample_to_xlsx(sample, temporary)
@@ -351,6 +364,12 @@ class StructureCache:
 
         # Fallback scan for legacy flat/run-local caches and materialized run folders.
         search_roots = [self.root, structure_root]
+        if self.settings.trust_structure_cache_path:
+            # An explicitly selected cache path is authoritative, but still
+            # restrict discovery to the requested table to avoid loading a
+            # same-named sheet from another workbook.
+            trusted_roots = [root / table_name for root in search_roots]
+            search_roots = [root for root in trusted_roots if root.exists()] or search_roots
         for root in search_roots:
             if not root.exists():
                 continue
@@ -374,7 +393,7 @@ class StructureCache:
                     or ""
                 )
                 payload_sheet = str(payload.get("sheet_name") or "")
-                if payload_hash and payload_hash != source_hash:
+                if source_hash and payload_hash and payload_hash != source_hash:
                     continue
                 if payload_sheet and payload_sheet != sheet_name:
                     continue

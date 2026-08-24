@@ -13,6 +13,7 @@ class TableAgentConfig:
     reuse_structure: bool
     force_structure: bool
     structure_cache_dir: Path
+    trust_structure_cache_path: bool
     compression_cache_dir: Path
     force_compression: bool
     cache_namespace: str
@@ -68,6 +69,7 @@ class TableAgentConfig:
                 and _phase(merged.get("phase", "all")) in {"all", "structure"}
             ),
             structure_cache_dir=Path(str(merged.get("structure_cache_dir", "cache/table_agent/structure"))),
+            trust_structure_cache_path=_bool(merged.get("trust_structure_cache_path", False)),
             compression_cache_dir=Path(str(merged.get("compression_cache_dir", "cache/table_agent/compression"))),
             force_compression=_bool(merged.get("force_compression", False)),
             cache_namespace=str(merged.get("cache_namespace", "default")),
