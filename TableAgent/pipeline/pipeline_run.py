@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,19 @@ class PipelineRunner(RuntimeComponent):
         if self.settings.phase == "structure":
             raise RuntimeError("structure phase does not run question answering")
         force_structure = self._force_structure()
+        prepared_record = self._verified_samples.get(sample.sample_id)
+        if (
+            self.settings.phase == "all"
+            and prepared_record is not None
+            and prepared_record.valid
+            and (
+                bool(getattr(self.settings, "compression_before_structure", False))
+                or not self.settings.should_retrieve(sample)
+            )
+        ):
+            # An all-in-one run owns the freshly prepared record. Keep QA on
+            # that run-local artifact rather than re-selecting a global cache.
+            return self._run_cached_qa(sample, prepared_record)
         if has_workbook_sources(sample) and self.settings.should_retrieve(sample):
             structure_runtime = 0.0
             if self.settings.phase == "all" and not self.settings.perfect_retrieval:
@@ -75,6 +89,22 @@ class PipelineRunner(RuntimeComponent):
             ).candidate
             retrieval_runtime = self.stop_timer(retrieval_started)
             if candidate is None:
+                # In an all-in-one run, structure preparation already produced
+                # the authoritative run-local record. Use it when retrieval
+                # cannot resolve a candidate instead of re-checking the global
+                # cache and rejecting the generated artifact.
+                prepared_record = self._verified_samples.get(sample.sample_id)
+                if (
+                    self.settings.phase == "all"
+                    and prepared_record is not None
+                    and prepared_record.valid
+                    and bool(getattr(self.settings, "compression_before_structure", False))
+                ):
+                    return self._run_cached_qa(
+                        sample,
+                        prepared_record,
+                        structure_runtime=structure_runtime,
+                    )
                 raise RuntimeError(
                     f"Missing or stale structure cache for sample {sample.sample_id!r}; "
                     "run structure or all first"
@@ -176,10 +206,22 @@ class PipelineRunner(RuntimeComponent):
         if callable(materialize):
             record = materialize(record)
         structure_text = record.structure_path.read_text(encoding="utf-8")
-        workbook_path = (
-            original_workbook_for_sample(sample, record.workbook_path)
-            or record.workbook_path
-        )
+        original_workbook = original_workbook_for_sample(sample, record.workbook_path)
+        workbook_path = original_workbook
+        if workbook_path is None:
+            # Non-compressed converted inputs have no source mapping and are
+            # already the original workbook. Compressed caches must resolve.
+            manifest = {}
+            try:
+                manifest = json.loads(record.manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, AttributeError):
+                pass
+            if manifest.get("source_format") != "xlsx":
+                workbook_path = record.workbook_path
+        if workbook_path is None:
+            raise RuntimeError(
+                f"Cannot run QA for {sample.sample_id!r}: original workbook could not be resolved"
+            )
         qa_output = self.stages.qa.run(QAInput(
             question=sample.question,
             structure_path=record.structure_path,
@@ -207,8 +249,8 @@ class PipelineRunner(RuntimeComponent):
             token_usage=token_usage([answer_response]),
             metadata={
                 "structure_path": display_path(record.structure_path),
-                "workbook_path": str(record.workbook_path),
-                "workbook_source_format": "verification-cache",
+                "workbook_path": str(workbook_path.resolve()),
+                "workbook_source_format": "original" if original_workbook else "verification-cache",
                 "workbook_sheets": [record.sheet_name],
                 "artifact_dir": display_path(record.directory),
                 "image_path": display_path(record.directory / "table.png"),

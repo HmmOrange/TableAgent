@@ -692,6 +692,41 @@ def test_prepared_source_qa_maps_compressed_structure_to_original_workbook(
     assert captured["workbook_path"] == original
 
 
+def test_cached_qa_maps_artifact_workbook_through_compression_manifest(
+    tmp_path: Path,
+):
+    from TableAgent.stages.qa.workbook_paths import original_workbook_for_sample
+
+    original = tmp_path / "book.xlsx"
+    compression_source = tmp_path / "compression" / "book.xlsx" / "book.xlsx"
+    artifact = tmp_path / "artifacts" / "book.xlsx"
+    original.touch()
+    compression_source.parent.mkdir(parents=True)
+    compression_source.touch()
+    artifact.parent.mkdir(parents=True)
+    artifact.touch()
+    (artifact.parent / "manifest.json").write_text(
+        json.dumps({"source_path": str(compression_source.resolve())}),
+        encoding="utf-8",
+    )
+    sample = EvalSample(
+        index=0,
+        sample_id="compression/cache-qa",
+        table_id="book",
+        table_content="",
+        question="What is the value?",
+        answer=[],
+        table_path=str(compression_source),
+        raw={
+            "original_workbook_paths": {
+                str(compression_source.resolve()): str(original.resolve())
+            }
+        },
+    )
+
+    assert original_workbook_for_sample(sample, artifact) == original
+
+
 def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
     sample = EvalSample(
         index=0,

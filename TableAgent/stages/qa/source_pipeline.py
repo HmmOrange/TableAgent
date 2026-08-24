@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import hashlib
 from dataclasses import replace
 from pathlib import Path, PureWindowsPath
@@ -40,9 +41,21 @@ class SourceQAPipeline(RuntimeComponent):
         # Structure may be generated from a compressed workbook, but QA reads
         # values from the user's original workbook.
         original_workbook = original_workbook_for_sample(sample, candidate.workbook_path)
-        if original_workbook is not None:
-            candidate = replace(candidate, workbook_path=original_workbook)
         is_metadata_retrieval = candidate.retrieval_type == "metadata"
+        if not is_metadata_retrieval:
+            if original_workbook is None:
+                manifest_path = candidate.workbook_path.parent / "manifest.json"
+                manifest = {}
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+                if manifest.get("source_format") == "xlsx":
+                    raise RuntimeError(
+                        f"Cannot run QA for {sample.sample_id!r}: original workbook could not be resolved"
+                    )
+                original_workbook = candidate.workbook_path
+            candidate = replace(candidate, workbook_path=original_workbook)
         image_prompt = self.prompts.answer_prompt(
             sample, "[Table image provided]", candidate.structure_text
         )
