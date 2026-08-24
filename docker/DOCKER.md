@@ -9,6 +9,8 @@ cp docker/.env.example docker/.env
 ```
 
 Set the model URLs, names, keys, and optional service API key in `docker/.env`.
+Model thinking is disabled by default. Set `TABLE_AGENT_ENABLE_THINKING=true` to
+enable it for answer and layout model requests.
 
 ## Start
 
@@ -30,3 +32,7 @@ TABLE_AGENT_SERVICE_API_KEY=
 ```
 
 The API key must match `TABLE_AGENT_SERVICE_API_KEY` in `docker/.env`.
+
+Pipeline artifacts are persisted in the repository's host `outputs/` directory,
+which is mounted to `/app/outputs` in the container. This matches CLI output
+storage and keeps artifacts available after the container is recreated.

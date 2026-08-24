@@ -365,6 +365,14 @@ Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
 Ingestion always generates workbook schema and metadata artifacts. Sheet list
 entries may contain comma-separated names.
 
+API jobs persist their artifacts under `service.root_dir` by default, matching CLI
+runs. Delete one saved job or all saved jobs with:
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/v1/jobs/JOB_ID" -H "X-API-Key: your-service-key"
+curl -X DELETE "http://127.0.0.1:8000/v1/jobs" -H "X-API-Key: your-service-key"
+```
+
 When `embed` is `true`, the response also includes one aggregate
 `retrieval_artifacts` entry per workbook. Serving is ephemeral, so embedded records
 are returned inline instead of as a temporary file:

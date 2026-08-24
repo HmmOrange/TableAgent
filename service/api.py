@@ -74,7 +74,7 @@ def create_app(
     app = FastAPI(
         title="TableAgent API",
         version=_package_version(),
-        description="Ephemeral spreadsheet structure extraction and question answering.",
+        description="Persistent spreadsheet structure extraction and question answering.",
     )
     app.state.service = resolved_service
 
@@ -104,7 +104,7 @@ def create_app(
             "status": "ok",
             "version": _package_version(),
             "workers": resolved_service.max_workers,
-            "persistence": False,
+            "persistence": True,
         }
 
     @app.post("/v1/jobs")
@@ -123,7 +123,7 @@ def create_app(
                 embed=request.embed,
                 sheets=request.sheets,
                 qa_max_replans=request.qa_max_replans,
-                persist=False,
+                persist=True,
             )
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -206,7 +206,7 @@ def create_app(
                         embed=request.embed,
                         sheets=request.sheets,
                         qa_max_replans=request.qa_max_replans,
-                        persist=False,
+                        persist=True,
                     )
             except (RuntimeError, ValueError) as exc:
                 LOGGER.exception("TableAgent processing failed")
@@ -219,6 +219,17 @@ def create_app(
                 time.monotonic() - started_at,
             )
             return result
+
+    @app.delete("/v1/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict[str, list[str]]:
+        try:
+            return resolved_service.delete_runs([job_id])
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.delete("/v1/jobs")
+    def delete_all_jobs() -> dict[str, list[str]]:
+        return resolved_service.delete_runs(all_runs=True)
 
     @app.post("/v1/retrieval/select")
     def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:

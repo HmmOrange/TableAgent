@@ -16,6 +16,7 @@ class FakeService:
         self.calls = []
         self.accept_local_paths = False
         self.indexed_calls = []
+        self.delete_calls = []
 
     def run(self, *, stage, queries, workbooks, embed, sheets, qa_max_replans, persist):
         workbook_names = [Path(path).name for path in workbooks]
@@ -91,6 +92,11 @@ class FakeService:
             "retrieval": {"mode": "table_agent_hybrid"},
         }
 
+    def delete_runs(self, run_ids=(), *, all_runs=False):
+        selected = list(run_ids)
+        self.delete_calls.append({"run_ids": selected, "all_runs": all_runs})
+        return {"deleted": selected if not all_runs else ["run-one", "run-two"], "missing": []}
+
     @staticmethod
     def _validate_workbook(path: Path):
         if path.suffix.lower() != ".xlsx":
@@ -120,16 +126,17 @@ def test_health_status_and_upload_job(tmp_path: Path):
         assert response.status_code == 200
         assert body["answers"][0]["answer"] == "ok"
         assert body["retrieval_artifacts"][0]["retrieval_cards"][0]["embedding"]["values"] == [1.0]
-        assert client.get("/v1/status").json()["persistence"] is False
+        assert client.get("/v1/status").json()["persistence"] is True
         assert service.calls[0]["stage"] == "all"
         assert service.calls[0]["queries"] == ["question"]
         assert service.calls[0]["embed"] is True
         assert service.calls[0]["sheets"] == ["Summary,Detail", "Archive"]
         assert service.calls[0]["qa_max_replans"] == 2
-        assert service.calls[0]["persist"] is False
+        assert service.calls[0]["persist"] is True
         uploaded_path = Path(service.calls[0]["workbooks"][0])
-        assert client.get("/v1/jobs/ephemeral-run").status_code == 404
-        assert client.get("/v1/jobs/ephemeral-run/artifacts").status_code == 404
+        deleted = client.delete("/v1/jobs/ephemeral-run")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": ["ephemeral-run"], "missing": []}
     assert not uploaded_path.exists()
     assert not service.root_dir.exists()
 
@@ -238,7 +245,25 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
     assert service.calls[0]["embed"] is True
     assert service.calls[0]["sheets"] == ["Summary,Detail"]
     assert service.calls[0]["qa_max_replans"] == 0
-    assert service.calls[0]["persist"] is False
+    assert service.calls[0]["persist"] is True
+
+
+def test_api_deletes_selected_or_all_saved_jobs(tmp_path: Path):
+    service = FakeService(tmp_path / "service")
+    app = create_app(service)
+
+    with TestClient(app) as client:
+        selected = client.delete("/v1/jobs/run-one")
+        all_jobs = client.delete("/v1/jobs")
+
+    assert selected.status_code == 200
+    assert selected.json() == {"deleted": ["run-one"], "missing": []}
+    assert all_jobs.status_code == 200
+    assert all_jobs.json() == {"deleted": ["run-one", "run-two"], "missing": []}
+    assert service.delete_calls == [
+        {"run_ids": ["run-one"], "all_runs": False},
+        {"run_ids": [], "all_runs": True},
+    ]
 
 
 def test_all_stage_requires_a_query(tmp_path: Path):

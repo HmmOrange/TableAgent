@@ -170,6 +170,12 @@ def create_model_client(
     if not model_name:
         raise ValueError(f"Model profile '{profile_name}' is missing model or model_name")
 
+    extra_body = dict(model_config.get("extra_body") or {})
+    if "thinking_enabled" in model_config:
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        chat_template_kwargs["enable_thinking"] = _parse_bool(model_config["thinking_enabled"])
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+
     return OpenAICompatibleLLM(
         base_url=str(base_url),
         model_name=str(model_name),
@@ -180,7 +186,7 @@ def create_model_client(
         max_retries=int(model_config.get("max_retries", 2)),
         retry_delay_seconds=float(model_config.get("retry_delay_seconds", 1)),
         extra_headers=model_config.get("headers"),
-        extra_body=model_config.get("extra_body"),
+        extra_body=extra_body,
     )
 
 
@@ -202,6 +208,12 @@ def _content_text(content: Any) -> str:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 __all__ = ["OpenAICompatibleLLM", "create_model_client"]

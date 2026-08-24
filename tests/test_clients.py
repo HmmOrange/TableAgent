@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from service.clients import OpenAICompatibleLLM, create_model_client
+from TableAgent.configs.config import _expand_env
 
 
 class FakeResponse:
@@ -76,6 +77,31 @@ def test_create_model_client_resolves_public_config():
     assert client.base_url == "http://localhost:9000/v1"
     assert client.model_name == "answer-model"
     assert client.extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_create_model_client_reads_thinking_toggle_as_boolean():
+    config = {
+        "llm": {"provider": "answer"},
+        "models": {
+            "answer": {
+                "provider": "openai_compatible",
+                "base_url": "http://localhost:8000/v1",
+                "model": "test-model",
+                "thinking_enabled": "true",
+            }
+        },
+    }
+    client = create_model_client(config, kind="llm")
+
+    assert client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
+
+
+def test_thinking_toggle_defaults_off_after_env_expansion(monkeypatch):
+    monkeypatch.delenv("TABLE_AGENT_ENABLE_THINKING", raising=False)
+
+    expanded = _expand_env({"thinking_enabled": "${TABLE_AGENT_ENABLE_THINKING:-false}"})
+
+    assert expanded["thinking_enabled"] == "false"
 
 
 def test_openai_compatible_client_handles_reasoning_only_response():
