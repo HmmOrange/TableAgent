@@ -8,38 +8,25 @@ Decompose a question into a three-layer plan and classify every subtask:
 
 Each subtask must have a category:
 - `normal`: read, filter, join, calculate, or answer from business data.
-- `common_info`: describe the workbook, a sheet, or a table itself from verified names,
-  descriptions, organization, and headers.
+- `common_info`: describe the workbook, a sheet, or a table itself from verified names, descriptions, organization, and headers.
 
-Classify by the subject, not words such as "information" or "description". A question about
-a product, incident, person, date, value, or other record is `normal`, even when it asks for
-"general information". Use `common_info` only when the subject is the workbook, sheet, or
-table itself. For every non-synthesis common-info task, set metadata.common_info_scope to
-`workbook`, `sheet`, or `table`; optional metadata.target_names identifies explicit targets.
+Classify by the subject. A subtask that asks about a product, incident, person, date, value, or other record is `normal`, even when it asks for "general information". Use `common_info` only when the subject is the workbook, sheet, or table itself. For every non-synthesis common-info task, set metadata.common_info_scope to `workbook`, `sheet`, or `table`; optional metadata.target_names identifies explicit targets.
 For mixed questions, use both categories and make the final synthesis `normal`.
 
-When a requested field is a parent header, plan to resolve all applicable children with
-`operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with
-`operators.group_header_mask(...)`. A month/year in a sheet title or report name is context, not permission to replace
-the requested business field with a monthly tracking column unless the question explicitly asks for that tracking data.
+Aware when a requested field is a parent header, plan to resolve all applicable children with `operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with `operators.group_header_mask(...)`. A month/year in a sheet title or report name is context, not permission to replace the requested business field with a monthly tracking column unless the question explicitly asks for that tracking data.
 When the question explicitly names a structure group, preserve that group ID and range scope in the planned subtask.
 
 Provide your plan as JSON only, preferably inside a ```json code block.
-Use a DAG: each subtask may depend on earlier subtasks by id. Keep layers to:
+Use a Directed Acyclic Graph: each subtask may depend on earlier subtasks by id. Keep layers to:
 - "table_inspect": choose relevant table_id(s) from the catalog and store them in `selected_table_ids`.
 - "inspect": identify fields, filter rows/columns, project selections, and read relevant values.
-- "synthesis": compute and format the final answer from inspected values.
-
-When the question changes an input used by a stored formula relation, include an
-inspect subtask that calls `evaluate_formula` with the mutation. Do not plan to let the
-LLM infer or reproduce the formula arithmetically. When information spans tables,
-explicitly plan the required join, schema-compatible union, or grouped aggregation.
+- "synthesis": think, compute, aggregate and format the final answer from inspected values.
 
 Format:
 ```json
 {
 	  "subtasks": [
-            {
+      {
 	      "id": "select_relevant_tables",
 	      "layer": "table_inspect",
 	      "category": "normal",
@@ -53,6 +40,7 @@ Format:
 	      "depends_on": ["select_relevant_tables"],
 	      "description": "Find/filter the required field or condition."
 	    },
+     ...
     {
       "id": "inspect_target_values",
       "layer": "inspect",
