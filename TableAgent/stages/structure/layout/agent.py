@@ -24,7 +24,6 @@ from TableAgent.stages.structure.layout.parsing import (
 class LayoutResult:
     structure_text: str
     changelog: str
-    directions: list[str]
     changed: bool
     response: LLMResponse
     discarded: str
@@ -34,7 +33,7 @@ class LayoutResult:
 class LayoutAgent(BaseTableAgent):
     name = "LayoutAgent"
     profile = "Spreadsheet layout VLM"
-    goal = "Incrementally extract table headers and data ranges from coordinate-labelled viewports."
+    goal = "Extract all visible table headers and data ranges from the complete used range."
 
     def __init__(self, vlm: BaseLLM):
         super().__init__()
@@ -46,8 +45,7 @@ class LayoutAgent(BaseTableAgent):
         metadata_text: str,
         structure_text: str,
         image_path: Path,
-        viewport_range: str,
-        direction: str,
+        sheet_range: str,
         feedback: str,
         iteration: int,
         iteration_dir: Path,
@@ -66,8 +64,7 @@ class LayoutAgent(BaseTableAgent):
             )
         prompt = LAYOUT_MAS_USER_PROMPT_TEMPLATE.format(
             metadata_text=metadata_text,
-            viewport_range=viewport_range,
-            direction=direction,
+            sheet_range=sheet_range,
             structure_text=structure_text or "{}",
             feedback_block=feedback_block,
         )
@@ -94,12 +91,11 @@ class LayoutAgent(BaseTableAgent):
             sent_to="deterministic_verifier",
             content=changelog,
             iteration=iteration,
-            metadata={"viewport": viewport_range, "changed": changed},
+            metadata={"sheet_range": sheet_range, "changed": changed},
         ))
         return LayoutResult(
             updated,
             changelog,
-            [],
             changed,
             response,
             parsed.discarded,

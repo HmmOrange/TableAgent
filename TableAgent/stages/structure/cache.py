@@ -16,10 +16,6 @@ from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import SheetMetadata
 from TableAgent.utils.paths import safe_name
 from TableAgent.stages.structure.structure_prompts import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
-from TableAgent.stages.structure.layout.direction_prompts import (
-    DIRECTION_SYSTEM_PROMPT,
-    DIRECTION_USER_PROMPT_TEMPLATE,
-)
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 
 CACHE_SCHEMA_VERSION = 6
@@ -57,7 +53,7 @@ class StructureCache:
         self.metadata_for_workbook_sheet = metadata_for_workbook_sheet
         self.progress_callback = progress_callback
         namespace = safe_name(settings.cache_namespace) or "default"
-        self.root = settings.structure_cache_dir / f"v{CACHE_SCHEMA_VERSION}" / "datasets" / namespace
+        self.root = settings.structure_cache_dir / "datasets" / namespace
 
     def set_progress_callback(self, callback: Callable[..., None] | None) -> None:
         self.progress_callback = callback
@@ -281,17 +277,12 @@ class StructureCache:
             "source_sha256": source_hash,
             "sheet_name": sheet_name,
             "workflow_version": 6,
-            "viewport_rows": self.settings.viewport_rows,
-            "viewport_columns": self.settings.viewport_columns,
-            "shift_cells": self.settings.shift_cells,
             "max_retry": self.settings.max_retry,
             "structure_data_only": self.settings.structure_data_only,
             "layout_model": self.settings.layout_model_identity,
             "layout_prompt_sha256": hashlib.sha256(
                 (
-                    DIRECTION_SYSTEM_PROMPT
-                    + DIRECTION_USER_PROMPT_TEMPLATE
-                    + LAYOUT_MAS_SYSTEM_PROMPT
+                    LAYOUT_MAS_SYSTEM_PROMPT
                     + LAYOUT_MAS_USER_PROMPT_TEMPLATE
                 ).encode("utf-8")
             ).hexdigest(),
@@ -396,6 +387,9 @@ class StructureCache:
                 if source_hash and payload_hash and payload_hash != source_hash:
                     continue
                 if payload_sheet and payload_sheet != sheet_name:
+                    continue
+                payload_recipe = str(payload.get("recipe_key") or "")
+                if payload_recipe and payload_recipe != recipe_key:
                     continue
                 record = self._read_record(
                     marker_path.parent,

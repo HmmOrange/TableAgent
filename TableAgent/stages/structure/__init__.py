@@ -3,8 +3,6 @@
 from importlib import import_module
 
 _EXPORTS = {
-    "Direction": (".traversal", "Direction"),
-    "DirectionQueue": (".traversal", "DirectionQueue"),
     "ExStructMetadataExtractor": (".metadata", "ExStructMetadataExtractor"),
     "LayoutAgent": (".layout.agent", "LayoutAgent"),
     "SheetMetadata": (".metadata", "SheetMetadata"),
@@ -16,9 +14,6 @@ _EXPORTS = {
     "StructurePipeline": (".pipeline", "StructurePipeline"),
     "StructureStage": (".stage", "StructureStage"),
     "TableLayoutWorkflow": (".layout.workflow", "TableLayoutWorkflow"),
-    "TraversalTask": (".traversal", "TraversalTask"),
-    "Viewport": (".traversal", "Viewport"),
-    "corner_viewports": (".traversal", "corner_viewports"),
 }
 
 

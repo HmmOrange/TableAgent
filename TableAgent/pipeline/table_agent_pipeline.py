@@ -294,7 +294,13 @@ class TableAgentPipeline(BasePipeline):
         records = self.verify_samples(samples, force=force_structure)
         failed = [record for record in records if not record.valid]
         if failed:
-            raise RuntimeError(f"TableAgent verification failed for {len(failed)} cache entries")
+            details = "; ".join(
+                f"{record.key} ({record.status}) at {record.directory}"
+                for record in failed[:20]
+            )
+            raise RuntimeError(
+                f"TableAgent verification failed for {len(failed)} cache entries: {details}"
+            )
         if self.settings.phase == "all":
             self._prepared_source_samples.update(
                 sample.sample_id

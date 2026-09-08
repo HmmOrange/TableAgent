@@ -79,9 +79,6 @@ table_agent:
       common_info_enabled: true
       common_info_fallback: "normal"
   exstruct_mode: "light"
-  viewport_rows: 50
-  viewport_columns: 50
-  shift_cells: 45
   max_retry: 3
   qa_max_retries: 3
   qa_instant_max_retries: 1

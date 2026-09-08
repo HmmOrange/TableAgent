@@ -12,7 +12,6 @@ _YAML_FENCE = re.compile(r"```(?:yaml|yml)?\s*(.*?)```", flags=re.DOTALL | re.IG
 _UNCERTAIN_RANGE_VALUES = {"unknown", "uncertain", "n/a", "none", "null", "?"}
 _YAML_BOOLEAN_TAG = "tag:yaml.org,2002:bool"
 _LAYOUT_STRUCTURE_KEYS = {"structure", "updated_structure"}
-_LAYOUT_DIRECTION_KEYS = {"remaining_directions", "directions"}
 _FREE_TEXT_SCHEMA_FIELDS = {"name", "label", "description", "sheet", "changelog"}
 _FREE_TEXT_SCALAR_LINE = re.compile(
     r"^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>[A-Za-z_][A-Za-z0-9_-]*):[ \t]*)"
@@ -268,15 +267,14 @@ def _header_extras(header: dict[str, Any]) -> dict[str, Any]:
 class LayoutParseResult:
     structure_text: str
     discarded: str
-    directions: list[str]
     changelog: str
     preflight_errors: list[str]
 
 
-def extract_layout_structure(content: str) -> tuple[str, str, list[str], str]:
+def extract_layout_structure(content: str) -> tuple[str, str, str]:
     """Parse a LayoutAgent response without persisting its control envelope."""
     result = extract_layout_structure_result(content)
-    return result.structure_text, result.discarded, result.directions, result.changelog
+    return result.structure_text, result.discarded, result.changelog
 
 
 def extract_layout_structure_result(content: str) -> LayoutParseResult:
@@ -293,7 +291,7 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
             recovered = _recover_layout_envelope(candidate)
             if recovered is None:
                 continue
-            normalized, candidate_discarded, directions, changelog, preflight_errors = recovered
+            normalized, candidate_discarded, changelog, preflight_errors = recovered
             discarded = "\n".join(part for part in (
                 (text[:span[0]] + "\n" + text[span[1]:]).strip(),
                 candidate_discarded,
@@ -301,7 +299,6 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
             return LayoutParseResult(
                 yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
                 discarded,
-                directions,
                 changelog,
                 preflight_errors,
             )
@@ -314,26 +311,22 @@ def extract_layout_structure_result(content: str) -> LayoutParseResult:
         if normalized is None:
             continue
 
-        directions = parsed.get("remaining_directions") or parsed.get("directions") or []
-        if not isinstance(directions, list):
-            directions = []
         changelog = str(parsed.get("changelog") or "").strip()
         discarded = (text[:span[0]] + "\n" + text[span[1]:]).strip()
         return LayoutParseResult(
             yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True).strip(),
             discarded,
-            [str(direction).strip().lower() for direction in directions],
             changelog,
             preflight_errors,
         )
 
     legacy, discarded = extract_strict_structure(content)
-    return LayoutParseResult(legacy, discarded, [], "", [])
+    return LayoutParseResult(legacy, discarded, "", [])
 
 
 def _recover_layout_envelope(
     candidate: str,
-) -> tuple[dict[str, Any], str, list[str], str, list[str]] | None:
+) -> tuple[dict[str, Any], str, str, list[str]] | None:
     structure_block = _extract_top_level_block(candidate, _LAYOUT_STRUCTURE_KEYS)
     if structure_block is None:
         return None
@@ -351,22 +344,6 @@ def _recover_layout_envelope(
     if normalized is None:
         return None
 
-    directions: list[str] = []
-    direction_block = _extract_top_level_block(candidate, _LAYOUT_DIRECTION_KEYS)
-    if direction_block is not None:
-        try:
-            direction_payload = _load_yaml(direction_block[0])
-        except yaml.YAMLError:
-            direction_payload = None
-        if isinstance(direction_payload, dict):
-            values = (
-                direction_payload.get("remaining_directions")
-                or direction_payload.get("directions")
-                or []
-            )
-            if isinstance(values, list):
-                directions = [str(value).strip().lower() for value in values]
-
     changelog = ""
     changelog_block = _extract_top_level_block(candidate, {"changelog"})
     if changelog_block is not None:
@@ -379,7 +356,7 @@ def _recover_layout_envelope(
         else:
             changelog = changelog_block[0].splitlines()[0].partition(":")[2].strip()
 
-    return normalized, discarded, directions, changelog, preflight_errors
+    return normalized, discarded, changelog, preflight_errors
 
 
 def _extract_top_level_block(

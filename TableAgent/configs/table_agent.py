@@ -38,9 +38,6 @@ class TableAgentConfig:
     image_tile_overlap: int
     routing: RoutingConfig
     exstruct_mode: str
-    viewport_rows: int
-    viewport_columns: int
-    shift_cells: int
     max_retry: int
     qa_max_retries: int
     qa_max_replans: int
@@ -96,9 +93,6 @@ class TableAgentConfig:
             image_tile_overlap=int(_required(merged, "image_tile_overlap")),
             routing=RoutingConfig.from_config(merged),
             exstruct_mode=str(merged.get("exstruct_mode", "light")),
-            viewport_rows=int(merged.get("viewport_rows", 20)),
-            viewport_columns=int(merged.get("viewport_columns", 20)),
-            shift_cells=int(merged.get("shift_cells", 15)),
             max_retry=int(merged.get("max_retry", 3)),
             qa_max_retries=int(merged.get("qa_max_retries", 3)),
             qa_max_replans=int(merged.get("qa_max_replans", 5)),
