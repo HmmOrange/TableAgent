@@ -230,6 +230,7 @@ class PipelineRunner(RuntimeComponent):
             fallback_prompt=self.prompts.answer_prompt(
                 sample, self._fit_context(sample.table_content), structure_text
             ),
+            enable_final_answer_review=self.settings.qa_final_answer_review,
         ))
         answer_response, qa_info = qa_output.response, qa_output.metadata
         qa_runtime = self.stop_timer(qa_started)
