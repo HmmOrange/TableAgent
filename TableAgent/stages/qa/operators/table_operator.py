@@ -2,7 +2,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
-from TableAgent.domain.group import StructureGroup
+from TableAgent.domain.group import (
+    SECTION_COLUMN,
+    SECTION_LABEL_ROW_COLUMN,
+    SECTION_METADATA_COLUMNS,
+    StructureGroup,
+)
 from TableAgent.domain.ranges import AxisSelection, Cell, CellRange
 from TableAgent.domain.structure import Header
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
@@ -20,6 +25,21 @@ class TableOperators(BaseOperator):
     """
     name = "table"
     description = "Unified facade exposed to agents as `operators`."
+    examples = (
+        "operators.read_group(table_id, group_id) -> list[list[Any]]  # the group's visible label cells",
+        "operators.read_group_data(table_id, group_id) -> list[list[Any]]  # the records the group owns",
+        "operators.find_in_group(table_id, group_id, query) -> list[tuple[Cell, Any]]",
+        "operators.resolve_group_rows(df, table_id, group_id) -> list[int]  # positional rows owned by the group",
+        "operators.group_row_mask(df, table_id, group_id) -> pandas.Series  # boolean row mask for the group",
+        "operators.filter_in_group(table_id, group_id, header_id, gte=1) -> AxisSelection",
+        "operators.selection_union(sel1, sel2, ...) -> AxisSelection",
+        "operators.selection_difference(sel1, sel2) -> AxisSelection",
+        "operators.find_table(query) -> str | None",
+        "operators.groupby_table(table_id, by=..., aggregations=...) -> pandas.DataFrame",
+        f"read_table_as_dataframe adds `{SECTION_COLUMN}` (owning group label) and "
+        f"`{SECTION_LABEL_ROW_COLUMN}` (True on a group's label row, which is metadata, not a record). "
+        f"Exclude label rows before counting or aggregating: `df[~df['{SECTION_LABEL_ROW_COLUMN}']]`.",
+    )
 
     def __init__(self, env: Any):
         super().__init__(env)
@@ -33,6 +53,8 @@ class TableOperators(BaseOperator):
     def operator_catalog(self) -> str:
         """Return prompt-ready descriptions and examples for the exposed operators."""
         sections = [op.describe() for op in self._catalog_sources]
+        # The facade defines several operators of its own; without this they never reach any prompt.
+        sections.append(self.describe())
         sections.append(
             "calculation: Write normal Python/pandas/numpy code for arithmetic, aggregation, "
             "filtering, joins, formatting, and final answer construction. For example: "
@@ -64,8 +86,10 @@ class TableOperators(BaseOperator):
     def list_groups(self, table_id: str) -> List[StructureGroup]:
         return self._structure.list_groups(table_id)
 
-    def find_groups(self, table_id: str, query: str) -> List[StructureGroup]:
-        return self._structure.find_groups(table_id, query)
+    def find_groups(
+        self, table_id: str, query: str, *, limit: int = 5, min_overlap: int = 1
+    ) -> List[StructureGroup]:
+        return self._structure.find_groups(table_id, query, limit=limit, min_overlap=min_overlap)
 
     def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
         return self._structure.get_group(table_id, group_id)
@@ -113,8 +137,25 @@ class TableOperators(BaseOperator):
                     matches.append((Cell(cell.row, cell.column), cell.value))
         return matches
 
-    def read_table_as_dataframe(self, table_id: str, has_headers: bool = False) -> pd.DataFrame:
-        """Read the bounding range covered by a table's verified headers and data."""
+    def read_table_as_dataframe(
+        self,
+        table_id: str,
+        has_headers: bool = False,
+        *,
+        include_group_column: bool = True,
+        drop_group_label_rows: bool = False,
+    ) -> pd.DataFrame:
+        """Read the bounding range covered by a table's verified headers and data.
+
+        The bounding box is derived from headers alone, so a row-axis group's visible
+        label row (for example `Bargaining status` sitting above the rows it owns) lands
+        in the frame as an ordinary record with empty measure columns. With
+        `include_group_column` the frame carries `__section__`, the label of the group
+        that owns each row, and `__section_label_row__`, True on those label rows, so a
+        count or an aggregate can exclude them instead of silently absorbing them.
+        `drop_group_label_rows` removes them outright; it renumbers the positional index,
+        so leave it off when other code depends on row offsets.
+        """
         headers = self.list_headers(table_id)
         ranges = [
             cell_range
@@ -133,15 +174,29 @@ class TableOperators(BaseOperator):
             sheet,
         )
         if not has_headers:
-            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            frame = self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            return self._annotate_sections(
+                frame, table_id, table_range.start_row,
+                include_group_column=include_group_column,
+                drop_group_label_rows=drop_group_label_rows,
+            )
 
         header_ranges = [header.header_range for header in headers if header.header_range is not None]
         if not header_ranges:
-            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            frame = self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            return self._annotate_sections(
+                frame, table_id, table_range.start_row,
+                include_group_column=include_group_column,
+                drop_group_label_rows=drop_group_label_rows,
+            )
 
         data_start_row = max(header_range.end_row for header_range in header_ranges) + 1
         if data_start_row > table_range.end_row:
-            return pd.DataFrame()
+            return self._annotate_sections(
+                pd.DataFrame(), table_id, data_start_row,
+                include_group_column=include_group_column,
+                drop_group_label_rows=drop_group_label_rows,
+            )
         data_range = CellRange(
             data_start_row,
             table_range.start_col,
@@ -166,7 +221,11 @@ class TableOperators(BaseOperator):
         if len(set(column_ids)) == len(column_ids):
             if not frame.columns.is_unique:
                 raise ValueError("Logical table DataFrame contains duplicate column names.")
-            return frame
+            return self._annotate_sections(
+                frame, table_id, data_range.start_row,
+                include_group_column=include_group_column,
+                drop_group_label_rows=drop_group_label_rows,
+            )
 
         collapsed: dict[str, pd.Series] = {}
         for column_id in dict.fromkeys(column_ids):
@@ -199,7 +258,149 @@ class TableOperators(BaseOperator):
         result = pd.DataFrame(collapsed, index=frame.index)
         if not result.columns.is_unique:
             raise ValueError("Logical table DataFrame contains duplicate column names after collapse.")
-        return result
+        return self._annotate_sections(
+            result, table_id, data_range.start_row,
+            include_group_column=include_group_column,
+            drop_group_label_rows=drop_group_label_rows,
+        )
+
+    # Group-to-DataFrame bridge
+    @staticmethod
+    def _row_span(cell_range: Optional[CellRange]) -> Optional[tuple[int, int]]:
+        if cell_range is None:
+            return None
+        return cell_range.start_row, cell_range.end_row
+
+    def _row_axis_groups(self, table_id: str) -> List[StructureGroup]:
+        return [
+            group
+            for group in self.list_groups(table_id)
+            if str(getattr(group, "axis", "") or "").strip().lower() == "row"
+        ]
+
+    def _annotate_sections(
+        self,
+        frame: pd.DataFrame,
+        table_id: str,
+        origin_row: int,
+        *,
+        include_group_column: bool,
+        drop_group_label_rows: bool,
+    ) -> pd.DataFrame:
+        """Attach section metadata derived from the table's row-axis structure groups."""
+        if frame is None:
+            return frame
+        if not include_group_column and not drop_group_label_rows:
+            return frame
+
+        groups = self._row_axis_groups(table_id)
+        if not groups:
+            # A table without row sections must stay byte-identical to the unannotated frame;
+            # two all-empty metadata columns would be pure noise in every prompt that shows it.
+            return frame
+        if frame.empty:
+            # Keep the column contract stable so group_row_mask reports an empty selection
+            # rather than a missing-column error.
+            frame = frame.copy()
+            if include_group_column:
+                frame[SECTION_COLUMN] = pd.Series(dtype="object")
+                frame[SECTION_LABEL_ROW_COLUMN] = pd.Series(dtype="bool")
+            return frame
+
+        worksheet_rows = [origin_row + offset for offset in range(len(frame))]
+        owners: list[Optional[str]] = [None] * len(frame)
+        widths: list[Optional[int]] = [None] * len(frame)
+        label_rows = [False] * len(frame)
+
+        for group in groups:
+            data_span = self._row_span(group.data_range)
+            if data_span is not None:
+                start, end = data_span
+                width = end - start
+                for index, row in enumerate(worksheet_rows):
+                    # A narrower span wins so a nested section is not masked by its parent.
+                    if start <= row <= end and (widths[index] is None or width < widths[index]):
+                        owners[index] = group.label
+                        widths[index] = width
+
+        for group in groups:
+            label_span = self._row_span(group.group_range)
+            data_span = self._row_span(group.data_range)
+            if label_span is None:
+                continue
+            start, end = label_span
+            for index, row in enumerate(worksheet_rows):
+                if not start <= row <= end:
+                    continue
+                # Some groups legitimately keep the label inside the block they own; only a
+                # row that sits outside the owned data is pure metadata.
+                if data_span is not None and data_span[0] <= row <= data_span[1]:
+                    continue
+                label_rows[index] = True
+                if owners[index] is None:
+                    owners[index] = group.label
+
+        frame = frame.copy()
+        if include_group_column:
+            frame[SECTION_COLUMN] = owners
+            frame[SECTION_LABEL_ROW_COLUMN] = label_rows
+        if drop_group_label_rows and any(label_rows):
+            keep = [not flag for flag in label_rows]
+            frame = frame.loc[keep].reset_index(drop=True)
+        return frame
+
+    def resolve_group_rows(self, dataframe: pd.DataFrame, table_id: str, group_id: str) -> List[int]:
+        """Positional row indices of `dataframe` that the group owns, label rows excluded."""
+        mask = self.group_row_mask(dataframe, table_id, group_id)
+        return [position for position, flag in enumerate(mask.tolist()) if flag]
+
+    def group_row_mask(self, dataframe: pd.DataFrame, table_id: str, group_id: str) -> pd.Series:
+        """Boolean row mask selecting the records a row-axis group owns.
+
+        Mirrors `group_header_mask`, which scopes a DataFrame by header; this scopes it by
+        worksheet section so a question about one block cannot pull rows from a sibling.
+        """
+        if not isinstance(dataframe, pd.DataFrame):
+            raise TypeError("group_row_mask requires a pandas DataFrame.")
+        group = self._require_group(table_id, group_id)
+        if str(getattr(group, "axis", "") or "").strip().lower() != "row":
+            raise ValueError(
+                f"Group {group_id!r} has axis {group.axis!r}; group_row_mask only applies to row-axis groups."
+            )
+        if SECTION_COLUMN not in dataframe.columns:
+            raise KeyError(
+                f"Column {SECTION_COLUMN!r} is missing. Build the frame with "
+                f"operators.read_table_as_dataframe({table_id!r}, include_group_column=True)."
+            )
+        mask = dataframe[SECTION_COLUMN] == group.label
+        if SECTION_LABEL_ROW_COLUMN in dataframe.columns:
+            mask = mask & (~dataframe[SECTION_LABEL_ROW_COLUMN].astype(bool))
+        return mask
+
+    def filter_in_group(
+        self,
+        table_id: str,
+        group_id: str,
+        header_id: str,
+        **conditions: Any,
+    ) -> AxisSelection:
+        """Filter one header's values restricted to the cells a group owns.
+
+        This is the group-scoped counterpart of `filter_values(header.data_range, ...)`:
+        the search range is the intersection of the group with the header, so a match
+        cannot come from a row outside the requested section.
+        """
+        cell_range = self.intersect_group_with_header(table_id, group_id, header_id)
+        if cell_range is None:
+            raise ValueError(
+                f"Group {group_id!r} and header {header_id!r} do not intersect in table {table_id!r}. "
+                "Check that the group is row-axis and the header is column-axis (or the reverse)."
+            )
+        return self._filter.filter_values(cell_range, **conditions)
+
+    def section_columns(self) -> tuple[str, ...]:
+        """Names of the metadata columns injected by `read_table_as_dataframe`."""
+        return SECTION_METADATA_COLUMNS
 
     # Range operators
     def resolve_ranges(

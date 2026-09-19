@@ -6,6 +6,11 @@ from TableAgent.stages.qa.header_hints import _contains_phrase, _normalize
 from TableAgent.utils import range_to_a1
 
 
+def _content_tokens(text: str) -> set[str]:
+    """Tokens worth matching on; short ones make unrelated sections look confident."""
+    return {token for token in text.split() if len(token) >= 3}
+
+
 def question_group_hints(
     env: Any,
     question: str,
@@ -13,9 +18,19 @@ def question_group_hints(
     *,
     limit: int = 8,
 ) -> str:
+    """Rank the structure groups a question plausibly refers to.
+
+    An exact label match is reported as authoritative. A partial match is reported
+    separately and explicitly marked, because a group label often carries footnote
+    markers or wording the question never repeats verbatim -- requiring the exact
+    phrase left roughly four out of five questions with no hint at all.
+    """
     normalized_question = _normalize(question)
-    matches: list[str] = []
+    question_tokens = _content_tokens(normalized_question)
+    exact: list[str] = []
+    partial: list[tuple[int, str]] = []
     seen: set[tuple[str, str]] = set()
+
     for table_id in table_ids:
         structure = env.get_table_structure(table_id) or {}
         for group in structure.get("groups") or []:
@@ -24,16 +39,36 @@ def question_group_hints(
             key = (table_id, group_id)
             if not label or not group_id or key in seen:
                 continue
-            if _contains_phrase(normalized_question, _normalize(label)):
-                seen.add(key)
-                group_range = getattr(group, "group_range", None)
-                data_range = getattr(group, "data_range", None)
-                matches.append(
-                    f"- table_id={table_id}; group_id={group_id}; label={label}; "
-                    f"axis={getattr(group, 'axis', '')}; "
-                    f"group_range={range_to_a1(group_range) if group_range else None}; "
-                    f"data_range={range_to_a1(data_range) if data_range else None}"
-                )
-                if len(matches) >= limit:
-                    return "\n".join(matches)
-    return "\n".join(matches) or "No exact group-label match."
+            normalized_label = _normalize(label)
+            description = _normalize(str(getattr(group, "description", "") or ""))
+            overlap = max(
+                len(question_tokens & _content_tokens(normalized_label)),
+                len(question_tokens & _content_tokens(description)),
+            )
+            is_exact = _contains_phrase(normalized_question, normalized_label)
+            if not is_exact and overlap < 1:
+                continue
+            seen.add(key)
+            group_range = getattr(group, "group_range", None)
+            data_range = getattr(group, "data_range", None)
+            line = (
+                f"- table_id={table_id}; group_id={group_id}; label={label}; "
+                f"axis={getattr(group, 'axis', '')}; "
+                f"group_range={range_to_a1(group_range) if group_range else None}; "
+                f"data_range={range_to_a1(data_range) if data_range else None}"
+            )
+            if is_exact:
+                exact.append(line)
+            else:
+                partial.append((overlap, line))
+
+    sections: list[str] = []
+    if exact:
+        sections.append("Exact label matches (authoritative):")
+        sections.extend(exact[:limit])
+    remaining = limit - len(exact)
+    if partial and remaining > 0:
+        partial.sort(key=lambda item: item[0], reverse=True)
+        sections.append("Partial label matches (verify before relying on them):")
+        sections.extend(line for _, line in partial[:remaining])
+    return "\n".join(sections) or "No group matched this question."

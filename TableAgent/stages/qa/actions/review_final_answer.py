@@ -150,8 +150,20 @@ class ReviewFinalAnswerAction:
                 fallback.append(line)
                 if _contains_phrase(normalized_question, _normalize(group.label)):
                     exact.append(line)
-        lines = exact or fallback[:8]
-        return "\n".join(lines[:8]) if lines else "No relevant structure groups."
+        if exact:
+            header = (
+                "Matched to the question by label. The answer's evidence must stay inside these ranges."
+            )
+            lines = exact[:8]
+        elif fallback:
+            header = (
+                "No group label matched the question. Listed as layout context only -- do not treat "
+                "membership in any of these as something the answer claimed."
+            )
+            lines = fallback[:8]
+        else:
+            return "No relevant structure groups."
+        return "\n".join([header, *lines])
 
 
 __all__ = ["ReviewFinalAnswerAction"]

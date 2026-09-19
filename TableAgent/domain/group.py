@@ -4,6 +4,16 @@ from typing import Optional
 from TableAgent.domain.ranges import CellRange
 
 
+#: DataFrame column holding the label of the structure group that owns each row.
+SECTION_COLUMN = "__section__"
+
+#: DataFrame column flagging rows that are a group's visible label rather than a record.
+SECTION_LABEL_ROW_COLUMN = "__section_label_row__"
+
+#: Metadata columns injected by `read_table_as_dataframe`; never treat these as fields.
+SECTION_METADATA_COLUMNS = (SECTION_COLUMN, SECTION_LABEL_ROW_COLUMN)
+
+
 @dataclass(frozen=True)
 class StructureGroup:
     """A semantic row/column group declared in structure.yaml."""

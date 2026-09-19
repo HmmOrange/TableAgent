@@ -177,9 +177,11 @@ class WriteQAPlanAction(BasePlanAction):
         prompt += (
             "\n\nExact question-to-header matches:\n"
             f"{question_header_hints(self.env, request.question, table_ids)}\n"
-            "\nExact question-to-group matches:\n"
+            "\nQuestion-to-group matches:\n"
             f"{question_group_hints(self.env, request.question, table_ids)}\n"
-            "Treat these matches as authoritative during inspection and synthesis."
+            "Treat exact header and group matches as authoritative during inspection and synthesis. "
+            "A group is a worksheet section that scopes a block of records: when the question targets one, "
+            "plan to read evidence from inside its data_range rather than from the whole table."
         )
         if request.failure_context:
             previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)

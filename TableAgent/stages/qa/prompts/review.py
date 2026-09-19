@@ -81,6 +81,7 @@ Reject the answer when any of these applies:
 - the answer adds facts that are absent from the verified observations;
 - the answer uses sheet/table descriptions as evidence for record-level facts that were never inspected.
 - if the question names a structure group, evidence must stay inside its group_range and numeric evidence inside its data_range unless groups are explicitly compared.
+- a count or aggregate includes a group's label row as if it were a record. A row whose `__section_label_row__` is True, or whose measure columns are all empty while its label matches a section heading, is structure, not data.
 
 Return JSON only with `accepted` (boolean), `score` (0.0-1.0), and concise `feedback`. If rejected, state what a
 corrected plan must inspect or calculate. Do not solve the question yourself.

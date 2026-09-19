@@ -12,15 +12,21 @@ class StructureOperator(BaseOperator):
     examples = (
         "operators.list_tables() -> list[str]",
         "operators.list_headers(table_id) -> list[Header]",
-        "header = operators.get_header(table_id, header_id); header.description, header.header_range, header.data_range",
+        "header = operators.get_header(table_id, header_id); attributes are header.id, header.label, "
+        "header.description, header.orientation, header.header_range, header.data_range, header.sub_headers",
         "operators.find_headers(table_id, query) -> list[Header]",
         "operators.get_header(table_id, header_id) -> Header | None",
         "operators.resolve_header_columns(table_id, parent_header_id) -> list[str]",
         "operators.list_groups(table_id) -> list[StructureGroup]",
-        "group = operators.get_group(table_id, group_id); group.description, group.group_range, group.data_range",
-        "operators.find_groups(table_id, query) -> list[StructureGroup]",
+        "group = operators.get_group(table_id, group_id); attributes are group.id, group.label, "
+        "group.description, group.axis, group.group_range, group.data_range",
+        "operators.find_groups(table_id, query, limit=5) -> list[StructureGroup]",
         "operators.get_group(table_id, group_id) -> StructureGroup | None",
         "operators.intersect_group_with_header(table_id, group_id, header_id) -> CellRange | None",
+        "NOTE: the identifier attribute is `.id` on both Header and StructureGroup. "
+        "`header.header_id` and `group.group_id` do not exist and raise AttributeError.",
+        "NOTE: a StructureGroup scopes a block of records (a worksheet section); a Header names a field. "
+        "Cross them with intersect_group_with_header instead of assuming row offsets.",
     )
 
     def list_tables(self) -> List[str]:
@@ -82,7 +88,21 @@ class StructureOperator(BaseOperator):
         table = self.env.get_table_structure(table_id)
         return list(table.get("groups", [])) if table else []
 
-    def find_groups(self, table_id: str, query: str) -> List[StructureGroup]:
+    def find_groups(
+        self,
+        table_id: str,
+        query: str,
+        *,
+        limit: int = 5,
+        min_overlap: int = 1,
+    ) -> List[StructureGroup]:
+        """Rank groups by lexical overlap with the query.
+
+        Tokens shorter than three characters are ignored so that a stray article or a
+        stray digit cannot make an unrelated section look like a confident match. An
+        empty result means no group was close enough, which is a useful signal: fall
+        back to headers rather than picking an arbitrary section.
+        """
         import re
         import unicodedata
 
@@ -90,17 +110,21 @@ class StructureOperator(BaseOperator):
             text = unicodedata.normalize("NFKC", str(value)).casefold()
             return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
 
+        def content_tokens(text: str) -> set[str]:
+            return {token for token in text.split() if len(token) >= 3}
+
         normalized_query = normalize(query)
-        query_tokens = set(normalized_query.split())
+        query_tokens = content_tokens(normalized_query)
         scored = []
         for group in self.list_groups(table_id):
             fields = [normalize(group.id), normalize(group.label), normalize(group.description)]
             exact = any(field and f" {field} " in f" {normalized_query} " for field in fields[:2])
-            overlap = max((len(query_tokens & set(field.split())) for field in fields), default=0)
-            if exact or overlap:
+            overlap = max((len(query_tokens & content_tokens(field)) for field in fields), default=0)
+            if exact or overlap >= max(1, min_overlap):
                 scored.append((10 if exact else 0, overlap, group))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [group for _, _, group in scored]
+        ranked = [group for _, _, group in scored]
+        return ranked[:limit] if limit and limit > 0 else ranked
 
     def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
         return next((g for g in self.list_groups(table_id) if g.id == group_id), None)
@@ -108,13 +132,40 @@ class StructureOperator(BaseOperator):
     def intersect_group_with_header(
         self, table_id: str, group_id: str, header_id: str
     ):
+        """Cells where a group's records cross a header's field.
+
+        A row-axis group contributes rows and the header contributes columns, so the two
+        are crossed rather than overlapped. A plain overlap returns nothing whenever the
+        group's recorded data_range spans fewer columns than the table -- common enough
+        in extracted structures that it made this operator unusable on the tables it
+        matters most for.
+        """
+        from TableAgent.domain.ranges import CellRange
+
         group = self.get_group(table_id, group_id)
         header = self.get_header(table_id, header_id)
         if group is None or header is None:
             return None
         group_range = group.data_range or group.group_range
         header_range = header.data_range or header.header_range
-        return group_range.intersection(header_range) if group_range and header_range else None
+        if group_range is None or header_range is None:
+            return None
+
+        axis = str(getattr(group, "axis", "") or "").strip().lower()
+        if axis == "row":
+            row_start = max(group_range.start_row, header_range.start_row)
+            row_end = min(group_range.end_row, header_range.end_row)
+            col_start, col_end = header_range.start_col, header_range.end_col
+        elif axis == "column":
+            col_start = max(group_range.start_col, header_range.start_col)
+            col_end = min(group_range.end_col, header_range.end_col)
+            row_start, row_end = header_range.start_row, header_range.end_row
+        else:
+            return group_range.intersection(header_range)
+
+        if row_start > row_end or col_start > col_end:
+            return None
+        return CellRange(row_start, col_start, row_end, col_end, header_range.sheet)
 
 if __name__ == "__main__":
     import argparse

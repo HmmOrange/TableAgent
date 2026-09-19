@@ -236,3 +236,83 @@ def test_group_retrieval_payload_and_exact_score(tmp_path: Path):
     )
     assert PerfectRetrievalMixin._perfect_question_score("Men participation rate", candidate) == 9.0
     assert PerfectRetrievalMixin._perfect_question_score("Women participation rate", candidate) == 9.0
+
+
+def test_dataframe_carries_section_metadata_and_group_scoped_operators(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        frame = env.operators.read_table_as_dataframe("employment", has_headers=True)
+        # Worksheet rows 2..6 land in the frame; rows 2 and 5 are the group labels.
+        assert list(frame["__section__"]) == ["Men", "Men", "Men", "Women", "Women"]
+        assert list(frame["__section_label_row__"]) == [True, False, False, True, False]
+
+        records = frame[~frame["__section_label_row__"]]
+        assert len(records) == 3
+
+        mask = env.operators.group_row_mask(frame, "employment", "men")
+        assert list(mask) == [False, True, True, False, False]
+        assert env.operators.resolve_group_rows(frame, "employment", "men") == [1, 2]
+
+        dropped = env.operators.read_table_as_dataframe(
+            "employment", has_headers=True, drop_group_label_rows=True
+        )
+        assert len(dropped) == 3
+        assert list(dropped["__section__"]) == ["Men", "Men", "Women"]
+
+        plain = env.operators.read_table_as_dataframe(
+            "employment", has_headers=True, include_group_column=False
+        )
+        assert "__section__" not in plain.columns
+    finally:
+        env.workbook.close()
+
+
+def test_group_scoped_filter_and_find_threshold(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        # Both sections hold a "Participation rate" row; scoping keeps the match inside one.
+        selection = env.operators.filter_in_group("employment", "men", "value", gte=100)
+        assert selection.positions == (4,)
+        assert env.operators.filter_in_group("employment", "women", "value", gte=100).positions == ()
+
+        assert [group.id for group in env.operators.find_groups("employment", "men")] == ["men"]
+        # A query sharing only short filler tokens must not look like a confident match.
+        assert env.operators.find_groups("employment", "of an in") == []
+        assert len(env.operators.find_groups("employment", "statistics", limit=1)) == 1
+    finally:
+        env.workbook.close()
+
+
+def test_groups_reach_planner_and_react_prompts(tmp_path: Path):
+    from TableAgent.stages.qa.actions.llm_code_generation import (
+        get_structure_summary,
+        get_table_catalog_summary,
+    )
+
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        summary = get_structure_summary(env, "employment")
+        assert "Structure Groups" in summary
+        assert "ID: men" in summary and "data_range: B3:C4" in summary
+
+        catalog = get_table_catalog_summary(env)
+        assert "Men (men): Statistics for men." in catalog
+
+        operator_catalog = env.operators.operator_catalog()
+        for advertised in (
+            "operators.read_group_data(",
+            "operators.find_in_group(",
+            "operators.group_row_mask(",
+            "operators.filter_in_group(",
+            "__section_label_row__",
+        ):
+            assert advertised in operator_catalog
+        assert "`.id` on both Header and StructureGroup" in operator_catalog
+
+        hints = question_group_hints(env, "How many men participated", ["employment"])
+        assert "Exact label matches" in hints and "group_id=men" in hints
+    finally:
+        env.workbook.close()

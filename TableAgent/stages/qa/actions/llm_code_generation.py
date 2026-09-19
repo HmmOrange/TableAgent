@@ -11,6 +11,7 @@ from TableAgent.stages.qa.actions.base_action import (
 )
 from TableAgent.stages.qa.header_hints import question_header_hints
 from TableAgent.stages.qa.group_hints import question_group_hints
+from TableAgent.utils import range_to_a1
 from TableAgent.stages.qa.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
@@ -64,6 +65,25 @@ def get_structure_summary(env: Any, table_id: str) -> str:
     for h in struct.get("headers", []):
         format_header(h)
 
+    groups = struct.get("groups") or []
+    if groups:
+        summary_lines.append("Structure Groups (worksheet sections that scope blocks of records):")
+        for group in groups:
+            group_range = getattr(group, "group_range", None)
+            data_range = getattr(group, "data_range", None)
+            summary_lines.append(
+                "  - "
+                f"ID: {getattr(group, 'id', '')}, Label: {getattr(group, 'label', '')}, "
+                f"Description: {getattr(group, 'description', '')}, Axis: {getattr(group, 'axis', '')}, "
+                f"group_range: {range_to_a1(group_range) if group_range else None}, "
+                f"data_range: {range_to_a1(data_range) if data_range else None}"
+            )
+        summary_lines.append(
+            "  A group's group_range holds only its visible label; its data_range holds the records it owns. "
+            "Cross a group with a header via operators.intersect_group_with_header(...) rather than "
+            "computing row offsets by hand."
+        )
+
     relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []
     if relations:
         summary_lines.append("Formula Relations:")
@@ -102,10 +122,13 @@ def get_table_catalog_summary(env: Any) -> str:
         if len(headers) > 20:
             header_bits.append(f"... {len(headers) - 20} more headers")
         groups = struct.get("groups", []) if struct else []
-        group_bits = [
-            f"{getattr(group, 'label', '')} ({getattr(group, 'id', '')})"
-            for group in groups[:12]
-        ]
+        group_bits = []
+        for group in groups[:12]:
+            bit = f"{getattr(group, 'label', '')} ({getattr(group, 'id', '')})"
+            group_description = getattr(group, "description", "")
+            if group_description:
+                bit += f": {group_description}"
+            group_bits.append(bit)
         if len(groups) > 12:
             group_bits.append(f"... {len(groups) - 12} more groups")
         relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []
@@ -291,7 +314,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                         f"Subtask: {request.subtask_id}.\n"
                         f"Table structure:\n{struct_summary}\n\n"
                         f"Exact question-to-header matches:\n{header_hints}\n\n"
-                        f"Exact question-to-group matches:\n{group_hints}\n\n"
+                        f"Question-to-group matches:\n{group_hints}\n\n"
                         f"Experience:\n{formatted_experience}"
                     ),
                     available_variables=", ".join(available_vars) if available_vars else "None",
