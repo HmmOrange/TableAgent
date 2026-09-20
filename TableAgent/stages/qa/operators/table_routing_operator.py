@@ -1,10 +1,53 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+
+from TableAgent.domain.introspection import describe_attribute_miss
 
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.stages.retrieval import TableCandidate, TableSearchRequest
 from TableAgent.utils import _lexical_overlap_score
+
+
+class TableRef(str):
+    """A table id that also answers `.id`, `.table_id` and `.label`.
+
+    `find_headers` and `find_groups` return objects carrying `.id`, so agents reach for
+    `[t.id for t in operators.find_tables(...)]` out of habit. Returning a plain `str`
+    made that the single most common runtime error in the QA stage. This stays a real
+    `str` -- it compares, hashes, serialises and indexes exactly like the id it wraps --
+    while also answering the attribute the rest of the operator surface taught.
+    """
+
+    __slots__ = ("label", "sheet", "score")
+
+    #: What this type is for. `str` contributes forty-odd methods that are true but
+    #: irrelevant here, and listing them would bury `id` and `label`.
+    __agent_attributes__ = ("id", "table_id", "label", "sheet", "score")
+
+    def __new__(cls, table_id: str, *, label: str = "", sheet: str = "", score: float = 0.0):
+        instance = super().__new__(cls, str(table_id))
+        instance.label = label or str(table_id)
+        instance.sheet = sheet
+        instance.score = score
+        return instance
+
+    @property
+    def id(self) -> str:
+        return str(self)
+
+    @property
+    def table_id(self) -> str:
+        return str(self)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(describe_attribute_miss(self, name))
+
+    def __repr__(self) -> str:
+        return f"TableRef({str(self)!r})"
 
 
 class TableRoutingOperator(BaseOperator):
@@ -13,13 +56,18 @@ class TableRoutingOperator(BaseOperator):
     name = "multitab.routing"
     description = "Rank relevant table ids from names, descriptions, and verified headers."
     examples = (
-        "operators.find_tables(query, top_k=2) -> list[str]",
+        "operators.find_tables(query, top_k=2) -> list[TableRef] (a str subclass; both `t` and `t.id` give the table id)",
         "operators.retrieve_tables(query, top_k=2) -> list[TableCandidate]",
     )
 
-    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableRef]:
         return [
-            candidate.table_id
+            TableRef(
+                candidate.table_id,
+                label=candidate.table_name,
+                sheet=candidate.sheet_name,
+                score=candidate.score,
+            )
             for candidate in self.retrieve_tables(query, top_k=top_k, min_score=min_score)
         ]
 

@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from TableAgent.domain.introspection import SelfDescribing
 from TableAgent.domain.ranges import CellRange
 
 
 @dataclass
-class Header:
+class Header(SelfDescribing):
     id: str
     label: str
     description: str

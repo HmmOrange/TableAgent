@@ -9,7 +9,7 @@ from TableAgent.stages.qa.operators.base_operator import BaseOperator
 from TableAgent.stages.retrieval import TableCandidate
 from TableAgent.stages.qa.operators.formula_relation_operator import FormulaRelationOperator
 from TableAgent.stages.qa.operators.relational_table_operator import RelationalTableOperator
-from TableAgent.stages.qa.operators.table_routing_operator import TableRoutingOperator
+from TableAgent.stages.qa.operators.table_routing_operator import TableRef, TableRoutingOperator
 
 
 class MultiTableOperator(BaseOperator):
@@ -33,10 +33,10 @@ class MultiTableOperator(BaseOperator):
         )
         return "\n\n".join(sections)
 
-    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableRef]:
         return self.routing.find_tables(query, top_k=top_k, min_score=min_score)
 
-    def find_table(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+    def find_table(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableRef]:
         return self.routing.find_table(query, top_k=top_k, min_score=min_score)
 
     def retrieve_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableCandidate]:

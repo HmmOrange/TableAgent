@@ -6,6 +6,14 @@ from typing import Any, Optional
 
 from TableAgent.stages.qa.actions.base_action import BaseReviewAction, ReviewRequest, ReviewResult
 from TableAgent.stages.qa.prompts.review import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT_TEMPLATE
+from TableAgent.stages.qa.schemas import (
+    REVIEW_SCHEMA,
+    SubtaskReview,
+    ValidationError,
+    generate_json,
+    schema_if_enabled,
+    validation_message,
+)
 
 _HIDDEN_WORKSPACE_NAMES = {
     "pd",
@@ -148,7 +156,9 @@ class ReviewSubtaskAction(BaseReviewAction):
         self.env.logger.log_event("review_prompt", {"prompt": prompt, "system_prompt": REVIEW_SYSTEM_PROMPT})
 
         try:
-            response = self.llm_client.generate(prompt, system_prompt=REVIEW_SYSTEM_PROMPT)
+            response = generate_json(
+                self.llm_client, prompt, system_prompt=REVIEW_SYSTEM_PROMPT, schema=schema_if_enabled(self.env, REVIEW_SCHEMA)
+            )
         except Exception as exc:
             return ReviewResult(
                 accepted=False,
@@ -169,18 +179,15 @@ class ReviewSubtaskAction(BaseReviewAction):
                 feedback=f"Reviewer output must be valid JSON: {exc}",
                 score=0.0,
             )
-        if not isinstance(data, dict):
+        try:
+            verdict = SubtaskReview.model_validate(data)
+        except ValidationError as exc:
             return ReviewResult(
                 accepted=False,
-                feedback="Reviewer JSON must be an object.",
+                feedback=f"Reviewer JSON is not usable: {validation_message(exc)}",
                 score=0.0,
             )
-
-        accepted = bool(data.get("accepted", False))
-        try:
-            score = float(data.get("score", 1.0 if accepted else 0.0))
-        except (TypeError, ValueError):
-            score = 1.0 if accepted else 0.0
-        score = max(0.0, min(1.0, score))
-        feedback = str(data.get("feedback", "")).strip() or ("Accepted." if accepted else "Rejected.")
-        return ReviewResult(accepted=accepted, feedback=feedback, score=score)
+        feedback = verdict.feedback.strip() or ("Accepted." if verdict.accepted else "Rejected.")
+        return ReviewResult(
+            accepted=verdict.accepted, feedback=feedback, score=verdict.score
+        )

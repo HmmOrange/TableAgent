@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from TableAgent.domain.introspection import SelfDescribing
+
 
 @dataclass(frozen=True)
-class Cell:
+class Cell(SelfDescribing):
     row: int  # 1-indexed
     col: int  # 1-indexed
 
@@ -12,7 +14,7 @@ class Cell:
 
 
 @dataclass(frozen=True)
-class CellRange:
+class CellRange(SelfDescribing):
     start_row: int  # 1-indexed
     start_col: int  # 1-indexed
     end_row: int    # 1-indexed

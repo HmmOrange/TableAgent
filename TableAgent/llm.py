@@ -18,5 +18,15 @@ class BaseLLM(ABC):
         self.temperature = temperature
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        response_schema: dict | None = None,
+    ) -> LLMResponse:
+        """Generate a completion, optionally constrained to a JSON schema.
+
+        `response_schema` is advisory: a backend that cannot constrain decoding ignores
+        it and returns ordinary text, so callers still parse defensively.
+        """
         raise NotImplementedError

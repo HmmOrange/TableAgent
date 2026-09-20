@@ -48,10 +48,48 @@ class OpenAICompatibleLLM(BaseLLM):
         self.extra_headers = dict(extra_headers or {})
         self.extra_body = dict(extra_body or {})
         self.session = session or requests.Session()
+        # How this server wants a JSON schema. Servers disagree and the disagreement is
+        # only visible at runtime: `response_format` is the OpenAI-standard spelling that
+        # current vLLM accepts, `guided_json` is what older vLLM builds take, and some
+        # deployments understand neither. The mode steps down the first time a request is
+        # rejected, so an unsupported backend costs one wasted call per step rather than
+        # one per generation. `structured_output_downgrades` records each step so a run
+        # that silently lost its constraint says so in its artifacts.
+        self.structured_output_mode = "response_format"
+        self.structured_output_downgrades: list[str] = []
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
+    _STRUCTURED_FALLBACK = {"response_format": "guided_json", "guided_json": "off"}
+
+    def _apply_structured_output(
+        self, payload: dict[str, Any], schema: dict[str, Any]
+    ) -> str | None:
+        """Attach the schema the way this server currently accepts. Returns the mode used."""
+        mode = self.structured_output_mode
+        if mode == "response_format" and "response_format" not in self.extra_body:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "qa_payload", "schema": schema},
+            }
+            return mode
+        if mode == "guided_json" and "guided_json" not in self.extra_body:
+            payload["guided_json"] = schema
+            return mode
+        return None
+
+    def _downgrade_structured_output(self, mode: str) -> None:
+        self.structured_output_mode = self._STRUCTURED_FALLBACK.get(mode, "off")
+        self.structured_output_downgrades.append(
+            f"{mode} rejected -> {self.structured_output_mode}"
+        )
+
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
         messages = self._messages(prompt, system_prompt=system_prompt)
-        return self._complete(messages)
+        return self._complete(messages, response_schema=response_schema)
 
     def generate_with_image(
         self,
@@ -78,7 +116,11 @@ class OpenAICompatibleLLM(BaseLLM):
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    def _complete(self, messages: list[dict[str, Any]]) -> LLMResponse:
+    def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        response_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
@@ -87,6 +129,11 @@ class OpenAICompatibleLLM(BaseLLM):
         if self.max_tokens is not None:
             payload["max_tokens"] = self.max_tokens
         payload.update(self.extra_body)
+        constrained = (
+            self._apply_structured_output(payload, response_schema)
+            if response_schema is not None
+            else None
+        )
 
         headers = {"Content-Type": "application/json", **self.extra_headers}
         if self.api_key:
@@ -110,6 +157,28 @@ class OpenAICompatibleLLM(BaseLLM):
                 time.sleep(self.retry_delay_seconds * (attempt + 1))
         if response is None:
             raise RuntimeError("Model request did not produce a response")
+        while constrained and response.status_code == 400:
+            # This server does not take the schema this way. Step down and retry; the
+            # retry builds its own payload so the request already sent is not rewritten
+            # underneath it. Callers parse defensively, so reaching "off" is survivable.
+            self._downgrade_structured_output(constrained)
+            retry_payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"response_format", "guided_json"}
+            }
+            constrained = (
+                self._apply_structured_output(retry_payload, response_schema)
+                if response_schema is not None
+                else None
+            )
+            payload = retry_payload
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
         response.raise_for_status()
         data = response.json()
         try:

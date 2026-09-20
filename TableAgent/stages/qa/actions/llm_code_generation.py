@@ -10,6 +10,12 @@ from TableAgent.stages.qa.actions.base_action import (
     CodeGenerationResult,
 )
 from TableAgent.stages.qa.header_hints import question_header_hints
+from TableAgent.stages.qa.schemas import (
+    GeneratedCode,
+    ValidationError,
+    generate_json,
+    validation_message,
+)
 from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.utils import range_to_a1
 from TableAgent.stages.qa.prompts.react import (
@@ -192,26 +198,13 @@ def parse_model_output(content: str) -> Tuple[str, str, str]:
     except Exception as exc:
         raise ValueError("Code generation output must be valid JSON or a ```json code block.") from exc
 
-    if not isinstance(data, dict):
-        raise ValueError("Code generation JSON must be an object.")
-
-    reasoning = str(data.get("reasoning", "")).strip()
-    code = str(data.get("code", "")).strip()
-    description = str(data.get("description", "")).strip()
-
-    missing = [
-        field_name
-        for field_name, value in (
-            ("reasoning", reasoning),
-            ("code", code),
-            ("description", description),
-        )
-        if not value
-    ]
-    if missing:
-        raise ValueError(f"Code generation JSON is missing non-empty fields: {missing}")
-
-    return reasoning, code, description
+    try:
+        generated = GeneratedCode.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(
+            f"Code generation JSON is not usable -- {validation_message(exc)}"
+        ) from exc
+    return generated.reasoning, generated.code, generated.description
 
 
 class LLMCodeGenerationAction(BaseCodeGenerationAction):
@@ -238,7 +231,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     if not v.startswith("__") and v not in {"pd", "openpyxl", "env", "operators", "Cell", "CellRange", "AxisSelection", "Header", "StructureGroup", "np", "namespace"}
                 ]
                 prior_outcomes = get_prior_outcomes(self.env)
-                formatted_experience = self.env.experience_pool.format()
+                formatted_experience = self.env.experience_pool.format(subtask_id=request.subtask_id)
                 prompt = REACT_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     subtask_description=(
@@ -268,7 +261,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
                         "Revise the table selection code. It must set `selected_table_ids` to a non-empty list of valid table_id strings.\n"
-                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
+                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format(subtask_id=request.subtask_id)}"
                     ),
                     failed_code=failed_code,
                     error_message=error_msg,
@@ -306,7 +299,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 ]
 
                 prior_outcomes = get_prior_outcomes(self.env)
-                formatted_experience = self.env.experience_pool.format()
+                formatted_experience = self.env.experience_pool.format(subtask_id=request.subtask_id)
 
                 prompt = REACT_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
@@ -334,7 +327,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
-                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
+                        f"Previous attempts and reasoning:\n{self.env.experience_pool.format(subtask_id=request.subtask_id)}"
                     ),
                     failed_code=failed_code,
                     error_message=error_msg,
@@ -370,7 +363,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     inspection_variables=inspection_variables,
                     failed_code=failed_code,
                     error_message=error_msg,
-                    experience=self.env.experience_pool.format(),
+                    experience=self.env.experience_pool.format(subtask_id=request.subtask_id),
                 )
             system_prompt = SYNTHESIS_SYSTEM_PROMPT.format(operator_catalog=operator_catalog)
         else:
@@ -384,7 +377,12 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             "system_prompt": system_prompt,
         })
 
-        response = self.llm_client.generate(prompt, system_prompt=system_prompt)
+        # Deliberately unconstrained. A grammar compiled from CODE_SCHEMA was observed to
+        # emit the `code` string without any `\n` escape, so a whole cell arrived on one
+        # line and every statement after the leading comment was swallowed by it. The
+        # short, structured payloads (plan, review) are still constrained; a field whose
+        # contents are Python is not. CODE_SCHEMA stays in use for validating the reply.
+        response = generate_json(self.llm_client, prompt, system_prompt=system_prompt)
 
         self.env.logger.log_event("generate_response", {
             "content": response.content,
@@ -446,7 +444,8 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     "prompt": repair_prompt,
                     "system_prompt": CODE_JSON_REPAIR_SYSTEM_PROMPT,
                 })
-                repair_response = self.llm_client.generate(
+                repair_response = generate_json(
+                    self.llm_client,
                     repair_prompt,
                     system_prompt=CODE_JSON_REPAIR_SYSTEM_PROMPT,
                 )

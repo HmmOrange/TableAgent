@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import Any, List, Optional
 from TableAgent.domain.structure import Header
 from TableAgent.domain.group import StructureGroup
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
@@ -15,13 +15,13 @@ class StructureOperator(BaseOperator):
         "header = operators.get_header(table_id, header_id); attributes are header.id, header.label, "
         "header.description, header.orientation, header.header_range, header.data_range, header.sub_headers",
         "operators.find_headers(table_id, query) -> list[Header]",
-        "operators.get_header(table_id, header_id) -> Header | None",
+        "operators.get_header(table_id, header_id) -> Header (raises if absent; probe with operators.has_header)",
         "operators.resolve_header_columns(table_id, parent_header_id) -> list[str]",
         "operators.list_groups(table_id) -> list[StructureGroup]",
         "group = operators.get_group(table_id, group_id); attributes are group.id, group.label, "
         "group.description, group.axis, group.group_range, group.data_range",
         "operators.find_groups(table_id, query, limit=5) -> list[StructureGroup]",
-        "operators.get_group(table_id, group_id) -> StructureGroup | None",
+        "operators.get_group(table_id, group_id) -> StructureGroup (raises if absent; probe with operators.has_group)",
         "operators.intersect_group_with_header(table_id, group_id, header_id) -> CellRange | None",
         "NOTE: the identifier attribute is `.id` on both Header and StructureGroup. "
         "`header.header_id` and `group.group_id` do not exist and raise AttributeError.",
@@ -60,19 +60,46 @@ class StructureOperator(BaseOperator):
         scored.sort(key=lambda x: x[0], reverse=True)
         return [h for _, h in scored]
 
-    def get_header(self, table_id: str, header_id: str) -> Optional[Header]:
-        """Get header info by explicit id."""
-        headers = self.list_headers(table_id)
-        for h in headers:
+    def _find_header(self, table_id: str, header_id: str) -> Optional[Header]:
+        """Look a header up without raising; callers that tolerate absence use this."""
+        for h in self.list_headers(table_id):
             if h.id == header_id:
                 return h
         return None
 
+    def get_header(self, table_id: str, header_id: str) -> Header:
+        """Get header info by explicit id.
+
+        Raises with the available ids rather than returning None: a silent None turns
+        into an opaque `AttributeError` on the next line, which costs a whole retry
+        round to diagnose. Use `has_header` or `find_headers` to probe for existence.
+        """
+        header = self._find_header(table_id, header_id)
+        if header is not None:
+            return header
+        raise KeyError(
+            f"Header {header_id!r} was not found in table {table_id!r}. "
+            f"Available header ids: {self._id_hint(self.list_headers(table_id))}. "
+            "Probe with operators.has_header(table_id, header_id), or resolve the field "
+            "with operators.find_headers(table_id, query) -- that returns a possibly "
+            "empty list, so check it before indexing."
+        )
+
+    def has_header(self, table_id: str, header_id: str) -> bool:
+        """True when the header id exists; the non-raising probe for `get_header`."""
+        return self._find_header(table_id, header_id) is not None
+
+    @staticmethod
+    def _id_hint(items: List[Any], limit: int = 25) -> str:
+        ids = [str(getattr(item, "id", "")) for item in items if getattr(item, "id", "")]
+        if not ids:
+            return "(none)"
+        shown = ", ".join(ids[:limit])
+        return shown if len(ids) <= limit else f"{shown}, ... (+{len(ids) - limit} more)"
+
     def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
         """Resolve a header to the leaf column IDs represented in a table DataFrame."""
         header = self.get_header(table_id, header_id)
-        if header is None:
-            raise ValueError(f"Header {header_id!r} was not found in table {table_id!r}.")
 
         def leaf_ids(node: Header) -> List[str]:
             if not node.sub_headers:
@@ -126,8 +153,26 @@ class StructureOperator(BaseOperator):
         ranked = [group for _, _, group in scored]
         return ranked[:limit] if limit and limit > 0 else ranked
 
-    def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
+    def _find_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
+        """Look a group up without raising; callers that tolerate absence use this."""
         return next((g for g in self.list_groups(table_id) if g.id == group_id), None)
+
+    def get_group(self, table_id: str, group_id: str) -> StructureGroup:
+        """Get a structure group by explicit id, raising with the available ids."""
+        group = self._find_group(table_id, group_id)
+        if group is not None:
+            return group
+        raise KeyError(
+            f"Group {group_id!r} was not found in table {table_id!r}. "
+            f"Available group ids: {self._id_hint(self.list_groups(table_id))}. "
+            "Probe with operators.has_group(table_id, group_id), or find the section with "
+            "operators.find_groups(table_id, query) -- that returns a possibly empty "
+            "list, so check it before indexing."
+        )
+
+    def has_group(self, table_id: str, group_id: str) -> bool:
+        """True when the group id exists; the non-raising probe for `get_group`."""
+        return self._find_group(table_id, group_id) is not None
 
     def intersect_group_with_header(
         self, table_id: str, group_id: str, header_id: str
@@ -142,8 +187,8 @@ class StructureOperator(BaseOperator):
         """
         from TableAgent.domain.ranges import CellRange
 
-        group = self.get_group(table_id, group_id)
-        header = self.get_header(table_id, header_id)
+        group = self._find_group(table_id, group_id)
+        header = self._find_header(table_id, header_id)
         if group is None or header is None:
             return None
         group_range = group.data_range or group.group_range

@@ -35,6 +35,7 @@ class QAExecutionMixin:
         )
         if table_id:
             self._set_active_tables([table_id])
+            self._warm_start_notebook(table_id)
 
         replan_count = 0
         planning_failure = None
@@ -124,7 +125,7 @@ class QAExecutionMixin:
                 attempt_outputs = []
 
             if success:
-                final_answer = self._final_answer(execution_plan, plan)
+                final_answer = self._final_answer(execution_plan, plan, question)
                 if final_answer is None:
                     success = False
                     error_msg = (
@@ -145,15 +146,28 @@ class QAExecutionMixin:
                         "final_answer_review",
                         {
                             "accepted": final_review.accepted,
+                            "answer_wrong": final_review.answer_wrong,
                             "score": final_review.score,
                             "feedback": final_review.feedback,
                         },
                     )
-                    if not final_review.accepted:
+                    # Only a wrong answer is worth discarding. Replanning restarts from a
+                    # blank namespace and, when the replan budget runs out, the run falls
+                    # back to a far weaker answer -- so a reviewer complaint about how a
+                    # correct answer was derived is recorded, not acted on.
+                    if final_review.answer_wrong:
                         success = False
                         error_msg = (
                             "Final answer review rejected the plan: "
                             f"{final_review.feedback}"
+                        )
+                    elif not final_review.accepted:
+                        self.env.logger.log_event(
+                            "final_answer_review_concern",
+                            {"feedback": final_review.feedback, "score": final_review.score},
+                        )
+                        self._progress(
+                            "[qa] final review kept the answer with a derivation concern"
                         )
 
             if success or replan_count >= self.max_replans:
@@ -227,11 +241,49 @@ class QAExecutionMixin:
                 "error": error_msg,
                 "execution_time": execution_time,
                 "replan_count": replan_count,
+                "structured_output": (
+                    self.llm_client.structured_output_state()
+                    if hasattr(self.llm_client, "structured_output_state")
+                    else None
+                ),
             },
         )
         self._persist_run_artifacts(result, run_dir, event_start_index)
         self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
         return result
+
+    def _warm_start_notebook(self, table_id: str) -> None:
+        """Put a first look at the table into the notebook before any subtask runs.
+
+        The planner used to open every plan with a table-selection subtask, which on a
+        single-table workbook selected the only candidate -- nominally redundant, and it
+        cost a quarter of all model calls. Dropping it also dropped the cell it left
+        behind, and that cell was doing real work: every later subtask reads the notebook
+        history, so removing it left the first inspection starting cold and review
+        rejections rose by six points.
+
+        The context was worth keeping; the round trip that produced it was not. This runs
+        the same first look deterministically -- no generation, no review, nothing to
+        diverge -- and leaves `table_df` behind for the first subtask to reuse.
+        """
+        # Prints only. `_set_active_tables` has already built `table_df` with resolved
+        # header ids; rebuilding it here once produced integer column labels instead and
+        # silently changed what every later cell selected.
+        code = (
+            "print('table_id:', table_id)\n"
+            "print('table_df shape:', table_df.shape)\n"
+            "print('columns:', list(table_df.columns))\n"
+            "print(table_df.head(5))\n"
+        )
+        output, error, success, _ = self.env.execute_code(code, cell_id="warm_start")
+        self.env.logger.log_event(
+            "warm_start",
+            {"table_id": table_id, "success": success, "error": error[:500] if error else None},
+        )
+        if not success:
+            # A structure this cell cannot read is exactly the case the agent has to work
+            # around itself; the run continues rather than failing on a convenience step.
+            self._progress(f"[qa] warm start skipped | {str(error)[:120]}")
 
     def _execute_plan(
         self,
@@ -337,6 +389,10 @@ class QAExecutionMixin:
         return outputs, True, None
 
     def _run_subtask(self, question: str, subtask: SubTask) -> AgentOutput:
+        # The raw-sheet gate asks "has the structured path already failed here?", so the
+        # evidence has to be scoped to the subtask asking. A failure inherited from an
+        # unrelated earlier subtask would hold the gate open for the rest of the run.
+        self.env.structured_probe_log = []
         if subtask.category == "common_info":
             try:
                 return self.common_info_action.run(question, subtask)

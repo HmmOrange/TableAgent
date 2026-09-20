@@ -76,6 +76,53 @@ def _truncate_text(text: str, max_chars: int, *, tail: bool = False) -> tuple[st
     tail_len = max_chars - marker_len - head_len
     return text[:head_len] + marker + text[-tail_len:], True
 
+def describe_missing_key(error: BaseException, namespace: Dict[str, Any]) -> str:
+    """Answer a `KeyError` with the columns the frames in scope actually have.
+
+    Selecting a column by a name that is not there is the single most common way a cell
+    fails, and pandas reports only the name that missed. The frame knows its own columns,
+    so the miss can name them -- the same move as an unknown attribute naming the real
+    ones, applied to the other surface an agent guesses at. Nothing is corrected here:
+    the cell still fails, it just fails with what is needed to fix it.
+    """
+    if not isinstance(error, KeyError) or not error.args:
+        return ""
+    missing = error.args[0]
+    if not isinstance(missing, str):
+        return ""
+    try:
+        import difflib
+
+        import pandas as pd
+    except Exception:  # pragma: no cover - pandas is a hard dependency in practice
+        return ""
+
+    lines = []
+    for name, value in list(namespace.items()):
+        if name.startswith("__") or not isinstance(value, pd.DataFrame):
+            continue
+        columns = [str(column) for column in value.columns]
+        if missing in columns:
+            continue
+        close = difflib.get_close_matches(missing, columns, n=3, cutoff=0.4)
+        shown = ", ".join(columns[:30])
+        if len(columns) > 30:
+            shown += f", ... (+{len(columns) - 30} more)"
+        hint = f"  - {name}: {shown}"
+        if close:
+            hint += f"\n    closest to {missing!r}: {', '.join(repr(c) for c in close)}"
+        lines.append(hint)
+        if len(lines) >= 4:
+            break
+    if not lines:
+        return ""
+    return (
+        f"\n[columns available] {missing!r} is not a column of the DataFrames in scope. "
+        "Resolve fields through verified header ids rather than guessing a label:\n"
+        + "\n".join(lines)
+    )
+
+
 def validate_code_imports(code: str) -> None:
     allowed_roots = {
         "math", "statistics", "datetime", "time", "re", "json", "collections", "itertools", "functools", "operator",
@@ -238,6 +285,7 @@ class Notebook:
             success = False
             # Get traceback
             error_msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            error_msg += describe_missing_key(e, self.namespace)
 
         stdout_val = stdout_buf.getvalue()
         stderr_val = stderr_buf.getvalue()

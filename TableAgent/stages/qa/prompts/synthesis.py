@@ -18,6 +18,7 @@ Keep output small. Use existing variables, summaries, filters, and aggregates; d
 - Preserve authoritative header-to-value ownership from inspection. When multiple columns contain semantically similar text, use the value from the header explicitly requested by the question; do not relabel a neighboring column's value.
 - Preserve the group ownership of evidence and do not substitute the same label from a different group.
 - If inspection found multiple distinct criteria/details for one requested item, preserve and combine all of them; you may use appropriate operators.
+- Write the answer in the form the question asks for. A question phrased as yes/no is answered `Yes` or `No`, not `True`, `1`, or a restatement. A question naming an order -- "the difference between A and B", "how much more A than B" -- is computed in that order, so the sign follows the question rather than the order the values happen to sit in. Report a value with the precision the source carries; do not paste raw float repr noise.
 - Treat accepted inspection variables as the primary evidence and reusing useful filtered, matched, selected, target, or result values instead of unnecessarily repeating inspection work.
 
 Output contract:

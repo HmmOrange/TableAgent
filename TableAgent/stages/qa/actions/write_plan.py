@@ -10,6 +10,14 @@ from TableAgent.stages.qa.header_hints import question_header_hints
 from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.stages.qa.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
 from TableAgent.stages.qa.models.subtask import SubTask
+from TableAgent.stages.qa.schemas import (
+    PLAN_SCHEMA,
+    QAPlan,
+    ValidationError,
+    generate_json,
+    schema_if_enabled,
+    validation_message,
+)
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
 Return only one JSON object with a non-empty `subtasks` list. Each subtask must have
@@ -51,61 +59,23 @@ def parse_planner_output(content: str) -> list[SubTask]:
     if not isinstance(items, list):
         raise ValueError("Planner JSON must be a list or an object with a 'subtasks' list.")
 
-    subtasks = []
-    for item in items:
-        if not isinstance(item, dict):
-            raise ValueError("Every planner subtask must be a JSON object.")
-        subtask_id = str(item.get("id", "")).strip()
-        if not subtask_id:
-            raise ValueError("Every planner subtask must include a non-empty 'id'.")
-        description = str(item.get("description", "")).strip()
-        if not description:
-            raise ValueError(f"Subtask '{subtask_id}' must include a non-empty 'description'.")
-        layer = item.get("layer", "inspect")
-        if layer not in ("table_inspect", "inspect", "synthesis"):
-            raise ValueError(
-                f"Subtask '{subtask_id}' has invalid layer {layer!r}; expected 'table_inspect', 'inspect', or 'synthesis'."
-            )
-        category = str(item.get("category", "normal")).strip().lower()
-        if category not in {"normal", "common_info"}:
-            raise ValueError(
-                f"Subtask '{subtask_id}' has invalid category {category!r}."
-            )
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        metadata = dict(metadata)
-        if item.get("common_info_scope") and "common_info_scope" not in metadata:
-            metadata["common_info_scope"] = item["common_info_scope"]
-        if item.get("target_names") and "target_names" not in metadata:
-            metadata["target_names"] = item["target_names"]
-        if category == "common_info" and layer != "synthesis":
-            scope = str(metadata.get("common_info_scope") or "").strip().lower()
-            if scope not in {"workbook", "sheet", "table"}:
-                raise ValueError(
-                    f"Common-info subtask '{subtask_id}' requires metadata.common_info_scope."
-                )
-            metadata["common_info_scope"] = scope
-        subtasks.append(SubTask(
-            id=subtask_id,
-            description=description,
-            layer=layer,  # type: ignore
-            category=category,  # type: ignore
-            depends_on=_split_depends_on(item.get("depends_on", [])),
+    try:
+        plan = QAPlan.model_validate({"subtasks": items})
+    except ValidationError as exc:
+        raise ValueError(f"Planner JSON is not a usable plan -- {validation_message(exc)}") from exc
+
+    return [
+        SubTask(
+            id=subtask.id,
+            description=subtask.description,
+            layer=subtask.layer,
+            category=subtask.category,
+            depends_on=list(subtask.depends_on),
             status="pending",
-            metadata=metadata,
-        ))
-    if not subtasks:
-        raise ValueError("Planner JSON did not contain any subtasks.")
-    return subtasks
-
-
-def _split_depends_on(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []
+            metadata=dict(subtask.metadata),
+        )
+        for subtask in plan.subtasks
+    ]
 
 
 def _related_structure_summary(env: Any) -> str:
@@ -195,7 +165,9 @@ class WriteQAPlanAction(BasePlanAction):
                 f"Execution failure and reviewer feedback:\n{request.failure_context}"
             )
         self.env.logger.log_event("planner_prompt", {"prompt": prompt, "system_prompt": PLANNER_SYSTEM_PROMPT})
-        response = self.llm_client.generate(prompt, system_prompt=PLANNER_SYSTEM_PROMPT)
+        response = generate_json(
+            self.llm_client, prompt, system_prompt=PLANNER_SYSTEM_PROMPT, schema=PLAN_SCHEMA
+        )
         raw_response = response.content
         self.env.logger.log_event("planner_response", {"content": raw_response})
         try:
@@ -206,7 +178,12 @@ class WriteQAPlanAction(BasePlanAction):
                 "Convert the attempted plan below into the required concise JSON.\n\n"
                 f"Attempted plan:\n{raw_response[-6000:]}"
             )
-            repair_response = self.llm_client.generate(repair_prompt, system_prompt=PLAN_REPAIR_SYSTEM_PROMPT)
+            repair_response = generate_json(
+                self.llm_client,
+                repair_prompt,
+                system_prompt=PLAN_REPAIR_SYSTEM_PROMPT,
+                schema=schema_if_enabled(self.env, PLAN_SCHEMA),
+            )
             raw_response = repair_response.content
             self.env.logger.log_event("planner_repair_response", {"content": raw_response})
             try:
@@ -245,6 +222,8 @@ class WriteQAPlanAction(BasePlanAction):
                 for subtask in subtasks:
                     if subtask.layer == "inspect" and table_inspect_id not in subtask.depends_on:
                         subtask.depends_on.insert(0, table_inspect_id)
+        else:
+            subtasks = self._drop_redundant_table_inspection(subtasks)
 
         for subtask in subtasks:
             if not subtask.metadata:
@@ -256,6 +235,42 @@ class WriteQAPlanAction(BasePlanAction):
             "subtasks": [str(s) for s in subtasks],
         })
         return PlanGenerationResult(subtasks=subtasks, raw_response=raw_response)
+
+    def _drop_redundant_table_inspection(self, subtasks: list[SubTask]) -> list[SubTask]:
+        """Remove a table-selection step when there is only one table to select.
+
+        The prompt's worked example opens with `select_relevant_tables`, so the planner
+        writes one almost every time -- on this benchmark, in 98% of runs against
+        single-table workbooks, where the runner has already put the only table in
+        `selected_table_ids` before planning starts. The step carries no information and
+        still costs a generation, an execution and a review, and it is the *first* step,
+        so anything that wobbles there is inherited by everything after it. Dropping it
+        removes a fork rather than trying to make the fork behave.
+        """
+        table_ids = self.env.operators.list_tables()
+        if len(table_ids) != 1:
+            return subtasks
+        redundant = {
+            subtask.id for subtask in subtasks if subtask.layer == "table_inspect"
+        }
+        if not redundant:
+            return subtasks
+        kept = [subtask for subtask in subtasks if subtask.id not in redundant]
+        if not kept:
+            # A plan that is nothing but table selection still has to run: answering with
+            # no inspection at all would be worse than one redundant step.
+            return subtasks
+        for subtask in kept:
+            subtask.depends_on = [
+                dependency
+                for dependency in subtask.depends_on
+                if dependency not in redundant
+            ]
+        self.env.logger.log_event(
+            "table_inspection_pruned",
+            {"removed": sorted(redundant), "table_id": table_ids[0]},
+        )
+        return kept
 
     def _apply_routing_policy(self, subtasks: list[SubTask]) -> list[SubTask]:
         mode = str(getattr(self.env, "qa_routing_mode", "auto"))

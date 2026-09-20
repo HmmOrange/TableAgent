@@ -16,6 +16,7 @@ from TableAgent.stages.qa.agents.synthesis_agent import TableQASynthesisAgent
 from TableAgent.stages.qa.runner_artifacts import QAArtifactMixin
 from TableAgent.stages.qa.runner_execution import QAExecutionMixin
 from TableAgent.stages.qa.runner_support import QARunnerSupportMixin
+from TableAgent.stages.qa.schemas import generate_json
 
 if TYPE_CHECKING:
     from TableAgent.stages.retrieval import TableRetrieverContract
@@ -33,10 +34,17 @@ class TokenCountingLLM:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> Any:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        response_schema: Optional[dict] = None,
+    ) -> Any:
         started_at = time.perf_counter()
         try:
-            response = self.client.generate(prompt, system_prompt=system_prompt)
+            response = generate_json(
+                self.client, prompt, system_prompt=system_prompt, schema=response_schema
+            )
         except Exception as exc:
             self.calls.append(
                 {
@@ -67,9 +75,27 @@ class TokenCountingLLM:
                 "token_capped": bool(getattr(response, "token_capped", False)),
                 "success": True,
                 "error_type": None,
+                # Records whether the schema constraint actually reached this server.
+                "structured_mode": getattr(
+                    self.client, "structured_output_mode", "unsupported"
+                ),
             }
         )
         return response
+
+    def structured_output_state(self) -> dict[str, Any]:
+        """How the schema constraint fared against this server, for the run log.
+
+        Whether a constrained request actually reached the backend is invisible from the
+        answer alone, and a silent downgrade already cost one benchmark round before it
+        was noticed. So the mode and every step down are recorded with the run.
+        """
+        return {
+            "mode": getattr(self.client, "structured_output_mode", "unsupported"),
+            "downgrades": list(
+                getattr(self.client, "structured_output_downgrades", []) or []
+            ),
+        }
 
     def token_usage(self) -> dict[str, int]:
         return {
@@ -196,6 +222,11 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
             for name in self.settings.get("qa_excluded_sheet_names", [])
             if str(name).strip()
         }
+        self.env.qa_raw_sheet_gate = bool(self.settings.get("qa_raw_sheet_gate", False))
+        self.env.qa_structured_output = bool(
+            self.settings.get("qa_structured_output", False)
+        )
+        self.env.structured_probe_log = []
         self.env.qa_routing_mode = self.qa_routing_mode
         self.env.qa_common_info_enabled = self.qa_common_info_enabled
         self.env.logger.log_event(
@@ -209,6 +240,8 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
                 "max_error_chars": max_error_chars,
                 "max_value_repr_chars": max_value_repr_chars,
                 "qa_routing_mode": self.qa_routing_mode,
+                "qa_raw_sheet_gate": self.env.qa_raw_sheet_gate,
+                "qa_structured_output": self.env.qa_structured_output,
                 "qa_common_info_enabled": self.qa_common_info_enabled,
                 "qa_common_info_fallback": self.qa_common_info_fallback,
             },

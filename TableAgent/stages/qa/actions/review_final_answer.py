@@ -9,6 +9,14 @@ from TableAgent.stages.qa.prompts.review import (
     FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
     FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE,
 )
+from TableAgent.stages.qa.schemas import (
+    FINAL_REVIEW_SCHEMA,
+    FinalAnswerReview,
+    ValidationError,
+    generate_json,
+    schema_if_enabled,
+    validation_message,
+)
 
 
 class ReviewFinalAnswerAction:
@@ -58,7 +66,12 @@ class ReviewFinalAnswerAction:
             "system_prompt": FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
         })
         try:
-            response = self.llm_client.generate(prompt, system_prompt=FINAL_ANSWER_REVIEW_SYSTEM_PROMPT)
+            response = generate_json(
+                self.llm_client,
+                prompt,
+                system_prompt=FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
+                schema=schema_if_enabled(self.env, FINAL_REVIEW_SCHEMA),
+            )
         except Exception as exc:
             self.env.logger.log_event("final_answer_review_error", {"error": str(exc)})
             return ReviewResult(accepted=True, feedback=f"Final review unavailable: {exc}", score=0.0)
@@ -70,24 +83,22 @@ class ReviewFinalAnswerAction:
             data = json.loads(payload)
         except (TypeError, ValueError, json.JSONDecodeError):
             return ReviewResult(accepted=True, feedback="Final reviewer returned invalid JSON; review skipped.", score=0.0)
-        if not isinstance(data, dict):
-            return ReviewResult(accepted=True, feedback="Final reviewer returned a non-object; review skipped.", score=0.0)
-        if "accepted" not in data:
-            return ReviewResult(accepted=True, feedback="Final reviewer omitted `accepted`; review skipped.", score=0.0)
-        accepted_value = data.get("accepted")
-        if not isinstance(accepted_value, bool):
+        try:
+            verdict = FinalAnswerReview.model_validate(data)
+        except ValidationError as exc:
+            # A verdict that cannot be read is not a rejection. Failing open keeps a
+            # usable answer instead of sending the run into a replan it cannot justify.
             return ReviewResult(
                 accepted=True,
-                feedback="Final reviewer returned a non-boolean `accepted`; review skipped.",
+                feedback=f"Final reviewer reply was unusable ({validation_message(exc)}); review skipped.",
                 score=0.0,
             )
-        accepted = accepted_value
-        try:
-            score = max(0.0, min(1.0, float(data.get("score", 1.0 if accepted else 0.0))))
-        except (TypeError, ValueError):
-            score = 1.0 if accepted else 0.0
-        feedback = str(data.get("feedback") or ("Accepted." if accepted else "Rejected.")).strip()
-        return ReviewResult(accepted=accepted, feedback=feedback, score=score)
+        return ReviewResult(
+            accepted=verdict.accepted,
+            feedback=verdict.resolved_feedback(),
+            score=verdict.score,
+            answer_wrong=verdict.answer_wrong,
+        )
 
     def _grouped_header_context(self) -> str:
         """Expose verified sibling headers so final review can detect partial group coverage."""

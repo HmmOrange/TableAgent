@@ -4,6 +4,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 
+from TableAgent.domain.introspection import SelfDescribing
 from TableAgent.domain.ranges import AxisSelection, Cell, CellRange
 from TableAgent.domain.structure import Header
 from TableAgent.domain.group import StructureGroup
@@ -15,7 +16,7 @@ from TableAgent.stages.qa.environment.logger import QALogger
 if TYPE_CHECKING:
     from TableAgent.stages.retrieval import TableRetrieverContract
 
-class QAEnvironment:
+class QAEnvironment(SelfDescribing):
     """Notebook-like runtime environment for QA execution."""
     def __init__(
         self,

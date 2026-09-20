@@ -46,6 +46,8 @@ class TableAgentConfig:
     qa_max_replans: int
     qa_max_experience_records: int
     qa_final_answer_review: bool
+    qa_raw_sheet_gate: bool
+    qa_structured_output: bool
     qa_log_path: Path | None
     qa_max_observation_chars: int
     qa_max_error_chars: int
@@ -105,6 +107,13 @@ class TableAgentConfig:
             qa_max_replans=int(merged.get("qa_max_replans", 5)),
             qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
             qa_final_answer_review=_bool(merged.get("qa_final_answer_review", False)),
+            # The gate refusing a raw-sheet read until the structured path has failed is
+            # opt-in: a benchmark round measured it as neutral at best, and the prompt
+            # paragraph that accompanied it tracked a drop in review-accepted attempts.
+            qa_raw_sheet_gate=_bool(merged.get("qa_raw_sheet_gate", False)),
+            # Opt-in: see schemas.schema_if_enabled for what went wrong when a
+            # backend grammar was let near generated code.
+            qa_structured_output=_bool(merged.get("qa_structured_output", False)),
             qa_log_path=_optional_path(merged.get("qa_log_path")),
             qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),

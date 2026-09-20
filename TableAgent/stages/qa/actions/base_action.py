@@ -68,6 +68,10 @@ class ReviewResult:
     accepted: bool
     feedback: str
     score: float = 0.0
+    # None when the reviewer did not judge the answer separately from the derivation.
+    # True means the stated answer is wrong and must be discarded; False means the
+    # answer stands even if the reviewer faulted how it was reached.
+    answer_wrong: Optional[bool] = None
 
 
 class BaseAction(ABC):

@@ -16,6 +16,7 @@ from TableAgent.stages.qa.operators.range_operator import RangeOperator
 from TableAgent.stages.qa.operators.workbook_operator import WorkbookOperator
 from TableAgent.stages.qa.operators.filter_operator import FilterOperator
 from TableAgent.stages.qa.operators.multitab_operator import MultiTableOperator
+from TableAgent.stages.qa.operators.table_routing_operator import TableRef
 from TableAgent.stages.retrieval import TableCandidate
 
 class TableOperators(BaseOperator):
@@ -65,23 +66,74 @@ class TableOperators(BaseOperator):
             "workspace: Use `env.preview_variable(name, rows=5)` and "
             "`env.get_history(last_n=3, max_output_len=800)` for compact observations."
         )
+        sections.append(self._return_type_catalog())
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _return_type_catalog() -> str:
+        """List what the objects these operators return actually carry.
+
+        Derived from the types themselves, so it cannot drift from the code the way a
+        hand-written list would, and so an attribute is documented once rather than
+        being discovered through a failed execution round.
+        """
+        from TableAgent.domain.introspection import public_attribute_names
+
+        specimens = (
+            ("Header", Header("", "", "", "", None, None)),
+            ("StructureGroup", StructureGroup("", "", "", "", None, None)),
+            ("CellRange", CellRange(1, 1, 1, 1)),
+            ("Cell", Cell(1, 1)),
+            ("TableRef", TableRef("")),
+        )
+        lines = [
+            "return types: attributes carried by the objects the operators above return. "
+            "Reaching for anything else raises with the nearest valid name."
+        ]
+        for name, specimen in specimens:
+            attributes = ", ".join(public_attribute_names(specimen))
+            lines.append(f"- {name}: {attributes}")
+        lines.append(
+            "- a Header's or StructureGroup's `header_range`/`data_range`/`group_range` "
+            "is None when the structure did not record one; check before reading `.sheet` "
+            "or any other range attribute off it."
+        )
+        return "\n".join(lines)
 
     # Structure/header operators
     def list_tables(self) -> List[str]:
         return self._structure.list_tables()
 
     def list_headers(self, table_id: str) -> List[Header]:
-        return self._structure.list_headers(table_id)
+        headers = self._structure.list_headers(table_id)
+        self._note_probe(bool(headers), f"list_headers({table_id!r})")
+        return headers
 
     def find_headers(self, table_id: str, query: str) -> List[Header]:
-        return self._structure.find_headers(table_id, query)
+        headers = self._structure.find_headers(table_id, query)
+        self._note_probe(bool(headers), f"find_headers({table_id!r}, {query!r})")
+        return headers
 
-    def get_header(self, table_id: str, header_id: str) -> Optional[Header]:
-        return self._structure.get_header(table_id, header_id)
+    def get_header(self, table_id: str, header_id: str) -> Header:
+        try:
+            header = self._structure.get_header(table_id, header_id)
+        except KeyError:
+            self._note_probe(False, f"get_header({table_id!r}, {header_id!r})")
+            raise
+        self._note_probe(True, f"get_header({table_id!r}, {header_id!r})")
+        return header
+
+    def has_header(self, table_id: str, header_id: str) -> bool:
+        return self._structure.has_header(table_id, header_id)
 
     def resolve_header_columns(self, table_id: str, header_id: str) -> List[str]:
-        return self._structure.resolve_header_columns(table_id, header_id)
+        try:
+            columns = self._structure.resolve_header_columns(table_id, header_id)
+        except (KeyError, ValueError):
+            self._note_probe(False, f"resolve_header_columns({table_id!r}, {header_id!r})")
+            raise
+        self._note_probe(bool(columns), f"resolve_header_columns({table_id!r}, {header_id!r})")
+        return columns
 
     def list_groups(self, table_id: str) -> List[StructureGroup]:
         return self._structure.list_groups(table_id)
@@ -89,19 +141,27 @@ class TableOperators(BaseOperator):
     def find_groups(
         self, table_id: str, query: str, *, limit: int = 5, min_overlap: int = 1
     ) -> List[StructureGroup]:
-        return self._structure.find_groups(table_id, query, limit=limit, min_overlap=min_overlap)
+        groups = self._structure.find_groups(table_id, query, limit=limit, min_overlap=min_overlap)
+        self._note_probe(bool(groups), f"find_groups({table_id!r}, {query!r})")
+        return groups
 
-    def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
-        return self._structure.get_group(table_id, group_id)
+    def get_group(self, table_id: str, group_id: str) -> StructureGroup:
+        try:
+            group = self._structure.get_group(table_id, group_id)
+        except KeyError:
+            self._note_probe(False, f"get_group({table_id!r}, {group_id!r})")
+            raise
+        self._note_probe(True, f"get_group({table_id!r}, {group_id!r})")
+        return group
+
+    def has_group(self, table_id: str, group_id: str) -> bool:
+        return self._structure.has_group(table_id, group_id)
 
     def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str) -> Optional[CellRange]:
         return self._structure.intersect_group_with_header(table_id, group_id, header_id)
 
     def _require_group(self, table_id: str, group_id: str) -> StructureGroup:
-        group = self.get_group(table_id, group_id)
-        if group is None:
-            raise ValueError(f"Group {group_id!r} was not found in table {table_id!r}.")
-        return group
+        return self.get_group(table_id, group_id)
 
     def read_group(self, table_id: str, group_id: str) -> List[List[Any]]:
         group = self._require_group(table_id, group_id)
@@ -138,6 +198,30 @@ class TableOperators(BaseOperator):
         return matches
 
     def read_table_as_dataframe(
+        self,
+        table_id: str,
+        has_headers: bool = False,
+        *,
+        include_group_column: bool = True,
+        drop_group_label_rows: bool = False,
+    ) -> pd.DataFrame:
+        """Read a table through its verified structure; see `_read_table_frame` for detail."""
+        try:
+            frame = self._read_table_frame(
+                table_id,
+                has_headers,
+                include_group_column=include_group_column,
+                drop_group_label_rows=drop_group_label_rows,
+            )
+        except Exception:
+            self._note_probe(False, f"read_table_as_dataframe({table_id!r})")
+            raise
+        self._note_probe(
+            frame is not None and not frame.empty, f"read_table_as_dataframe({table_id!r})"
+        )
+        return frame
+
+    def _read_table_frame(
         self,
         table_id: str,
         has_headers: bool = False,
@@ -446,6 +530,56 @@ class TableOperators(BaseOperator):
     def read_range_as_dataframe(self, range_or_a1: Union[CellRange, str], sheet: str = "", has_headers: bool = True) -> pd.DataFrame:
         return self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
 
+    # Structured-access gate
+    def _note_probe(self, resolved: bool, detail: str) -> None:
+        """Record whether a structure lookup produced anything, for the raw-read gate."""
+        log = getattr(self.env, "structured_probe_log", None)
+        if log is None:
+            log = []
+            setattr(self.env, "structured_probe_log", log)
+        log.append((bool(resolved), detail))
+
+    def _structure_is_unusable(self, sheet: str = "") -> bool:
+        """True when no verified table can serve this read, so the gate opens on its own."""
+        try:
+            table_ids = self.list_tables()
+        except Exception:
+            return True
+        if not table_ids:
+            return True
+        if sheet:
+            wanted = str(sheet).strip().casefold()
+            owning = [
+                table_id
+                for table_id in table_ids
+                if str((self.env.get_table_structure(table_id) or {}).get("sheet", "")).strip().casefold()
+                == wanted
+            ]
+            # A sheet that no verified table covers was never structured in the first place.
+            if not owning:
+                return True
+            table_ids = owning
+        return not any(self._structure.list_headers(table_id) for table_id in table_ids)
+
+    def _require_failed_structured_probe(self, sheet: str = "") -> None:
+        if not bool(getattr(self.env, "qa_raw_sheet_gate", False)):
+            return
+        log = getattr(self.env, "structured_probe_log", None) or []
+        if any(not resolved for resolved, _ in log):
+            return
+        if self._structure_is_unusable(sheet):
+            return
+        attempted = ", ".join(detail for _, detail in log[-4:]) or "none"
+        raise PermissionError(
+            "read_sheet_as_dataframe is gated: the verified structure has not been shown to "
+            "fail for this subtask yet. Resolve the field through the structure first -- "
+            "operators.find_headers(table_id, query), operators.resolve_header_columns(...), "
+            "operators.read_table_as_dataframe(table_id) -- and read the raw sheet only if "
+            "one of those comes back empty or raises. Reading raw cells loses header "
+            "ownership and group ranges, so a value read this way cannot be attributed to a "
+            f"verified field. Structure lookups so far in this subtask: {attempted}."
+        )
+
     def sheet_dimensions(self, sheet: str = "") -> dict[str, int | str]:
         return self._workbook.sheet_dimensions(sheet)
 
@@ -458,6 +592,15 @@ class TableOperators(BaseOperator):
         min_col: int = 1,
         max_col: int | None = None,
     ) -> pd.DataFrame:
+        """Read physical worksheet cells, once the verified structure has been shown to fail.
+
+        Reading the raw sheet discards every guarantee the structure stage provides:
+        header ownership, group ranges, merged-cell expansion. It is the right escape
+        hatch for a table whose structure really is unusable, and the wrong default.
+        The gate makes that distinction a runtime fact rather than a judgement call, so
+        the same situation takes the same branch on every run.
+        """
+        self._require_failed_structured_probe(sheet)
         return self._workbook.read_sheet_as_dataframe(
             sheet,
             min_row=min_row,
@@ -483,10 +626,10 @@ class TableOperators(BaseOperator):
         return self._filter.read_selection(selection, target_range, sheet=sheet)
 
     # Multi-table routing, relational operations, and formula evaluation
-    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+    def find_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableRef]:
         return self._multitab.find_tables(query, top_k=top_k, min_score=min_score)
 
-    def find_table(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[str]:
+    def find_table(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableRef]:
         return self._multitab.find_table(query, top_k=top_k, min_score=min_score)
 
     def retrieve_tables(self, query: str, *, top_k: int = 1, min_score: float = 0.0) -> list[TableCandidate]:

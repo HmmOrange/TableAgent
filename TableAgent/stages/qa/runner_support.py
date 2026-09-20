@@ -10,7 +10,7 @@ class QARunnerSupportMixin:
     """Shared answer formatting, table state, and lifecycle helpers."""
 
     def _final_answer(
-        self, execution_plan: list[SubTask], plan: list[SubTask]
+        self, execution_plan: list[SubTask], plan: list[SubTask], question: str = ""
     ) -> str | None:
         del execution_plan
         final_val = self.env.execution_namespace.get("final_answer")
@@ -22,8 +22,69 @@ class QARunnerSupportMixin:
             if self._is_pure_common_info_plan(plan)
             else self._humanize_header_ids(serialized)
         )
+        answer = self._apply_answer_contract(answer, question)
         self.env.execution_namespace["final_answer"] = answer
         return answer
+
+    # Answer contract
+    _YES_NO_QUESTION = re.compile(
+        r"^\s*(is|are|was|were|does|do|did|has|have|had|can|could|should|would|will)\b",
+        re.IGNORECASE,
+    )
+    _NOISY_FLOAT = re.compile(r"-?\d+\.\d{6,}")
+    _INTEGRAL_FLOAT = re.compile(r"(?<![\d.])(-?\d+)\.0+(?![\d])")
+
+    @classmethod
+    def _apply_answer_contract(cls, answer: str, question: str) -> str:
+        """Normalise how the answer is written, never what it says.
+
+        Binary phrasing and float repr noise cost whole questions on their own: a
+        correct `True` scored against a `No`, or `7668.0` against `7668`, is a right
+        computation thrown away at the last step. Every rewrite here is value-preserving
+        -- a shortened float must round-trip, and the yes/no mapping only fires on a bare
+        boolean answer to a question that was asked as a yes/no question.
+        """
+        if not isinstance(answer, str) or not answer.strip():
+            return answer
+        text = answer.strip()
+
+        if cls._is_yes_no_question(question):
+            bare = text.strip(" .\"'`")
+            mapped = {"true": "Yes", "false": "No", "yes": "Yes", "no": "No"}.get(bare.casefold())
+            if mapped is not None:
+                return mapped
+
+        def shorten(match: re.Match[str]) -> str:
+            """Drop binary-representation noise: `9.440000000000001` -> `9.44`.
+
+            Twelve significant digits is the cut. Noise from accumulated float
+            arithmetic and a genuinely precise value are numerically indistinguishable
+            once both run past fifteen significant digits, so the cut is a judgement
+            about this domain rather than a general rule: a value read from or computed
+            over spreadsheet cells -- an index, a count, a rate, a wage -- never carries
+            thirteen meaningful digits, while the noise shows up constantly.
+            """
+            raw = match.group(0)
+            try:
+                value = float(raw)
+            except ValueError:
+                return raw
+            rounded = float(f"{value:.12g}")
+            if rounded == value:
+                return raw
+            shortened = repr(rounded)
+            return shortened if len(shortened) < len(raw) else raw
+
+        text = cls._NOISY_FLOAT.sub(shorten, text)
+        text = cls._INTEGRAL_FLOAT.sub(r"\1", text)
+        return text
+
+    @classmethod
+    def _is_yes_no_question(cls, question: str) -> bool:
+        if not question:
+            return False
+        stripped = str(question).strip()
+        return bool(cls._YES_NO_QUESTION.match(stripped)) or "whether" in stripped.casefold()
 
     @classmethod
     def _serialize_final_value(cls, value: Any) -> str:

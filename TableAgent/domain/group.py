@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from TableAgent.domain.introspection import SelfDescribing
 from TableAgent.domain.ranges import CellRange
 
 
@@ -15,7 +16,7 @@ SECTION_METADATA_COLUMNS = (SECTION_COLUMN, SECTION_LABEL_ROW_COLUMN)
 
 
 @dataclass(frozen=True)
-class StructureGroup:
+class StructureGroup(SelfDescribing):
     """A semantic row/column group declared in structure.yaml."""
 
     id: str

@@ -83,8 +83,18 @@ Reject the answer when any of these applies:
 - if the question names a structure group, evidence must stay inside its group_range and numeric evidence inside its data_range unless groups are explicitly compared.
 - a count or aggregate includes a group's label row as if it were a record. A row whose `__section_label_row__` is True, or whose measure columns are all empty while its label matches a section heading, is structure, not data.
 
-Return JSON only with `accepted` (boolean), `score` (0.0-1.0), and concise `feedback`. If rejected, state what a
-corrected plan must inspect or calculate. Do not solve the question yourself.
+Separate two different judgements. `answer_wrong` is about the stated answer: set it true only when the evidence
+shows the answer itself is wrong, incomplete, or unsupported. `accepted` is about the whole attempt, answer and
+derivation together. An attempt whose answer is right but whose derivation is weak -- a loose filter, an unverified
+position, a shortcut that happened to land correctly -- is `accepted: false` with `answer_wrong: false`. Never set
+`answer_wrong` true while stating the answer is correct.
+
+This distinction decides what happens next. `answer_wrong: true` discards the answer and forces a fresh plan;
+`answer_wrong: false` keeps the answer and records your concern. Replanning a correct answer usually replaces it with
+a worse one, so reserve it for answers you can show are wrong.
+
+Return JSON only with `accepted` (boolean), `answer_wrong` (boolean), `score` (0.0-1.0), and concise `feedback`.
+State what a corrected plan must inspect or calculate. Do not solve the question yourself.
 """
 
 FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE = """User Question:
