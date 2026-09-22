@@ -75,9 +75,15 @@ class TokenCountingLLM:
                 "token_capped": bool(getattr(response, "token_capped", False)),
                 "success": True,
                 "error_type": None,
-                # Records whether the schema constraint actually reached this server.
-                "structured_mode": getattr(
-                    self.client, "structured_output_mode", "unsupported"
+                # What this call actually did, not what the client is capable of. The
+                # earlier version reported the client's mode attribute whether or not a
+                # schema was attached, which read as "constrained" through a whole run
+                # that sent no schema at all.
+                "schema_sent": response_schema is not None,
+                "structured_mode": (
+                    getattr(self.client, "structured_output_mode", "unsupported")
+                    if response_schema is not None
+                    else "off"
                 ),
             }
         )

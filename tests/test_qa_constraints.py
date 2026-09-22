@@ -645,3 +645,45 @@ def test_the_warm_start_does_not_rebuild_what_the_runner_preloaded():
     assert list(before.columns) == list(
         runner.env.execution_namespace["table_df"].columns
     )
+
+
+def test_the_warm_start_leaves_a_worked_example_behind():
+    """The subtask it replaced left two things: a printed cell and an accepted attempt.
+    Only seeding both keeps the first inspection from opening with no examples at all."""
+    from TableAgent.stages.qa import TableQARunner
+    from tests.mock_policy import MockActionPolicy
+
+    runner = TableQARunner(STRUCTURE_PATH, WORKBOOK_PATH, policy=MockActionPolicy())
+    table_id = runner.env.default_table_id()
+    runner._set_active_tables([table_id])
+    assert runner.env.experience_pool.format(subtask_id="first_inspect") == "No previous experience."
+
+    runner._warm_start_notebook(table_id)
+
+    formatted = runner.env.experience_pool.format(subtask_id="first_inspect")
+    assert formatted != "No previous experience."
+    assert "read_table_as_dataframe" in formatted or "table_df" in formatted
+
+
+def test_a_call_reports_whether_it_actually_carried_a_schema():
+    """The metric used to read the client's capability, so a run that sent no schema at
+    all still reported itself as constrained."""
+    from TableAgent.stages.qa.runner import TokenCountingLLM
+
+    class _Client:
+        structured_output_mode = "response_format"
+
+        def generate(self, prompt, system_prompt=None, response_schema=None):
+            class _R:
+                content = "{}"
+                prompt_tokens = completion_tokens = 0
+
+            return _R()
+
+    client = TokenCountingLLM(_Client())
+    client.generate("p")
+    client.generate("p", response_schema={"type": "object"})
+    plain, constrained = client.call_metrics()
+    assert plain["schema_sent"] is False and plain["structured_mode"] == "off"
+    assert constrained["schema_sent"] is True
+    assert constrained["structured_mode"] == "response_format"

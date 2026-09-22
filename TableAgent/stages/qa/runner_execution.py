@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from TableAgent.stages.qa.experience import ExperienceRecord
 from TableAgent.stages.qa.models.results import AgentOutput, QAResult
 from TableAgent.stages.qa.models.subtask import SubTask
 
@@ -276,6 +277,22 @@ class QAExecutionMixin:
             "print(table_df.head(5))\n"
         )
         output, error, success, _ = self.env.execute_code(code, cell_id="warm_start")
+        if success:
+            # Also seed the experience pool. The subtask this replaced left two things
+            # behind, and the printed cell was only one of them: its accepted attempt was
+            # the first worked example every later subtask could copy operator usage
+            # from. Without it the first inspection opened with an empty example block in
+            # 98.7% of runs -- the same starvation that measurably raised execution
+            # errors when the pool was first scoped by subtask.
+            self.env.experience_pool.add(ExperienceRecord(
+                subtask_id="warm_start",
+                description=f"Load and preview table {table_id!r} before inspection.",
+                code=code,
+                observation=output,
+                reasoning="Deterministic first look at the selected table.",
+                score=1.0,
+                round=0,
+            ))
         self.env.logger.log_event(
             "warm_start",
             {"table_id": table_id, "success": success, "error": error[:500] if error else None},
