@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -86,8 +85,7 @@ class StructurePipeline(RuntimeComponent):
                         or self.settings.structure_cache_dir
                     )
                     table_part = safe_name(sample.table_id or sample.sample_id)[:80] or "table"
-                    digest = hashlib.sha256(sample.sample_id.encode("utf-8")).hexdigest()[:8]
-                    key = f"{table_part}_{digest}"
+                    key = f"{table_part}/unknown"
                     records.append(
                         StructureCacheRecord(
                             key=key,
@@ -112,10 +110,7 @@ class StructurePipeline(RuntimeComponent):
                     )
                     sheet_part = safe_name(candidate.sheet_name or candidate.directory.name)[:40] or "sheet"
                     table_part = safe_name(workbook_stem or sample.table_id or "table")[:80] or "table"
-                    digest = hashlib.sha256(
-                        str(candidate.directory.resolve()).encode("utf-8")
-                    ).hexdigest()[:8]
-                    key = f"{table_part}_{sheet_part}_{digest}"
+                    key = f"{table_part}/{sheet_part}"
                     verification = prepared_verification(candidate.directory)
                     records.append(
                         StructureCacheRecord(

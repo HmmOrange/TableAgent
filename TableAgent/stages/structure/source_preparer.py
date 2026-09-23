@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -21,7 +20,7 @@ from TableAgent.stages.structure.layout.parsing import _is_valid_structure
 
 from .retrieval_artifacts import write_sheet_retrieval_cards
 
-LAYOUT_WORKFLOW_VERSION = 7
+LAYOUT_WORKFLOW_VERSION = 1
 
 
 class SourcePreparer:
@@ -69,7 +68,7 @@ class SourcePreparer:
         for source_path in self._source_paths(samples):
             identity = self._workbook_identity(samples, source_path)
             workbook_name = str(identity.get("name") or source_path.name)
-            source_hash = str(identity.get("sha256") or self._sha256(source_path))
+            source_hash = str(identity.get("sha256") or "")
             artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir
             try:
                 self._progress("prepare_extract", workbook=source_path.name)
@@ -192,12 +191,8 @@ class SourcePreparer:
         source_hash: str | None = None,
     ) -> Path:
         artifact_dir = self.settings.source_artifact_dir or self.settings.artifact_dir
-        workbook_dir = workbook_artifact_dir(
-            artifact_dir,
-            workbook_name or source_path.name,
-            source_hash or self._sha256(source_path),
-        )
-        return sheet_artifact_dir(workbook_dir, sheet_name)
+        table_name = safe_name(workbook_name or source_path.stem or "table")[:80] or "table"
+        return artifact_dir / table_name / (safe_name(sheet_name)[:120] or "sheet")
 
     @staticmethod
     def _source_paths(samples: list[EvalSample]) -> list[Path]:
@@ -243,8 +238,6 @@ class SourcePreparer:
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return False
-        if metadata.get("layout_workflow_version") != LAYOUT_WORKFLOW_VERSION:
             return False
         cached = structure_path.read_text(encoding="utf-8")
         if _is_valid_structure(cached):
@@ -294,11 +287,9 @@ class SourcePreparer:
         payload = {
             "workbook_path": str(source_path.resolve()),
             "workbook_name": workbook_name or source_path.name,
-            "workbook_sha256": source_hash,
             "sheet_name": sheet_name,
             "safe_filename": safe_name(source_path.name),
             "safe_sheetname": safe_name(sheet_name),
-            "layout_workflow_version": LAYOUT_WORKFLOW_VERSION,
             "used_range": metadata.used_range,
             "merged_ranges": metadata.merged_ranges,
         }
@@ -325,11 +316,3 @@ class SourcePreparer:
         except Exception as exc:
             if logger:
                 logger.error("TableAgent retrieval card export failed for %s:%s: %s", source_path, sheet_name, exc)
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
