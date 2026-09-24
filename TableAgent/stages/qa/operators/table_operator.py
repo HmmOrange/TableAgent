@@ -28,7 +28,9 @@ class TableOperators(BaseOperator):
     examples = (
         "operators.read_group(table_id, group_id) -> list[list[Any]]  # the group's visible label cells",
         "operators.read_group_data(table_id, group_id) -> list[list[Any]]  # the records the group owns",
-        "operators.find_in_group(table_id, group_id, query) -> list[tuple[Cell, Any]]",
+        "operators.find_in_group(table_id, group_id, query) -> list[tuple[Cell, Any]]  "
+        "# searches the records the group owns, not just its label cell",
+        "operators.group_search_range(table_id, group_id) -> CellRange | None  # the region find_in_group scans",
         "operators.resolve_group_rows(df, table_id, group_id) -> list[int]  # positional rows owned by the group",
         "operators.group_row_mask(df, table_id, group_id) -> pandas.Series  # boolean row mask for the group",
         "operators.filter_in_group(table_id, group_id, header_id, gte=1) -> AxisSelection",
@@ -111,23 +113,68 @@ class TableOperators(BaseOperator):
         group = self._require_group(table_id, group_id)
         return self._workbook.read_range(group.data_range) if group.data_range else []
 
+    def _table_bounds(self, table_id: str) -> Optional[CellRange]:
+        """Bounding range covered by a table's verified header and data ranges."""
+        ranges = [
+            cell_range
+            for header in self.list_headers(table_id)
+            for cell_range in (header.header_range, header.data_range)
+            if cell_range is not None
+        ]
+        if not ranges:
+            return None
+        return CellRange(
+            min(cell_range.start_row for cell_range in ranges),
+            min(cell_range.start_col for cell_range in ranges),
+            max(cell_range.end_row for cell_range in ranges),
+            max(cell_range.end_col for cell_range in ranges),
+            ranges[0].sheet,
+        )
+
+    def group_search_range(self, table_id: str, group_id: str) -> Optional[CellRange]:
+        """The worksheet region a group owns, as `find_in_group` searches it.
+
+        A row-axis group owns whole rows, so its search region spans the table's full
+        column extent rather than whatever columns `data_range` happens to list. Both
+        matter: `group_range` is usually the single label cell, and `data_range` omits
+        the row-label column for roughly a third of the extracted groups, so searching
+        either one alone cannot find a record inside the section.
+        """
+        group = self._require_group(table_id, group_id)
+        spans = [r for r in (group.group_range, group.data_range) if r is not None]
+        if not spans:
+            return None
+        row_start = min(r.start_row for r in spans)
+        row_end = max(r.end_row for r in spans)
+        col_start = min(r.start_col for r in spans)
+        col_end = max(r.end_col for r in spans)
+        sheet = spans[0].sheet
+        axis = str(getattr(group, "axis", "") or "").strip().lower()
+        bounds = self._table_bounds(table_id)
+        if bounds is not None:
+            if axis == "row":
+                col_start, col_end = bounds.start_col, bounds.end_col
+            elif axis == "column":
+                row_start, row_end = bounds.start_row, bounds.end_row
+        return CellRange(row_start, col_start, row_end, col_end, sheet)
+
     def find_in_group(self, table_id: str, group_id: str, query: str) -> list[tuple[Cell, Any]]:
         import re
         import unicodedata
 
-        group = self._require_group(table_id, group_id)
-        if group.group_range is None:
+        search_range = self.group_search_range(table_id, group_id)
+        if search_range is None:
             return []
         normalized_query = " ".join(re.findall(
             r"[\w]+", unicodedata.normalize("NFKC", str(query)).casefold(), flags=re.UNICODE
         ))
-        worksheet = self.env.get_sheet(group.group_range.sheet) or self.env.get_active_sheet()
+        worksheet = self.env.get_sheet(search_range.sheet) or self.env.get_active_sheet()
         matches = []
         for row in worksheet.iter_rows(
-            min_row=group.group_range.start_row,
-            max_row=group.group_range.end_row,
-            min_col=group.group_range.start_col,
-            max_col=group.group_range.end_col,
+            min_row=search_range.start_row,
+            max_row=min(search_range.end_row, worksheet.max_row),
+            min_col=search_range.start_col,
+            max_col=min(search_range.end_col, worksheet.max_column),
         ):
             for cell in row:
                 normalized_value = " ".join(re.findall(
@@ -157,22 +204,10 @@ class TableOperators(BaseOperator):
         so leave it off when other code depends on row offsets.
         """
         headers = self.list_headers(table_id)
-        ranges = [
-            cell_range
-            for header in headers
-            for cell_range in (header.header_range, header.data_range)
-            if cell_range is not None
-        ]
-        if not ranges:
+        table_range = self._table_bounds(table_id)
+        if table_range is None:
             return pd.DataFrame()
-        sheet = ranges[0].sheet
-        table_range = CellRange(
-            min(cell_range.start_row for cell_range in ranges),
-            min(cell_range.start_col for cell_range in ranges),
-            max(cell_range.end_row for cell_range in ranges),
-            max(cell_range.end_col for cell_range in ranges),
-            sheet,
-        )
+        sheet = table_range.sheet
         if not has_headers:
             frame = self._workbook.read_range_as_dataframe(table_range, has_headers=False)
             return self._annotate_sections(

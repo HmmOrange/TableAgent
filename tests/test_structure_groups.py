@@ -316,3 +316,66 @@ def test_groups_reach_planner_and_react_prompts(tmp_path: Path):
         assert "Exact label matches" in hints and "group_id=men" in hints
     finally:
         env.workbook.close()
+
+
+def test_find_in_group_searches_the_records_the_group_owns(tmp_path: Path):
+    from TableAgent.utils import range_to_a1
+
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        # A row-axis group owns whole rows, so the search region spans the table's columns
+        # even though `data_range` lists only B:C.
+        assert range_to_a1(env.operators.group_search_range("employment", "men")) == "A2:B4"
+        assert range_to_a1(env.operators.group_search_range("employment", "women")) == "A5:B6"
+
+        # "Participation rate" appears in both sections; the search must stay in one.
+        men = env.operators.find_in_group("employment", "men", "Participation rate")
+        women = env.operators.find_in_group("employment", "women", "Participation rate")
+        assert [cell.row for cell, _ in men] == [3]
+        assert [cell.row for cell, _ in women] == [6]
+
+        # A record that belongs to the other section must not leak in.
+        assert env.operators.find_in_group("employment", "women", "Population") == []
+        assert [cell.row for cell, _ in env.operators.find_in_group("employment", "men", "Population")] == [4]
+    finally:
+        env.workbook.close()
+
+
+def test_table_routing_scores_structure_groups(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        # "Women" names a group and no header, table name, or description.
+        assert [str(ref) for ref in env.operators.find_tables("Women", top_k=2)] == ["employment"]
+        assert "structure groups" in env.operators.operator_catalog()
+    finally:
+        env.workbook.close()
+
+
+def test_group_hints_ignore_stopword_only_overlap(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        # The group descriptions read "Statistics for men."; sharing only "for" with the
+        # question is not evidence that the question is about that section.
+        assert question_group_hints(env, "Report for 2024", ["employment"]) == (
+            "No group matched this question."
+        )
+        assert "group_id=men" in question_group_hints(env, "How many men participated", ["employment"])
+    finally:
+        env.workbook.close()
+
+
+def test_header_hints_carry_ranges_like_group_hints(tmp_path: Path):
+    from TableAgent.stages.qa.header_hints import question_header_hints
+
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        hints = question_header_hints(env, "What is the Value recorded", ["employment"])
+        assert "header_id=value" in hints
+        assert "header_range=B1" in hints
+        assert "data_range=B2:B6" in hints
+    finally:
+        env.workbook.close()

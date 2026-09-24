@@ -11,7 +11,9 @@ class TableRoutingOperator(BaseOperator):
     """Route questions or subtasks to tables using verified structure metadata."""
 
     name = "multitab.routing"
-    description = "Rank relevant table ids from names, descriptions, and verified headers."
+    description = (
+        "Rank relevant table ids from names, descriptions, verified headers, and structure groups."
+    )
     examples = (
         "operators.find_tables(query, top_k=2) -> list[str]",
         "operators.retrieve_tables(query, top_k=2) -> list[TableCandidate]",
@@ -99,6 +101,15 @@ class TableRoutingOperator(BaseOperator):
                 header_text = f"{header.id} {header.label} {header.description}"
                 score += 2.0 * _lexical_overlap_score(query_text, header_text)
                 if header.label and header.label.lower() in query_lower:
+                    score += 10.0
+
+            # A question can name the worksheet section it wants without naming any header
+            # ("how many Census divisions..."). Scoring groups alongside headers keeps such
+            # a question from being routed on table name alone.
+            for group in self.env.operators.list_groups(table_id):
+                group_text = f"{group.id} {group.label} {group.description}"
+                score += 2.0 * _lexical_overlap_score(query_text, group_text)
+                if group.label and group.label.lower() in query_lower:
                     score += 10.0
 
             if score > min_score:

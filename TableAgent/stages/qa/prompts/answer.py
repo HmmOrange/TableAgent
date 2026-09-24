@@ -3,7 +3,8 @@ ANSWER_SYSTEM_PROMPT = (
     "verified structure YAML to answer concisely. Output only the final answer. "
     "Do not include explanation, steps, or introductory/concluding remarks. "
     "Treat each verified header as authoritative: never attribute a value to a neighboring or semantically similar "
-    "header."
+    "header. Keep the same discipline for structure groups: a value read inside one worksheet section must not be "
+    "reported under another section's label."
 )
 
 ANSWER_USER_PROMPT_TEMPLATE = """\

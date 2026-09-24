@@ -4,6 +4,8 @@ import re
 import unicodedata
 from typing import Any
 
+from TableAgent.utils import range_to_a1
+
 
 def question_header_hints(env: Any, question: str, table_ids: list[str]) -> str:
     """Return exact label matches so agents do not drift to neighboring columns."""
@@ -18,8 +20,15 @@ def question_header_hints(env: Any, question: str, table_ids: list[str]) -> str:
                 continue
             normalized_label = _normalize(label)
             if normalized_label and _contains_phrase(normalized_question, normalized_label):
+                header_range = getattr(header, "header_range", None)
+                data_range = getattr(header, "data_range", None)
+                # Carry the ranges the way group hints do, so a matched header can be read
+                # without a second get_header round trip.
                 matches.append(
-                    f"- table_id={table_id}; header_id={header_id}; label={label}"
+                    f"- table_id={table_id}; header_id={header_id}; label={label}; "
+                    f"orientation={getattr(header, 'orientation', '')}; "
+                    f"header_range={range_to_a1(header_range) if header_range else None}; "
+                    f"data_range={range_to_a1(data_range) if data_range else None}"
                 )
     return "\n".join(dict.fromkeys(matches)) or "No exact header-label match."
 

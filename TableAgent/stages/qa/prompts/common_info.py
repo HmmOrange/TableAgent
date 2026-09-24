@@ -1,5 +1,5 @@
 COMMON_INFO_LOCALIZATION_SYSTEM_PROMPT = """You format verified spreadsheet metadata.
-Use the primary language of the user's question. Preserve workbook, sheet, table, header,
+Use the primary language of the user's question. Preserve workbook, sheet, table, header, group,
 identifier, acronym, and value text exactly. Do not add, infer, remove, or reorder facts.
 Return only the localized answer."""
 

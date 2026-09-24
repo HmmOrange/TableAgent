@@ -6,9 +6,25 @@ from TableAgent.stages.qa.header_hints import _contains_phrase, _normalize
 from TableAgent.utils import range_to_a1
 
 
+#: Tokens that carry no topical signal. Length alone does not exclude them -- "and" is
+#: three characters, and on its own it was enough to surface an unrelated section as a
+#: lead while the section the question actually named scored zero.
+_STOPWORDS = frozenset({
+    "all", "also", "and", "any", "are", "both", "but", "did", "does", "each", "for",
+    "from", "had", "has", "have", "how", "into", "its", "many", "more", "most", "much",
+    "not", "one", "only", "out", "over", "per", "some", "than", "that", "the", "their",
+    "then", "there", "these", "they", "this", "those", "two", "use", "was", "were",
+    "what", "when", "where", "which", "who", "whose", "with", "within", "would",
+})
+
+
 def _content_tokens(text: str) -> set[str]:
-    """Tokens worth matching on; short ones make unrelated sections look confident."""
-    return {token for token in text.split() if len(token) >= 3}
+    """Tokens worth matching on; short and common words make unrelated sections look confident."""
+    return {
+        token
+        for token in text.split()
+        if len(token) >= 3 and token not in _STOPWORDS
+    }
 
 
 def question_group_hints(
