@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import threading
@@ -15,14 +14,8 @@ from TableAgent.pipeline.sample import EvalSample
 from TableAgent.configs import TableAgentConfig
 from TableAgent.stages.structure.metadata import SheetMetadata
 from TableAgent.utils.paths import safe_name
-from TableAgent.stages.structure.structure_prompts import LAYOUT_MAS_SYSTEM_PROMPT, LAYOUT_MAS_USER_PROMPT_TEMPLATE
-from TableAgent.stages.structure.layout.direction_prompts import (
-    DIRECTION_SYSTEM_PROMPT,
-    DIRECTION_USER_PROMPT_TEMPLATE,
-)
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 
-CACHE_SCHEMA_VERSION = 6
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -57,7 +50,16 @@ class StructureCache:
         self.metadata_for_workbook_sheet = metadata_for_workbook_sheet
         self.progress_callback = progress_callback
         namespace = safe_name(settings.cache_namespace) or "default"
-        self.root = settings.structure_cache_dir / f"v{CACHE_SCHEMA_VERSION}" / "datasets" / namespace
+        configured_root = Path(settings.structure_cache_dir)
+        if configured_root.name == namespace and configured_root.parent.name == "datasets":
+            self.root = configured_root
+            # Web requests may normalize a direct cache root to this scoped path
+            # before the cache loader sees it. Keep the original parent available
+            # for direct <table>/<sheet> cache entries.
+            self._legacy_root: Path | None = configured_root.parent.parent
+        else:
+            self.root = configured_root / "datasets" / namespace
+            self._legacy_root = configured_root
 
     def set_progress_callback(self, callback: Callable[..., None] | None) -> None:
         self.progress_callback = callback
@@ -65,16 +67,15 @@ class StructureCache:
     def prepare(self, sample: EvalSample, *, force: bool) -> StructureCacheRecord:
         if self.workflow is None:
             raise RuntimeError("Verification requires a configured layout VLM client")
-        source_path, source_format, source_hash = self._materialize_source(sample)
+        source_path, source_format, _ = self._materialize_source(sample)
         sheet_name = self._sheet_name(source_path)
-        entry_key = self._entry_name(source_path, sheet_name, source_hash)
-        recipe_key = self._recipe_key(source_hash, sheet_name)
-        directory = self._preferred_directory(sample, source_path, sheet_name, source_hash)
-        key = directory.name or entry_key
+        directory = self._preferred_directory(sample, source_path, sheet_name)
+        entry_key = f"{directory.parent.name}/{directory.name}"
+        key = entry_key
         existing = self._resolve_record(
             sample,
             source_path=source_path,
-            source_hash=source_hash,
+            source_hash="",
             sheet_name=sheet_name,
             preferred_directory=directory,
             preferred_key=entry_key,
@@ -89,14 +90,14 @@ class StructureCache:
                 status="cached",
             )
             if existing.directory != directory:
-                return self._promote_record(existing, directory, key=key, recipe_key=recipe_key)
+                return self._promote_record(existing, directory, key=key)
             return replace(existing, key=key) if existing.key != key else existing
 
         with self._lock(entry_key):
             existing = self._resolve_record(
                 sample,
                 source_path=source_path,
-                source_hash=source_hash,
+                source_hash="",
                 sheet_name=sheet_name,
                 preferred_directory=directory,
                 preferred_key=entry_key,
@@ -111,7 +112,7 @@ class StructureCache:
                     status="cached",
                 )
                 if existing.directory != directory:
-                    return self._promote_record(existing, directory, key=key, recipe_key=recipe_key)
+                    return self._promote_record(existing, directory, key=key)
                 return replace(existing, key=key) if existing.key != key else existing
 
             staging = directory.with_name(f".{directory.name}.staging-{threading.get_ident()}")
@@ -137,17 +138,13 @@ class StructureCache:
             if result.structure_text.strip():
                 structure_path.write_text(result.structure_text, encoding="utf-8")
             manifest = {
-                "cache_schema_version": CACHE_SCHEMA_VERSION,
                 "cache_key": key,
-                "recipe_key": recipe_key,
                 "source_format": source_format,
                 "source_path": str(source_path.resolve()),
-                "source_sha256": source_hash,
                 "source_name": source_path.name,
                 "table_id": sample.table_id,
                 "sheet_name": sheet_name,
                 "status": result.verification.get("status", "not_good"),
-                "workflow_version": 6,
                 "artifacts": {"structure": "structure.yaml", "workbook": "workbook.xlsx"},
             }
             (staging / "manifest.json").write_text(
@@ -168,7 +165,7 @@ class StructureCache:
                 directory,
                 key,
                 sheet_name,
-                source_hash=source_hash,
+                source_hash="",
                 cache_hit=False,
             ) or StructureCacheRecord(
                 key,
@@ -182,15 +179,15 @@ class StructureCache:
             )
 
     def load(self, sample: EvalSample) -> StructureCacheRecord | None:
-        source_path, _, source_hash = self._materialize_source(sample)
+        source_path, _, _ = self._materialize_source(sample)
         sheet_name = self._sheet_name(source_path)
-        entry_key = self._entry_name(source_path, sheet_name, source_hash)
-        directory = self._preferred_directory(sample, source_path, sheet_name, source_hash)
-        key = directory.name or entry_key
+        directory = self._preferred_directory(sample, source_path, sheet_name)
+        entry_key = f"{directory.parent.name}/{directory.name}"
+        key = entry_key
         record = self._resolve_record(
             sample,
             source_path=source_path,
-            source_hash="" if self.settings.trust_structure_cache_path else source_hash,
+            source_hash="",
             sheet_name=sheet_name,
             preferred_directory=directory,
             preferred_key=entry_key,
@@ -218,21 +215,11 @@ class StructureCache:
                     candidate = Path(str(original))
                     if candidate.is_file():
                         hash_path = candidate
-            return source_path, "xlsx", self._sha256(hash_path)
+            return source_path, "xlsx", ""
         temporary = self.root / ".inputs" / f"{safe_name(sample.sample_id)}.xlsx"
         temporary.parent.mkdir(parents=True, exist_ok=True)
         sample_to_xlsx(sample, temporary)
-        source_payload = json.dumps(
-            {
-                "table_id": sample.table_id,
-                "table_content": sample.table_content,
-                "tables": sample.raw.get("tables"),
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-            default=str,
-        )
-        return temporary, "converted", hashlib.sha256(source_payload.encode("utf-8")).hexdigest()
+        return temporary, "converted", ""
 
     @staticmethod
     def _sheet_name(workbook_path: Path) -> str:
@@ -249,58 +236,17 @@ class StructureCache:
         sample: EvalSample,
         source_path: Path,
         sheet_name: str,
-        source_hash: str,
+        source_hash: str | None = None,
     ) -> Path:
         table_name = self._table_name(sample, source_path)
-        leaf_name = self._leaf_name(sample, source_path, sheet_name, source_hash)
-        return self.root / table_name / leaf_name
+        return self.root / table_name / (safe_name(sheet_name)[:120] or "sheet")
 
     def _table_name(self, sample: EvalSample, source_path: Path) -> str:
         return safe_name(sample.table_id or source_path.stem or sample.sample_id)[:80] or "table"
 
-    def _leaf_name(
-        self,
-        sample: EvalSample,
-        source_path: Path,
-        sheet_name: str,
-        source_hash: str,
-    ) -> str:
-        """Human-trackable cache leaf: <table_id>_<recipe_hash>."""
-        table_name = self._table_name(sample, source_path)
-        recipe_key = self._recipe_key(source_hash, sheet_name)
-        return f"{table_name}_{recipe_key}"
-
-    def _entry_name(self, source_path: Path, sheet_name: str, source_hash: str) -> str:
-        source_part = safe_name(source_path.name)[:80] or "source"
-        sheet_part = safe_name(sheet_name)[:40] or "sheet"
-        return f"{source_part}__{sheet_part}__{source_hash[:8]}"
-
-    def _recipe_key(self, source_hash: str, sheet_name: str) -> str:
-        payload = {
-            "schema": CACHE_SCHEMA_VERSION,
-            "source_sha256": source_hash,
-            "sheet_name": sheet_name,
-            "workflow_version": 6,
-            "viewport_rows": self.settings.viewport_rows,
-            "viewport_columns": self.settings.viewport_columns,
-            "shift_cells": self.settings.shift_cells,
-            "max_retry": self.settings.max_retry,
-            "structure_data_only": self.settings.structure_data_only,
-            "layout_model": self.settings.layout_model_identity,
-            "layout_prompt_sha256": hashlib.sha256(
-                (
-                    DIRECTION_SYSTEM_PROMPT
-                    + DIRECTION_USER_PROMPT_TEMPLATE
-                    + LAYOUT_MAS_SYSTEM_PROMPT
-                    + LAYOUT_MAS_USER_PROMPT_TEMPLATE
-                ).encode("utf-8")
-            ).hexdigest(),
-        }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
-
-    # Back-compat alias used by older tests/call sites.
+    # Back-compat alias used by older call sites; keys are now path based.
     def _key(self, source_hash: str, sheet_name: str) -> str:
-        return self._recipe_key(source_hash, sheet_name)
+        return safe_name(sheet_name)[:120] or "sheet"
 
     def _resolve_record(
         self,
@@ -313,100 +259,26 @@ class StructureCache:
         preferred_key: str,
         cache_hit: bool,
     ) -> StructureCacheRecord | None:
-        candidates: list[Path] = []
-        seen: set[Path] = set()
+        record = self._read_record(
+            preferred_directory,
+            preferred_key,
+            sheet_name,
+            source_hash="",
+            cache_hit=cache_hit,
+        )
+        if record is not None or self._legacy_root is None:
+            return record
 
-        def add(path: Path | None) -> None:
-            if path is None:
-                return
-            try:
-                resolved = path.resolve()
-            except OSError:
-                resolved = path
-            if resolved in seen:
-                return
-            seen.add(resolved)
-            candidates.append(path)
-
-        def read_first(paths: list[Path]) -> StructureCacheRecord | None:
-            for directory in paths:
-                record = self._read_record(
-                    directory,
-                    preferred_key,
-                    sheet_name,
-                    source_hash=source_hash,
-                    cache_hit=cache_hit,
-                )
-                if record is not None and record.valid:
-                    return record
-            return None
-
-        table_name = self._table_name(sample, source_path)
-        structure_root = Path(self.settings.structure_cache_dir)
-        recipe_key = self._recipe_key(source_hash, sheet_name)
-        leaf_name = self._leaf_name(sample, source_path, sheet_name, source_hash)
-
-        add(preferred_directory)
-        add(self.root / table_name / leaf_name)
-        add(self.root / table_name / preferred_key)
-        # Legacy bare recipe/hash leaves from earlier cache layouts.
-        add(self.root / table_name / recipe_key)
-        add(structure_root / leaf_name)
-        add(structure_root / preferred_key)
-        add(structure_root / recipe_key)
-        add(structure_root / table_name / leaf_name)
-        add(structure_root / table_name / preferred_key)
-        add(structure_root / table_name / recipe_key)
-
-        hit = read_first(candidates)
-        if hit is not None:
-            return hit
-
-        # Fallback scan for legacy flat/run-local caches and materialized run folders.
-        search_roots = [self.root, structure_root]
-        if self.settings.trust_structure_cache_path:
-            # An explicitly selected cache path is authoritative, but still
-            # restrict discovery to the requested table to avoid loading a
-            # same-named sheet from another workbook.
-            trusted_roots = [root / table_name for root in search_roots]
-            search_roots = [root for root in trusted_roots if root.exists()] or search_roots
-        for root in search_roots:
-            if not root.exists():
-                continue
-            marker_paths = []
-            try:
-                marker_paths.extend(root.rglob("manifest.json"))
-                marker_paths.extend(root.rglob("metadata.json"))
-            except OSError:
-                continue
-            for marker_path in marker_paths:
-                # Ignore render sidecar metadata files such as table.metadata.json.
-                if marker_path.name == "metadata.json" and marker_path.stem != "metadata":
-                    continue
-                try:
-                    payload = json.loads(marker_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                payload_hash = str(
-                    payload.get("source_sha256")
-                    or payload.get("workbook_sha256")
-                    or ""
-                )
-                payload_sheet = str(payload.get("sheet_name") or "")
-                if source_hash and payload_hash and payload_hash != source_hash:
-                    continue
-                if payload_sheet and payload_sheet != sheet_name:
-                    continue
-                record = self._read_record(
-                    marker_path.parent,
-                    preferred_key,
-                    sheet_name,
-                    source_hash=source_hash,
-                    cache_hit=cache_hit,
-                )
-                if record is not None and record.valid:
-                    return record
-        return None
+        legacy_directory = self._legacy_root / self._table_name(sample, source_path) / (
+            safe_name(sheet_name)[:120] or "sheet"
+        )
+        return self._read_record(
+            legacy_directory,
+            f"{legacy_directory.parent.name}/{legacy_directory.name}",
+            sheet_name,
+            source_hash="",
+            cache_hit=cache_hit,
+        )
 
     def _promote_record(
         self,
@@ -414,7 +286,6 @@ class StructureCache:
         directory: Path,
         *,
         key: str,
-        recipe_key: str,
     ) -> StructureCacheRecord:
         if record.directory.resolve() == directory.resolve():
             return record
@@ -425,23 +296,16 @@ class StructureCache:
         manifest_path = directory / "manifest.json"
         metadata_path = directory / "metadata.json"
         manifest: dict[str, Any] = {}
-        source_hash = ""
         if manifest_path.is_file():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 manifest = {}
-            source_hash = str(manifest.get("source_sha256") or "")
         elif metadata_path.is_file():
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 metadata = {}
-            source_hash = str(
-                metadata.get("workbook_sha256")
-                or metadata.get("source_sha256")
-                or ""
-            )
             verification = metadata.get("verification")
             status = (
                 str(verification.get("status"))
@@ -449,22 +313,19 @@ class StructureCache:
                 else str(metadata.get("status") or record.status)
             )
             manifest = {
-                "cache_schema_version": CACHE_SCHEMA_VERSION,
                 "cache_key": key,
-                "recipe_key": recipe_key,
                 "source_format": "xlsx",
                 "source_path": str(
                     metadata.get("workbook_path")
                     or metadata.get("source_path")
                     or record.workbook_path
                 ),
-                "source_sha256": source_hash,
                 "sheet_name": str(metadata.get("sheet_name") or record.sheet_name),
                 "status": status,
                 "workflow_version": int(
                     metadata.get("layout_workflow_version")
                     or metadata.get("workflow_version")
-                    or CACHE_SCHEMA_VERSION
+                    or 1
                 ),
                 "artifacts": {
                     "structure": "structure.yaml",
@@ -486,13 +347,12 @@ class StructureCache:
                 except OSError:
                     pass
         manifest["cache_key"] = key
-        manifest["recipe_key"] = recipe_key
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         promoted = self._read_record(
             directory,
             key,
             record.sheet_name,
-            source_hash=source_hash,
+            source_hash="",
             cache_hit=True,
         )
         return promoted or StructureCacheRecord(
@@ -505,14 +365,6 @@ class StructureCache:
             str(manifest.get("status", record.status)),
             True,
         )
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     @staticmethod
     def _remove_tree_with_retry(path: Path, attempts: int = 8) -> None:
@@ -563,7 +415,6 @@ class StructureCache:
         payload: dict[str, Any] = {}
         status = "not_good"
         payload_sheet = ""
-        payload_hash = ""
         payload_key = ""
 
         if manifest_path.is_file():
@@ -572,7 +423,6 @@ class StructureCache:
             except (OSError, json.JSONDecodeError):
                 return None
             payload_sheet = str(payload.get("sheet_name") or "")
-            payload_hash = str(payload.get("source_sha256") or "")
             payload_key = str(payload.get("cache_key") or "")
             status = str(payload.get("status", "not_good"))
         elif metadata_path.is_file():
@@ -583,11 +433,6 @@ class StructureCache:
             except (OSError, json.JSONDecodeError):
                 return None
             payload_sheet = str(payload.get("sheet_name") or "")
-            payload_hash = str(
-                payload.get("workbook_sha256")
-                or payload.get("source_sha256")
-                or ""
-            )
             verification = payload.get("verification")
             if isinstance(verification, dict) and verification.get("status"):
                 status = str(verification.get("status"))
@@ -600,9 +445,6 @@ class StructureCache:
 
         if payload_sheet and payload_sheet != sheet_name:
             return None
-        if source_hash and payload_hash and payload_hash != source_hash:
-            return None
-
         workbook_path = directory / "workbook.xlsx"
         if not workbook_path.is_file():
             # Materialized run artifacts often keep the original workbook path.

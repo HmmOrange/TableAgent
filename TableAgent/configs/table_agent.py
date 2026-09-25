@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from TableAgent.configs.routing import RoutingConfig
+from TableAgent.utils.paths import safe_name
 
 
 @dataclass(frozen=True)
@@ -215,11 +216,18 @@ def run_scoped_table_agent_config(config: dict[str, Any], run_name: str) -> dict
     repeat_dir_template = str(agent_config.get("repeat_dir_template", "repeat_{run_id}"))
     run_artifact_dir = artifact_root / run_dir_template.format(run_name=run_name)
     structure_cache_dir = Path(str(agent_config.get("structure_cache_dir", "cache/table_agent/structure")))
+    namespace = safe_name(str(agent_config.get("cache_namespace", "default"))) or "default"
+    canonical_structure_root = (
+        structure_cache_dir
+        if structure_cache_dir.name == namespace and structure_cache_dir.parent.name == "datasets"
+        else structure_cache_dir / "datasets" / namespace
+    )
     agent_config.update({
         "artifact_dir": str(run_artifact_dir / repeat_dir_template.format(run_id=1)),
         "run_artifact_dir": str(run_artifact_dir),
         "source_artifact_dir": str(
-            agent_config.get("source_artifact_dir") or structure_cache_dir / "v5" / "prepared"
+            agent_config.get("source_artifact_dir")
+            or canonical_structure_root
         ),
         "repeat_dir_template": repeat_dir_template,
     })
