@@ -33,6 +33,7 @@ class SourcePreparer:
         self.analyze_sheet = analyze_sheet
         self.metadata_extractor = metadata_extractor or ExStructMetadataExtractor(settings.exstruct_mode)
         self.progress_callback = progress_callback
+        self.passthrough_exceptions: tuple[type[BaseException], ...] = ()
 
     def _progress(self, stage: str, **fields: Any) -> None:
         if self.progress_callback:
@@ -134,6 +135,8 @@ class SourcePreparer:
                     self._progress("prepare_layout", workbook=source_path.name, sheet=sheet_name, range=metadata.used_range)
                     structure_text = self.analyze_sheet(source_path, sheet_name, metadata, sheet_dir)
                 except Exception as exc:
+                    if isinstance(exc, self.passthrough_exceptions):
+                        raise
                     structure_text = ""
                     if logger:
                         logger.error("TableAgent layout workflow failed for %s:%s: %s", source_path, sheet_name, exc)

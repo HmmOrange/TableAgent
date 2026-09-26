@@ -57,8 +57,8 @@ class OpenAICompatibleLLM(BaseLLM):
         api_key: str | None = None,
         temperature: float = 0.0,
         max_tokens: int | None = None,
-        timeout_seconds: float = 180,
-        max_retries: int = 2,
+        timeout_seconds: float = 60,
+        max_retries: int = 0,
         retry_delay_seconds: float = 1,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
@@ -68,7 +68,7 @@ class OpenAICompatibleLLM(BaseLLM):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.max_tokens = max_tokens
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = min(60.0, max(1.0, timeout_seconds))
         self.max_retries = max(0, max_retries)
         self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.extra_headers = dict(extra_headers or {})
@@ -202,8 +202,8 @@ def create_model_client(
         api_key=model_config.get("api_key"),
         temperature=float(model_config.get("temperature", 0.0)),
         max_tokens=_optional_int(model_config.get("max_tokens")),
-        timeout_seconds=float(model_config.get("timeout_seconds", 180)),
-        max_retries=int(model_config.get("max_retries", 2)),
+        timeout_seconds=float(model_config.get("timeout_seconds", 60)),
+        max_retries=int(model_config.get("max_retries", 0)),
         retry_delay_seconds=float(model_config.get("retry_delay_seconds", 1)),
         extra_headers=model_config.get("headers"),
         extra_body=model_config.get("extra_body"),
@@ -295,7 +295,7 @@ def _model_gateway_error(
 def _safe_gateway_message(status_code: int | None, exc: BaseException) -> str:
     if status_code:
         return f"Model gateway request failed with HTTP {status_code}"
-    if isinstance(exc, requests.Timeout):
+    if _contains_timeout(exc):
         return "Model gateway request timed out"
     return "Model gateway connection failed"
 
@@ -311,14 +311,14 @@ def _fallback_error_metadata(
             True,
             "errors.model.queueOverloaded",
         )
-    if status_code in {408, 504} or isinstance(exc, requests.Timeout):
+    if status_code in {408, 504} or _contains_timeout(exc):
         return (
             "MODEL_RESPONSE_TIMEOUT",
             "timeout",
             True,
             "errors.model.responseTimeout",
         )
-    if status_code in {502, 503}:
+    if status_code in {409, 425, 500, 502, 503}:
         return (
             "MODEL_PROVIDER_UNAVAILABLE",
             "provider",
@@ -333,6 +333,23 @@ def _fallback_error_metadata(
             "errors.model.upstreamDisconnected",
         )
     return (None, None, None, None)
+
+
+def _contains_timeout(exc: BaseException) -> bool:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (requests.Timeout, TimeoutError)):
+            return True
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+        pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+    return False
 
 
 def _parse_retry_after(value: Any) -> int | None:
