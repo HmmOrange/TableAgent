@@ -57,7 +57,7 @@ class OpenAICompatibleLLM(BaseLLM):
         api_key: str | None = None,
         temperature: float = 0.0,
         max_tokens: int | None = None,
-        timeout_seconds: float = 60,
+        timeout_seconds: float = 180,
         max_retries: int = 0,
         retry_delay_seconds: float = 1,
         extra_headers: dict[str, str] | None = None,
@@ -68,7 +68,9 @@ class OpenAICompatibleLLM(BaseLLM):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.max_tokens = max_tokens
-        self.timeout_seconds = min(60.0, max(1.0, timeout_seconds))
+        # Not capped: a timeout bounds one request, and a slow but healthy
+        # model must not look like an outage that is retried forever.
+        self.timeout_seconds = max(1.0, timeout_seconds)
         self.max_retries = max(0, max_retries)
         self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.extra_headers = dict(extra_headers or {})
@@ -202,7 +204,7 @@ def create_model_client(
         api_key=model_config.get("api_key"),
         temperature=float(model_config.get("temperature", 0.0)),
         max_tokens=_optional_int(model_config.get("max_tokens")),
-        timeout_seconds=float(model_config.get("timeout_seconds", 60)),
+        timeout_seconds=float(model_config.get("timeout_seconds", 180)),
         max_retries=int(model_config.get("max_retries", 0)),
         retry_delay_seconds=float(model_config.get("retry_delay_seconds", 1)),
         extra_headers=model_config.get("headers"),
@@ -318,7 +320,7 @@ def _fallback_error_metadata(
             True,
             "errors.model.responseTimeout",
         )
-    if status_code in {409, 425, 500, 502, 503}:
+    if status_code in {425, 502, 503}:
         return (
             "MODEL_PROVIDER_UNAVAILABLE",
             "provider",

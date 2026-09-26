@@ -220,3 +220,35 @@ def test_openai_compatible_client_classifies_transport_errors(failure, expected_
 
     assert raised.value.error_code == expected_code
     assert raised.value.retryable is True
+
+
+@pytest.mark.parametrize("status_code", [409, 500])
+def test_openai_compatible_client_does_not_treat_logic_errors_as_outages(status_code):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = b"bad request state"
+    response.request = requests.Request(
+        "POST", "http://model.test/v1/chat/completions"
+    ).prepare()
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        max_retries=0,
+        session=FakeSession(response),
+    )
+
+    with pytest.raises(ModelGatewayRequestError) as raised:
+        client.generate("question")
+
+    assert raised.value.retryable is not True
+
+
+def test_openai_compatible_client_keeps_configured_timeout():
+    client = OpenAICompatibleLLM(
+        base_url="http://model.test/v1",
+        model_name="model-a",
+        timeout_seconds=300,
+        session=FakeSession(),
+    )
+
+    assert client.timeout_seconds == 300
