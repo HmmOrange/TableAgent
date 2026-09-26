@@ -10,6 +10,7 @@ from TableAgent.stages.qa.actions.common_info import CommonInfoSubtaskAction
 from TableAgent.stages.qa.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.stages.qa.actions.review import ReviewSubtaskAction
 from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+from TableAgent.stages.qa.actions.understand_question import UnderstandQuestionAction
 from TableAgent.stages.qa.agents.planner import TableQAPlanner
 from TableAgent.stages.qa.agents.react_agent import TableQAAgent
 from TableAgent.stages.qa.agents.synthesis_agent import TableQASynthesisAgent
@@ -218,6 +219,12 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
             TokenCountingLLM(llm_client) if llm_client is not None else None
         )
         self.planner = TableQAPlanner(self.env, llm_client=self.llm_client)
+        self.understanding_action = (
+            UnderstandQuestionAction(self.env, self.llm_client)
+            if self.llm_client is not None
+            and bool(self.settings.get("qa_question_understanding", True))
+            else None
+        )
 
         self.table_id = None
         if isinstance(config, dict):

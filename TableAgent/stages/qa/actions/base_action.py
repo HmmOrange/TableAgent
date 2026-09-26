@@ -44,6 +44,7 @@ class PlanGenerationRequest:
     table_id: Optional[str] = None
     failure_context: Optional[str] = None
     previous_plan: Optional[List[Dict[str, Any]]] = None
+    understanding: Optional[str] = None
 
 
 @dataclass(frozen=True)

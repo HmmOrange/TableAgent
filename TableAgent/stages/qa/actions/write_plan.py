@@ -183,6 +183,11 @@ class WriteQAPlanAction(BasePlanAction):
             "A group is a worksheet section that scopes a block of records: when the question targets one, "
             "plan to read evidence from inside its data_range rather than from the whole table."
         )
+        if request.understanding:
+            prompt += (
+                "\n\nQuestion understanding (guidance; verify against structure and workbook evidence):\n"
+                f"{request.understanding}"
+            )
         if request.failure_context:
             previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)
             prompt += (

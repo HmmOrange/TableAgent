@@ -1083,3 +1083,108 @@ def test_common_info_plan_uses_verified_metadata_route(tmp_path: Path):
         assert all("business data" in output.reasoning for output in result.subtask_outputs)
     finally:
         runner.close()
+
+
+class UnderstandingLLM(FakeLLM):
+    """Answer the understanding call and fail the first planner call to force a replan."""
+
+    def __init__(self, fail_understanding: bool = False):
+        super().__init__({})
+        self.fail_understanding = fail_understanding
+        self.planner_prompts = []
+        self.understanding_prompts = []
+
+    def generate(self, prompt: str, system_prompt: str = None) -> Any:
+        if "Excel Workbook Content" in prompt:
+            self.understanding_prompts.append(prompt)
+            if self.fail_understanding:
+                raise RuntimeError("understanding unavailable")
+            return LLMResponse(content="Intent: average of the score column.")
+        if "Table Structure Summaries" in prompt:
+            self.planner_prompts.append(prompt)
+            if len(self.planner_prompts) == 1:
+                return LLMResponse(content="not a plan")
+            return LLMResponse(content=_two_step_plan_json())
+        return super().generate(prompt, system_prompt)
+
+
+def _understanding_runner(llm, enabled: bool = True) -> TableQARunner:
+    settings = {} if enabled else {"qa_question_understanding": False}
+    return TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=llm,
+        policy=MockActionPolicy(),
+        config={"table_agent": settings},
+    )
+
+
+def test_question_understanding_runs_once_and_reaches_every_plan():
+    llm = UnderstandingLLM()
+    result = _understanding_runner(llm).run("What is the average score?")
+
+    assert result.success
+    assert result.replan_count == 1
+    assert len(llm.understanding_prompts) == 1
+    assert "What is the average score?" in llm.understanding_prompts[0]
+    assert "A1:" in llm.understanding_prompts[0]
+    assert len(llm.planner_prompts) == 2
+    assert all(
+        "Question understanding" in prompt and "Intent: average of the score column." in prompt
+        for prompt in llm.planner_prompts
+    )
+    event = next(e for e in result.logs if e.get("event_type") == "question_understanding")
+    assert event["content"] == "Intent: average of the score column."
+
+
+def test_question_understanding_can_be_disabled():
+    llm = UnderstandingLLM()
+    result = _understanding_runner(llm, enabled=False).run("What is the average score?")
+
+    assert result.success
+    assert llm.understanding_prompts == []
+    assert all("Question understanding" not in prompt for prompt in llm.planner_prompts)
+
+
+def test_question_understanding_failure_falls_back_to_plain_planning():
+    llm = UnderstandingLLM(fail_understanding=True)
+    result = _understanding_runner(llm).run("What is the average score?")
+
+    assert result.success
+    assert len(llm.understanding_prompts) == 1
+    assert all("Question understanding" not in prompt for prompt in llm.planner_prompts)
+    assert any(e.get("event_type") == "question_understanding_error" for e in result.logs)
+
+
+def test_workbook_preview_respects_budget_and_excluded_sheets():
+    import openpyxl
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    kept = workbook.active
+    kept.title = "Data"
+    for index in range(200):
+        kept.append([f"row{index}", index])
+    workbook.create_sheet("Hidden")["A1"] = "secret"
+
+    preview = workbook_preview(workbook, "book.xlsx", {"hidden"}, max_chars=200)
+
+    assert "Sheet: 'Data'" in preview
+    assert "Hidden" not in preview and "secret" not in preview
+    assert "| A1:row0 | B1:0 |" in preview
+    assert "A199:" not in preview
+
+
+def test_workbook_preview_caps_wide_rows_and_skips_chart_sheets():
+    import openpyxl
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    for _ in range(10):
+        workbook.active.append(["x" * 1000] * 100)
+    workbook.create_chartsheet("Chart")
+
+    body = workbook_preview(workbook, "book.xlsx", max_chars=5000)
+
+    assert "Chart" not in body
+    assert len(body) < 5000 + 200

@@ -87,6 +87,7 @@ table_agent:
   qa_instant_max_retries: 1
   qa_instant_generation_max_tokens: 2048
   qa_max_replans: 5
+  qa_question_understanding: true
   qa_max_experience_records: 5
   qa_log_path: null
   qa_max_observation_chars: 2000

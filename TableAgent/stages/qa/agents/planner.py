@@ -24,11 +24,13 @@ class TableQAPlanner:
         *,
         failure_context: str | None = None,
         previous_plan: list[dict[str, Any]] | None = None,
+        understanding: str | None = None,
     ) -> List[SubTask]:
         result = self.write_plan_action.run(PlanGenerationRequest(
             question=question,
             table_id=table_id,
             failure_context=failure_context,
             previous_plan=previous_plan,
+            understanding=understanding,
         ))
         return result.subtasks

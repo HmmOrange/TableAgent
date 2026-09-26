@@ -20,7 +20,8 @@ or invalid. The CLI can also receive prepared ingestion artifacts with `--artifa
 
 ```mermaid
 flowchart LR
-    A[Question + workbook + structure] --> B[Planner]
+    A[Question + workbook + structure] --> U[Optional question understanding]
+    U --> B[Planner]
     B --> C[Validate and sort DAG]
     C --> D[Table inspection]
     D --> E[Field inspection]
@@ -51,6 +52,8 @@ IDs, target names, and dependency variable names. Descriptive workbook or sheet 
 `TableQARunner`:
 
 1. Loads the workbook, primary structure, related sheet structures, and operator facade.
+   When `qa_question_understanding` is enabled, one LLM call clarifies the question against an A1-annotated workbook
+   preview (at most 40,000 characters) and the result is passed to every planning and replanning call.
 2. Requests a plan and repairs malformed planner JSON once.
 3. Inserts a table-selection task when multiple tables require routing.
 4. Validates duplicate IDs, missing dependencies, and dependency cycles.
@@ -123,6 +126,7 @@ The main QA controls are:
 | `qa_max_retries` | Maximum retry rounds for one subtask. |
 | `qa_max_replans` | Maximum complete-plan replacements after failures. |
 | `qa_final_answer_review` | Enable independent final-answer verification. |
+| `qa_question_understanding` | Clarify the question once before planning (default `true`). |
 | `qa_artifact_dir` | Directory for per-run QA artifacts. |
 | `qa_log_path` | Optional event log path. |
 | `qa_max_observation_chars` | Observation preview size. |

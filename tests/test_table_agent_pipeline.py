@@ -238,8 +238,8 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert "group_range" in layout_vlm.calls[2][0]
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert layout_vlm.calls[2][1].name == "worksheet.png"
-    assert output.metadata["qa"]["token_usage"] == {"prompt": 72, "completion": 12}
-    assert output.token_usage == {"prompt": 78, "completion": 13}
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 78, "completion": 13}
+    assert output.token_usage == {"prompt": 84, "completion": 14}
 
 
 def test_table_agent_repairs_unquoted_colon_text_end_to_end(tmp_path: Path):

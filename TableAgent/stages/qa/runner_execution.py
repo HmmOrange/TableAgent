@@ -36,6 +36,7 @@ class QAExecutionMixin:
         if table_id:
             self._set_active_tables([table_id])
 
+        understanding = self._understand_question(question)
         replan_count = 0
         planning_failure = None
         while True:
@@ -45,6 +46,7 @@ class QAExecutionMixin:
                     table_id=table_id,
                     failure_context=planning_failure,
                     previous_plan=[],
+                    understanding=understanding,
                 )
                 self._progress(
                     "[qa] planning done | subtasks="
@@ -180,6 +182,7 @@ class QAExecutionMixin:
                     table_id=table_id,
                     failure_context=failure_context,
                     previous_plan=self._plan_payload(plan),
+                    understanding=understanding,
                 )
             except Exception as exc:
                 error_msg = (
@@ -232,6 +235,23 @@ class QAExecutionMixin:
         self._persist_run_artifacts(result, run_dir, event_start_index)
         self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
         return result
+
+    def _understand_question(self, question: str) -> str | None:
+        """Run once per question so every (re)plan shares the same interpretation."""
+        if self.understanding_action is None:
+            return None
+        try:
+            understanding = self.understanding_action.run(question)
+        except Exception as exc:
+            self.env.logger.log_event(
+                "question_understanding_error", {"error": str(exc)}
+            )
+            return None
+        self.env.logger.log_event(
+            "question_understanding", {"content": understanding}
+        )
+        self._progress("[qa] question understanding done")
+        return understanding or None
 
     def _execute_plan(
         self,
