@@ -258,7 +258,17 @@ class WriteQAPlanAction(BasePlanAction):
                 subtask.metadata.setdefault("table_id", request.table_id)
 
         self.env.logger.log_event("planning_complete", {
-            "subtasks": [str(s) for s in subtasks],
+            "subtasks": [
+                {
+                    "id": s.id,
+                    "layer": s.layer,
+                    "category": s.category,
+                    "depends_on": list(s.depends_on),
+                    "description": s.description,
+                    "metadata": dict(s.metadata or {}),
+                }
+                for s in subtasks
+            ],
         })
         return PlanGenerationResult(subtasks=subtasks, raw_response=raw_response)
 

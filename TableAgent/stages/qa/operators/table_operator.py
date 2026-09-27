@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
+from openpyxl.utils import get_column_letter
 from TableAgent.domain.group import (
     SECTION_COLUMN,
     SECTION_LABEL_ROW_COLUMN,
@@ -18,6 +19,13 @@ from TableAgent.stages.qa.operators.filter_operator import FilterOperator
 from TableAgent.stages.qa.operators.multitab_operator import MultiTableOperator
 from TableAgent.stages.retrieval import TableCandidate
 
+def _normalize_label(value: Any) -> str:
+    """Compare labels across cell types: whitespace and case are ignored, 2023.0 reads as 2023."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return " ".join(str(value).split()).casefold()
+
+
 class TableOperators(BaseOperator):
     """
     Facade operator that delegates to structure, range, and workbook operators.
@@ -28,6 +36,10 @@ class TableOperators(BaseOperator):
     examples = (
         "operators.read_group(table_id, group_id) -> list[list[Any]]  # the group's visible label cells",
         "operators.read_group_data(table_id, group_id) -> list[list[Any]]  # the records the group owns",
+        "operators.intersect_group_with_header(table_id, group_id, header_id, include_group_label_row=False) "
+        "-> CellRange | None  # the same cells without rows holding the group's own label",
+        "operators.read_group_header_values(table_id, group_id, header_id) -> list[dict]  "
+        "# one record per row: row, is_group_label_row, values (per leaf header), other_fields (row labels)",
         "operators.find_in_group(table_id, group_id, query) -> list[tuple[Cell, Any]]  "
         "# searches the records the group owns, not just its label cell",
         "operators.group_search_range(table_id, group_id) -> CellRange | None  # the region find_in_group scans",
@@ -96,8 +108,68 @@ class TableOperators(BaseOperator):
     def get_group(self, table_id: str, group_id: str) -> Optional[StructureGroup]:
         return self._structure.get_group(table_id, group_id)
 
-    def intersect_group_with_header(self, table_id: str, group_id: str, header_id: str) -> Optional[CellRange]:
-        return self._structure.intersect_group_with_header(table_id, group_id, header_id)
+    def intersect_group_with_header(
+        self, table_id: str, group_id: str, header_id: str, *, include_group_label_row: bool = True
+    ) -> Optional[CellRange]:
+        """Cross a group with a header; optionally trim the group's label rows from the edges."""
+        cell_range = self._structure.intersect_group_with_header(table_id, group_id, header_id)
+        if include_group_label_row or cell_range is None:
+            return cell_range
+        group = self._require_row_group(table_id, group_id, "include_group_label_row=False")
+        label_rows = self._group_label_rows(group)
+        start, end = cell_range.start_row, cell_range.end_row
+        while start <= end and start in label_rows:
+            start += 1
+        while start <= end and end in label_rows:
+            end -= 1
+        if start > end:
+            return None
+        if any(start <= row <= end for row in label_rows):
+            raise ValueError(
+                f"Group {group_id!r} keeps its label row between its records, so it cannot be cut out "
+                "as one range; use operators.read_group_header_values(...) and its is_group_label_row flag."
+            )
+        return CellRange(start, cell_range.start_col, end, cell_range.end_col, cell_range.sheet)
+
+    def _require_row_group(self, table_id: str, group_id: str, usage: str) -> StructureGroup:
+        group = self._require_group(table_id, group_id)
+        if str(getattr(group, "axis", "") or "").strip().lower() != "row":
+            raise ValueError(f"Group {group_id!r} has axis {group.axis!r}; {usage} only applies to row-axis groups.")
+        return group
+
+    def _group_label_rows(self, group: StructureGroup) -> set[int]:
+        """Rows on which a row-axis group's label sits by itself.
+
+        The label is looked up in group_range cells outside the columns of the group's
+        data_range, or in every group_range column when data_range covers them all. A label
+        cell merged across several rows labels each of those records, so it marks no row.
+        """
+        label_range = group.group_range
+        if label_range is None:
+            return set()
+        columns = list(range(label_range.start_col, label_range.end_col + 1))
+        if group.data_range is not None:
+            outside = [
+                column for column in columns
+                if not group.data_range.start_col <= column <= group.data_range.end_col
+            ]
+            columns = outside or columns
+        sheet = (self.env.get_sheet(label_range.sheet) if label_range.sheet else None) or self.env.get_active_sheet()
+        multi_row_merges = [merged for merged in sheet.merged_cells.ranges if merged.max_row > merged.min_row]
+        label = _normalize_label(group.label)
+        rows = set()
+        for row in range(label_range.start_row, label_range.end_row + 1):
+            for column in columns:
+                value = sheet.cell(row, column).value
+                if value is None or _normalize_label(value) != label:
+                    continue
+                if any(
+                    merged.min_row <= row <= merged.max_row and merged.min_col <= column <= merged.max_col
+                    for merged in multi_row_merges
+                ):
+                    continue
+                rows.add(row)
+        return rows
 
     def _require_group(self, table_id: str, group_id: str) -> StructureGroup:
         group = self.get_group(table_id, group_id)
@@ -112,6 +184,69 @@ class TableOperators(BaseOperator):
     def read_group_data(self, table_id: str, group_id: str) -> List[List[Any]]:
         group = self._require_group(table_id, group_id)
         return self._workbook.read_range(group.data_range) if group.data_range else []
+
+    def read_group_header_values(self, table_id: str, group_id: str, header_id: str) -> List[dict[str, Any]]:
+        """One labeled record per row where a row-axis group crosses a header.
+
+        `values` holds the requested header's cells keyed by leaf header id, so a parent
+        header is split into its children. `other_fields` holds the row's non-empty cells
+        under every other leaf header that covers the row, which carries the row's labels.
+        `is_group_label_row` marks rows on which the group's own label sits; what such a
+        row means is left to the caller.
+        """
+        group = self._require_row_group(table_id, group_id, "read_group_header_values")
+        headers = {header.id: header for header in self.list_headers(table_id)}
+        if header_id not in headers:
+            raise ValueError(f"Header {header_id!r} was not found in table {table_id!r}.")
+        cell_range = self.intersect_group_with_header(table_id, group_id, header_id)
+        if cell_range is None:
+            raise ValueError(f"Group {group_id!r} and header {header_id!r} do not intersect in table {table_id!r}.")
+
+        requested_ids = self.resolve_header_columns(table_id, header_id)
+        requested = self._leaf_columns(headers, requested_ids)
+        if not requested:
+            raise ValueError(f"Header {header_id!r} in table {table_id!r} has no data_range to read.")
+        others = self._leaf_columns(
+            headers,
+            [key for key, header in headers.items() if not header.sub_headers and key not in requested_ids],
+        )
+        columns = [column for _, column, _ in requested + others]
+        first_col = min(columns)
+        block = self._workbook.read_range(
+            CellRange(cell_range.start_row, first_col, cell_range.end_row, max(columns), cell_range.sheet),
+            expand_merged=True,
+        )
+
+        label_rows = self._group_label_rows(group)
+        records = []
+        for offset, cells in enumerate(block):
+            row = cell_range.start_row + offset
+            records.append({
+                "row": row,
+                "is_group_label_row": row in label_rows,
+                "values": {key: cells[column - first_col] for key, column, _ in requested},
+                "other_fields": {
+                    key: cells[column - first_col]
+                    for key, column, data_range in others
+                    if data_range.start_row <= row <= data_range.end_row
+                    and cells[column - first_col] not in (None, "")
+                },
+            })
+        return records
+
+    @staticmethod
+    def _leaf_columns(headers: dict[str, Header], header_ids: List[str]) -> List[tuple[str, int, CellRange]]:
+        """(key, worksheet column, data_range) per leaf header, one key per column it spans."""
+        columns: List[tuple[str, int, CellRange]] = []
+        for header_id in header_ids:
+            header = headers.get(header_id)
+            data_range = header.data_range if header else None
+            if data_range is None:
+                continue
+            for column in range(data_range.start_col, data_range.end_col + 1):
+                key = header_id if data_range.start_col == data_range.end_col else f"{header_id}:{get_column_letter(column)}"
+                columns.append((key, column, data_range))
+        return columns
 
     def _table_bounds(self, table_id: str) -> Optional[CellRange]:
         """Bounding range covered by a table's verified header and data ranges."""

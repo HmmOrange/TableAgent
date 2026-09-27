@@ -710,6 +710,72 @@ def test_runner_persists_per_run_artifacts(tmp_path):
     with open(artifacts["answer_py"], "r", encoding="utf-8") as f:
         assert "final_answer" in f.read()
 
+    with open(artifacts["events_log"], "r", encoding="utf-8") as f:
+        events_log = f.read()
+    assert events_log.startswith("=" * 120 + "\n== SUMMARY")
+    assert "Attempt 1 (initial plan" in events_log
+    assert "-- SUBTASK 1/" in events_log
+    assert "EXECUTE CODE" in events_log
+    assert "LLM CALL" in events_log
+    with open(artifacts["events_jsonl"], "r", encoding="utf-8") as f:
+        planning = [
+            json.loads(line) for line in f if '"planning_complete"' in line
+        ]
+    assert isinstance(planning[0]["subtasks"][0], dict)
+
+
+def test_format_events_log_compacts_prompts_code_and_plan():
+    from TableAgent.stages.qa.events_log import format_events_log
+
+    base_prompt = "\n".join(f"context line {i}" for i in range(30))
+    code = "x = 1\nprint(x)"
+    events = [
+        {"timestamp": "2026-01-01T00:00:00", "event_type": "run_start", "question": "Q?"},
+        {"timestamp": "2026-01-01T00:00:00", "event_type": "planning_complete", "subtasks": [
+            {"id": "inspect_a", "layer": "inspect", "category": "normal",
+             "depends_on": [], "description": "Read column A."},
+        ]},
+        {"timestamp": "2026-01-01T00:00:01", "event_type": "subtask_start",
+         "subtask_id": "inspect_a", "layer": "inspect", "category": "normal"},
+        {"timestamp": "2026-01-01T00:00:01", "event_type": "generate_call",
+         "system_prompt": "SYS", "prompt": base_prompt + "\nround 1"},
+        {"timestamp": "2026-01-01T00:00:02", "event_type": "llm_call", "duration_ms": 1500,
+         "prompt_tokens": 1000, "completion_tokens": 50, "success": True},
+        {"timestamp": "2026-01-01T00:00:02", "event_type": "generate_response",
+         "content": '{"code": "x = 1\\nprint(x)"}'},
+        {"timestamp": "2026-01-01T00:00:02", "event_type": "generate_parsed",
+         "reasoning": "why", "code": code},
+        {"timestamp": "2026-01-01T00:00:03", "event_type": "execute_code",
+         "cell_id": "cell_1", "success": False, "code": code,
+         "stdout_preview": "1\n", "stdout_truncated": True, "stdout_chars": 2},
+        {"timestamp": "2026-01-01T00:00:03", "event_type": "generate_call",
+         "system_prompt": "SYS", "prompt": base_prompt + "\nround 2"},
+        {"timestamp": "2026-01-01T00:00:04", "event_type": "subtask_complete",
+         "subtask_id": "inspect_a", "success": True, "code": code},
+        {"timestamp": "2026-01-01T00:00:05", "event_type": "run_complete",
+         "success": True, "final_answer": "1", "execution_time": 5.0, "replan_count": 0},
+    ]
+
+    text = format_events_log(events)
+    body = text.split("== RUN", 1)[1]
+
+    assert "final answer: 1" in text
+    assert "llm calls: 1 (generate 1)" in text
+    assert "tokens: 1,000 in + 50 out = 1,050" in text
+    assert "inspect_a | inspect | -          | OK" in text
+    assert "1. Read column A." in text
+    assert "#005 [00:00:02.000 | t=2.00s | Δ1.00s] LLM CALL  1.50s · 1,000 in / 50 out tokens" in text
+    assert "response: (raw text omitted; parsed result in #007)" in text
+    assert "code: (shown with execution in #008)" in text
+    assert "code: (same as #008 code)" in text
+    assert body.count("x = 1") == 1
+    assert "system_prompt: (same as #004)" in text
+    assert "prompt (diff vs #004: +1 -1 lines)" in text
+    assert "│ -round 1" in text and "│ +round 2" in text
+    assert "more lines (full text: events.jsonl line 4)" in text
+    assert "stdout (truncated)" in text
+    assert "stdout_chars" not in text
+
 
 def test_llm_code_generation_repairs_invalid_json_response():
     from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest

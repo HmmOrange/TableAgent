@@ -25,8 +25,9 @@ if TYPE_CHECKING:
 class TokenCountingLLM:
     """Proxy an LLM client while accumulating token usage from its responses."""
 
-    def __init__(self, client: Any):
+    def __init__(self, client: Any, logger: Any = None):
         self.client = client
+        self.logger = logger
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.calls: list[dict[str, Any]] = []
@@ -52,6 +53,7 @@ class TokenCountingLLM:
                     "error_type": type(exc).__name__,
                 }
             )
+            self._log_call()
             raise
         self.prompt_tokens += int(getattr(response, "prompt_tokens", 0) or 0)
         self.completion_tokens += int(getattr(response, "completion_tokens", 0) or 0)
@@ -70,7 +72,12 @@ class TokenCountingLLM:
                 "error_type": None,
             }
         )
+        self._log_call()
         return response
+
+    def _log_call(self) -> None:
+        if self.logger is not None:
+            self.logger.log_event("llm_call", dict(self.calls[-1]))
 
     def token_usage(self) -> dict[str, int]:
         return {
@@ -216,7 +223,7 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
         )
 
         self.llm_client = (
-            TokenCountingLLM(llm_client) if llm_client is not None else None
+            TokenCountingLLM(llm_client, logger=self.env.logger) if llm_client is not None else None
         )
         self.planner = TableQAPlanner(self.env, llm_client=self.llm_client)
         self.understanding_action = (

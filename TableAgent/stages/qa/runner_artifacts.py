@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from TableAgent.stages.qa.events_log import format_events_log
 from TableAgent.stages.qa.models.results import QAResult
 from TableAgent.stages.qa.models.subtask import SubTask
 
@@ -30,12 +31,14 @@ class QAArtifactMixin:
         artifacts: dict[str, str] = {
             "run_dir": str(run_dir),
             "events_jsonl": str(run_dir / "events.jsonl"),
+            "events_log": str(run_dir / "events.log"),
             "plan_json": str(run_dir / "plan.json"),
             "result_json": str(run_dir / "result.json"),
             "cells_dir": str(cells_dir),
         }
 
         self._write_events_jsonl(run_dir / "events.jsonl", events)
+        (run_dir / "events.log").write_text(format_events_log(events), encoding="utf-8")
         self._write_json(
             run_dir / "plan.json",
             [self._subtask_to_dict(subtask) for subtask in result.plan],

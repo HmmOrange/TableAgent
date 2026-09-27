@@ -81,7 +81,8 @@ def get_structure_summary(env: Any, table_id: str) -> str:
         summary_lines.append(
             "  A group's group_range holds only its visible label; its data_range holds the records it owns. "
             "Cross a group with a header via operators.intersect_group_with_header(...) rather than "
-            "computing row offsets by hand."
+            "computing row offsets by hand; read the crossed cells with labels via "
+            "operators.read_group_header_values(...)."
         )
 
     relations = env.operators.list_relations(table_id) if hasattr(env, "operators") else []

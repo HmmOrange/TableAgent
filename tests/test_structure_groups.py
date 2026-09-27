@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import openpyxl
+import pytest
 import yaml
 
 from TableAgent.stages.qa.environment.qa_env import QAEnvironment
@@ -377,5 +378,360 @@ def test_header_hints_carry_ranges_like_group_hints(tmp_path: Path):
         assert "header_id=value" in hints
         assert "header_range=B1" in hints
         assert "data_range=B2:B6" in hints
+    finally:
+        env.workbook.close()
+
+
+def _labeled_env(tmp_path: Path, rows, headers, groups, *, merges=(), styles=None):
+    """Build a one-table environment from raw rows and structure entries."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    workbook_path = tmp_path / "labeled.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    for row in rows:
+        sheet.append(row)
+    for merged in merges:
+        sheet.merge_cells(merged)
+    for coordinate, apply in (styles or {}).items():
+        apply(sheet[coordinate])
+    workbook.save(workbook_path)
+
+    structure_path = tmp_path / "labeled.yaml"
+    structure_path.write_text(yaml.safe_dump({
+        "stats": {
+            "id": "stats",
+            "name": "Stats",
+            "description": "Synthetic statistics table.",
+            "sheet": "Sheet1",
+            "headers": headers,
+            "groups": groups,
+        }
+    }, sort_keys=False), encoding="utf-8")
+    return QAEnvironment(str(structure_path), str(workbook_path))
+
+
+def _leaf(header_id: str, header_range: str, data_range: str) -> dict:
+    return {
+        "id": header_id, "label": header_id, "description": header_id,
+        "orientation": "column", "header_range": header_range,
+        "data_range": data_range, "sub_headers": [],
+    }
+
+
+def _group(group_id: str, label: str, group_range: str, data_range: str, axis: str = "row") -> dict:
+    return {
+        "id": group_id, "label": label, "description": label, "axis": axis,
+        "group_range": group_range, "data_range": data_range,
+    }
+
+
+# A section whose own label row also carries the section's figures, followed by its breakdown.
+_SECTION_ROWS = [
+    ["Age", "Employed", "Unemployed"],
+    ["All ages", 300, 30],
+    ["Young", 100, 10],
+    ["Young, early", 60, 6],
+    ["Young, late", 40, 4],
+    ["Old", 200, 20],
+]
+_SECTION_HEADERS = [
+    _leaf("age", "A1", "A2:A6"),
+    _leaf("employed", "B1", "B2:B6"),
+    _leaf("unemployed", "C1", "C2:C6"),
+]
+_SECTION_GROUP = _group("all_ages", "All ages", "A2", "B2:C6")
+
+
+def test_group_header_values_mark_the_label_row_inside_the_block(tmp_path: Path):
+    env = _labeled_env(tmp_path, _SECTION_ROWS, _SECTION_HEADERS, [_SECTION_GROUP])
+    try:
+        records = env.operators.read_group_header_values("stats", "all_ages", "employed")
+        assert [record["row"] for record in records] == [2, 3, 4, 5, 6]
+        assert [record["is_group_label_row"] for record in records] == [True, False, False, False, False]
+        assert [record["values"] for record in records] == [
+            {"employed": 300}, {"employed": 100}, {"employed": 60}, {"employed": 40}, {"employed": 200},
+        ]
+        assert [record["other_fields"]["age"] for record in records] == [
+            "All ages", "Young", "Young, early", "Young, late", "Old",
+        ]
+        assert records[0]["other_fields"]["unemployed"] == 30
+        assert "employed" not in records[0]["other_fields"]
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_when_the_label_sits_outside_and_data_includes_the_label_column(tmp_path: Path):
+    rows = [
+        ["Item", "Amount"],
+        ["Revenues:", None],
+        ["Segment A", 10],
+        ["Segment B", 20],
+        ["Costs:", None],
+        ["Segment A", 4],
+    ]
+    headers = [_leaf("item", "A1", "A2:A6"), _leaf("amount", "B1", "B2:B6")]
+    groups = [
+        _group("revenues", "Revenues:", "A2", "A3:B4"),
+        _group("costs", "Costs:", "A5", "A6:B6"),
+    ]
+    env = _labeled_env(tmp_path, rows, headers, groups)
+    try:
+        records = env.operators.read_group_header_values("stats", "revenues", "amount")
+        assert [record["row"] for record in records] == [3, 4]
+        assert not any(record["is_group_label_row"] for record in records)
+        assert [(record["other_fields"]["item"], record["values"]["amount"]) for record in records] == [
+            ("Segment A", 10), ("Segment B", 20),
+        ]
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_expand_a_vertically_merged_group_label(tmp_path: Path):
+    rows = [
+        ["Sex", "Age", "Count"],
+        ["Men", "Young", 5],
+        [None, "Old", 7],
+        ["Women", "Young", 6],
+        [None, "Old", 8],
+    ]
+    headers = [_leaf("sex", "A1", "A2:A5"), _leaf("age", "B1", "B2:B5"), _leaf("count", "C1", "C2:C5")]
+    groups = [_group("men", "Men", "A2:A3", "C2:C3"), _group("women", "Women", "A4:A5", "C4:C5")]
+    env = _labeled_env(tmp_path, rows, headers, groups, merges=("A2:A3", "A4:A5"))
+    try:
+        records = env.operators.read_group_header_values("stats", "women", "count")
+        assert [record["other_fields"] for record in records] == [
+            {"sex": "Women", "age": "Young"}, {"sex": "Women", "age": "Old"},
+        ]
+        assert [record["values"] for record in records] == [{"count": 6}, {"count": 8}]
+        # A label merged across the records labels each of them; no row holds it by itself.
+        assert [record["is_group_label_row"] for record in records] == [False, False]
+        assert range_to_a1(env.operators.intersect_group_with_header(
+            "stats", "women", "count", include_group_label_row=False
+        )) == "C4:C5"
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_keep_numeric_labels_of_a_time_series(tmp_path: Path):
+    rows = [
+        ["Year", "Month", "Sales"],
+        [2023, "Jan", 100],
+        [None, "Feb", 110],
+        [2024, "Jan", 120],
+    ]
+    headers = [_leaf("year", "A1", "A2:A4"), _leaf("month", "B1", "B2:B4"), _leaf("sales", "C1", "C2:C4")]
+    groups = [_group("y2023", "2023", "A2", "B2:C3"), _group("y2024", "2024", "A4", "B4:C4")]
+    env = _labeled_env(tmp_path, rows, headers, groups)
+    try:
+        records = env.operators.read_group_header_values("stats", "y2023", "sales")
+        # The label row is a structural fact; whether it is a total or a record is not decided here.
+        assert [record["is_group_label_row"] for record in records] == [True, False]
+        assert records[0]["other_fields"] == {"year": 2023, "month": "Jan"}
+        assert records[1]["other_fields"] == {"month": "Feb"}
+        assert [record["values"]["sales"] for record in records] == [100, 110]
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_split_a_parent_header_into_its_leaves(tmp_path: Path):
+    rows = [
+        ["Group", "Private", None, None, "Government"],
+        [None, "Total", "Households", "Other", None],
+        ["All workers", 128, 1, 127, 21],
+    ]
+    headers = [
+        _leaf("group", "A1:A2", "A3:A3"),
+        {
+            "id": "private", "label": "Private", "description": "Private industries.",
+            "orientation": "column", "header_range": "B1:D1", "data_range": "B3:D3",
+            "sub_headers": [
+                _leaf("private_total", "B2", "B3:B3"),
+                _leaf("private_households", "C2", "C3:C3"),
+                _leaf("private_other", "D2", "D3:D3"),
+            ],
+        },
+        _leaf("government", "E1:E2", "E3:E3"),
+    ]
+    groups = [_group("all_workers", "All workers", "A3", "B3:E3")]
+    env = _labeled_env(tmp_path, rows, headers, groups)
+    try:
+        parent = env.operators.read_group_header_values("stats", "all_workers", "private")
+        assert list(parent[0]["values"].items()) == [
+            ("private_total", 128), ("private_households", 1), ("private_other", 127),
+        ]
+        assert parent[0]["other_fields"] == {"group": "All workers", "government": 21}
+
+        leaf = env.operators.read_group_header_values("stats", "all_workers", "private_other")
+        assert leaf[0]["values"] == {"private_other": 127}
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_ignore_cell_formatting(tmp_path: Path):
+    def indent(cell):
+        cell.alignment = openpyxl.styles.Alignment(indent=2)
+
+    def bold(cell):
+        cell.font = openpyxl.styles.Font(bold=True)
+
+    plain = _labeled_env(tmp_path / "plain", _SECTION_ROWS, _SECTION_HEADERS, [_SECTION_GROUP])
+    styled = _labeled_env(
+        tmp_path / "styled", _SECTION_ROWS, _SECTION_HEADERS, [_SECTION_GROUP],
+        styles={"A3": bold, "A4": indent, "A5": indent},
+    )
+    try:
+        assert (
+            styled.operators.read_group_header_values("stats", "all_ages", "employed")
+            == plain.operators.read_group_header_values("stats", "all_ages", "employed")
+        )
+    finally:
+        plain.workbook.close()
+        styled.workbook.close()
+
+
+def test_group_header_values_reject_unsupported_or_unknown_inputs(tmp_path: Path):
+    groups = [_SECTION_GROUP, _group("by_column", "By column", "B1", "B2:B6", axis="column")]
+    env = _labeled_env(tmp_path, _SECTION_ROWS, _SECTION_HEADERS, groups)
+    try:
+        with pytest.raises(ValueError, match="row-axis"):
+            env.operators.read_group_header_values("stats", "by_column", "employed")
+        with pytest.raises(ValueError, match="missing_group"):
+            env.operators.read_group_header_values("stats", "missing_group", "employed")
+        with pytest.raises(ValueError, match="missing_header"):
+            env.operators.read_group_header_values("stats", "all_ages", "missing_header")
+    finally:
+        env.workbook.close()
+
+
+def test_intersect_can_leave_out_the_group_label_row(tmp_path: Path):
+    env = _labeled_env(tmp_path, _SECTION_ROWS, _SECTION_HEADERS, [_SECTION_GROUP])
+    try:
+        default = env.operators.intersect_group_with_header("stats", "all_ages", "employed")
+        assert range_to_a1(default) == "B2:B6"
+        without_label = env.operators.intersect_group_with_header(
+            "stats", "all_ages", "employed", include_group_label_row=False
+        )
+        assert range_to_a1(without_label) == "B3:B6"
+    finally:
+        env.workbook.close()
+
+
+def test_intersect_without_label_row_is_unchanged_when_the_label_sits_outside(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        assert range_to_a1(env.operators.intersect_group_with_header(
+            "employment", "men", "value", include_group_label_row=False
+        )) == "B3:B4"
+    finally:
+        env.workbook.close()
+
+
+def test_group_label_row_is_the_row_holding_the_label_even_when_group_range_spans_the_section(tmp_path: Path):
+    rows = [
+        ["Metric", "Value"],
+        ["Men", 170],
+        ["Participation rate", 70],
+        ["Population", 100],
+    ]
+    headers = [_leaf("metric", "A1", "A2:A4"), _leaf("value", "B1", "B2:B4")]
+    groups = [_group("men", "Men", "A2:B4", "B2:B4")]
+    env = _labeled_env(tmp_path, rows, headers, groups)
+    try:
+        records = env.operators.read_group_header_values("stats", "men", "value")
+        assert [record["is_group_label_row"] for record in records] == [True, False, False]
+        assert range_to_a1(env.operators.intersect_group_with_header(
+            "stats", "men", "value", include_group_label_row=False
+        )) == "B3:B4"
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_leave_out_headers_that_do_not_cover_the_row(tmp_path: Path):
+    rows = [
+        ["Item", "Amount"],
+        ["Total", 30],
+        ["Part A", 10],
+        ["Part B", 20],
+        [None, None],
+        ["Note: figures in dollars", None],
+    ]
+    headers = [
+        _leaf("item", "A1", "A2:A4"),
+        _leaf("amount", "B1", "B2:B4"),
+        _leaf("note", "A6", "A6:A6"),
+    ]
+    env = _labeled_env(tmp_path, rows, headers, [_group("total", "Total", "A2", "B2:B4")])
+    try:
+        records = env.operators.read_group_header_values("stats", "total", "amount")
+        assert [record["other_fields"] for record in records] == [
+            {"item": "Total"}, {"item": "Part A"}, {"item": "Part B"},
+        ]
+    finally:
+        env.workbook.close()
+
+
+def test_group_label_matches_a_float_cell_holding_a_whole_number(tmp_path: Path):
+    rows = [["Year", "Month", "Sales"], [2023.0, "Jan", 100], [None, "Feb", 110]]
+    headers = [_leaf("year", "A1", "A2:A3"), _leaf("month", "B1", "B2:B3"), _leaf("sales", "C1", "C2:C3")]
+    env = _labeled_env(tmp_path, rows, headers, [_group("y2023", "2023", "A2", "B2:C3")])
+    try:
+        records = env.operators.read_group_header_values("stats", "y2023", "sales")
+        assert [record["is_group_label_row"] for record in records] == [True, False]
+    finally:
+        env.workbook.close()
+
+
+def test_group_label_is_not_matched_inside_the_group_data_columns(tmp_path: Path):
+    rows = [["Metric", "Value"], ["2023", None], ["Revenue", 2023], ["Cost", 7]]
+    headers = [_leaf("metric", "A1", "A2:A4"), _leaf("value", "B1", "B2:B4")]
+    env = _labeled_env(tmp_path, rows, headers, [_group("y2023", "2023", "A2:B4", "B3:B4")])
+    try:
+        records = env.operators.read_group_header_values("stats", "y2023", "value")
+        assert [record["row"] for record in records] == [3, 4]
+        assert not any(record["is_group_label_row"] for record in records)
+    finally:
+        env.workbook.close()
+
+
+def test_group_header_values_key_a_multi_column_leaf_by_column(tmp_path: Path):
+    rows = [["Region", "Rates", None], ["All", 1.5, 2.5], ["North", 1.0, 2.0]]
+    headers = [_leaf("region", "A1", "A2:A3"), _leaf("rates", "B1:C1", "B2:C3")]
+    env = _labeled_env(tmp_path, rows, headers, [_group("all", "All", "A2", "B2:C3")])
+    try:
+        records = env.operators.read_group_header_values("stats", "all", "rates")
+        assert [record["values"] for record in records] == [
+            {"rates:B": 1.5, "rates:C": 2.5}, {"rates:B": 1.0, "rates:C": 2.0},
+        ]
+    finally:
+        env.workbook.close()
+
+
+def test_intersect_refuses_to_cut_a_label_row_between_records(tmp_path: Path):
+    rows = [["Item", "Amount"], ["Part A", 10], ["Total", 30], ["Part B", 20]]
+    headers = [_leaf("item", "A1", "A2:A4"), _leaf("amount", "B1", "B2:B4")]
+    env = _labeled_env(tmp_path, rows, headers, [_group("total", "Total", "A3", "B2:B4")])
+    try:
+        with pytest.raises(ValueError, match="read_group_header_values"):
+            env.operators.intersect_group_with_header("stats", "total", "amount", include_group_label_row=False)
+        records = env.operators.read_group_header_values("stats", "total", "amount")
+        assert [record["is_group_label_row"] for record in records] == [False, True, False]
+    finally:
+        env.workbook.close()
+
+
+def test_label_row_trimming_and_reads_reject_non_row_groups_and_headers_without_data(tmp_path: Path):
+    # A header known only by a header_range that spans the records still has no cells to read.
+    headers = _SECTION_HEADERS + [{**_leaf("empty", "D1:D6", "D2:D6"), "data_range": None}]
+    groups = [_SECTION_GROUP, _group("by_column", "Employed", "B1", "B2:B6", axis="column")]
+    env = _labeled_env(tmp_path, _SECTION_ROWS, headers, groups)
+    try:
+        with pytest.raises(ValueError, match="row-axis"):
+            env.operators.intersect_group_with_header(
+                "stats", "by_column", "employed", include_group_label_row=False
+            )
+        with pytest.raises(ValueError, match="no data_range"):
+            env.operators.read_group_header_values("stats", "all_ages", "empty")
     finally:
         env.workbook.close()
