@@ -1254,3 +1254,81 @@ def test_workbook_preview_caps_wide_rows_and_skips_chart_sheets():
 
     assert "Chart" not in body
     assert len(body) < 5000 + 200
+
+
+class _PromptRecordingLLM:
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, prompt: str, system_prompt: str = None) -> Any:
+        self.prompts.append(prompt)
+        return LLMResponse(content=_llm_json({
+            "reasoning": "Record the prompt.",
+            "code": "selected_table_ids = [env.default_table_id()]\nfinal_answer = 1",
+            "description": "Recorded.",
+        }))
+
+
+@pytest.mark.parametrize("layer", ["table_inspect", "inspect", "synthesis"])
+@pytest.mark.parametrize("round_num", [1, 2])
+def test_code_generation_prompt_carries_the_planner_subtask_description(layer, round_num):
+    from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest
+    from TableAgent.stages.qa.actions.llm_code_generation import LLMCodeGenerationAction
+    from TableAgent.stages.qa.models.subtask import SubTask
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    goal = "Read the score of Alice only; do not aggregate other rows."
+    subtask = SubTask(
+        id="step_under_test",
+        description=goal,
+        layer=layer,
+        metadata={"table_id": env.default_table_id()},
+    )
+    llm = _PromptRecordingLLM()
+    LLMCodeGenerationAction(llm, env=env).run(CodeGenerationRequest(
+        question="What is Alice's score?",
+        subtask_id=subtask.id,
+        layer=layer,
+        round_num=round_num,
+        subtask=subtask,
+    ))
+
+    assert goal in llm.prompts[0]
+
+
+def test_code_generation_prompt_without_a_subtask_object_still_renders():
+    from TableAgent.stages.qa.actions.base_action import CodeGenerationRequest
+    from TableAgent.stages.qa.actions.llm_code_generation import LLMCodeGenerationAction
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    llm = _PromptRecordingLLM()
+    LLMCodeGenerationAction(llm, env=env).run(CodeGenerationRequest(
+        question="What is Alice's score?", subtask_id="step_without_object", layer="inspect", round_num=1,
+    ))
+
+    assert "step_without_object" in llm.prompts[0]
+    assert "Subtask goal" not in llm.prompts[0]
+
+
+def test_runner_sends_each_planner_description_to_its_code_generation_prompt():
+    llm = FakeLLM({
+        "Table Structure": _two_step_plan_json(),
+        "Assigned Subtask:": _llm_json({
+            "reasoning": "Read one field so the inspection has evidence.",
+            "code": "firsts = operators.read_range_flat(operators.get_header(env.default_table_id(), 'first_name').data_range)\nprint(firsts[:3])",
+            "description": "Reads first names.",
+        }),
+        "Variables in namespace:": _llm_json({
+            "reasoning": "Set a fixed final answer.",
+            "code": "final_answer = '82.5'",
+            "description": "Sets the final answer.",
+        }),
+    })
+    result = TableQARunner(STRUCTURE_PATH, WORKBOOK_PATH, llm_client=llm).run("What is the average score?")
+
+    assert result.success
+    generation_prompts = [
+        event["prompt"] for event in result.logs if event.get("event_type") == "generate_call"
+    ]
+    assert any("Inspect the fields needed to answer the question." in prompt for prompt in generation_prompts)
+    assert any("Use inspected variables to compute final_answer." in prompt for prompt in generation_prompts)

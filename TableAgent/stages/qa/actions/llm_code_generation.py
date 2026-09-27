@@ -215,6 +215,12 @@ def parse_model_output(content: str) -> Tuple[str, str, str]:
     return reasoning, code, description
 
 
+def _subtask_goal(request: CodeGenerationRequest) -> str:
+    """The planner's description of the subtask as a prompt line, or nothing when absent."""
+    description = str(getattr(request.subtask, "description", "") or "").strip()
+    return f"Subtask goal: {description}\n" if description else ""
+
+
 class LLMCodeGenerationAction(BaseCodeGenerationAction):
     """LLM-backed action that writes executable Python code for a QA subtask."""
     name = "llm_code_generation"
@@ -229,6 +235,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
         if not self.env:
             raise ValueError("Environment not set on LLMCodeGenerationAction.")
         operator_catalog = get_operator_catalog(self.env)
+        subtask_goal = _subtask_goal(request)
 
         if request.layer == "table_inspect":
             if request.round_num == 1:
@@ -244,6 +251,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
+                        f"{subtask_goal}"
                         "Choose the relevant table_id or table_ids from this catalog.\n"
                         "Use `operators.find_tables(question_or_subtask, top_k=...)` to route by verified table metadata; "
                         "do not guess a table id from its position in the catalog.\n"
@@ -268,6 +276,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
+                        f"{subtask_goal}"
                         "Revise the table selection code. It must set `selected_table_ids` to a non-empty list of valid table_id strings.\n"
                         f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
                     ),
@@ -313,6 +322,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
+                        f"{subtask_goal}"
                         f"Table structure:\n{struct_summary}\n\n"
                         f"Exact question-to-header matches:\n{header_hints}\n\n"
                         f"Question-to-group matches:\n{group_hints}\n\n"
@@ -335,6 +345,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     question=request.question,
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
+                        f"{subtask_goal}"
                         f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
                     ),
                     failed_code=failed_code,
@@ -353,6 +364,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
             if request.round_num == 1:
                 prompt = SYNTHESIS_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
+                    subtask_goal=subtask_goal,
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     prior_outcomes=prior_outcomes,
@@ -367,6 +379,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 )
                 prompt = SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
+                    subtask_goal=subtask_goal,
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     failed_code=failed_code,

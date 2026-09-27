@@ -1,36 +1,30 @@
 from __future__ import annotations
 
 UNDERSTANDING_SYSTEM_PROMPT = """You are an expert Excel data analyst.
-Your main job is to clarify what a spreadsheet question means in terms of the workbook,
-so that a planner can decompose it consistently. Do not answer the question."""
+Decide once what a spreadsheet question asks in terms of the workbook, so that a planner
+can follow a single interpretation. State decisions only. Do not answer the question."""
 
-UNDERSTANDING_USER_PROMPT_TEMPLATE = """I need you to clarify a question against the spreadsheet content before it is answered.
+UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreadsheet content and write a decision sheet.
 
 **User Question:** {question}
 
 **Excel Workbook Content:**
 {workbook_content}
 
-**Your Task:**
-Clarify the question using the Excel content and provide analysis in the following format EXACTLY. Do NOT provide the actual answer to the user's question or compute any values - only clarify the question and provide the analysis framework:
+**Rules:**
+- Commit to exactly one interpretation. Never list alternative readings, candidates, or options.
+- State each decision directly without explaining why.
+- Do not answer the question or compute any value from the data.
+- Use the workbook's exact labels and cell coordinates as they appear in the content above.
+- The content above may be a preview; do not conclude that data is absent because it is not shown.
 
-1. **Question Clarification** (most important):
-- **Clarified Question**: Rewrite the question as one precise, unambiguous sentence using the workbook's own terminology
-- **Term Mapping**: Map every entity, metric, category, and time expression in the question to the exact sheet name, header label, or row label as it appears in the workbook (quote the label and give its cell coordinate); note abbreviations, synonyms, and units or scale (e.g., "in thousands")
-- **Constraints**: List every explicit and implicit filter, time period, grouping, and condition that must hold
-- **Ambiguities & Chosen Interpretation**: List each term or requirement that could be read in more than one way, the candidate readings, and the single reading best supported by the question and workbook, with a short reason
-- **Required Operation**: Name the operation needed (lookup, filter, count, sum, average, difference, ratio, ranking, comparison, description) and the order of steps, without computing it
-- **Expected Answer Form**: Describe the answer type, unit, precision, and format (single value, list and its order, comparison, text)
+**Decision Sheet** (use exactly these headings):
 
-2. **Sheet Summary**:
-Provide a comprehensive overview including:
-- **Workbook Purpose & Domain**: Identify the business context, industry, and primary use case
-- **Sheet Organization**: Describe how sheets are logically organized and their relationships
-- **Data Structure & Types**: Catalog numerical data, text, dates, calculated fields, and hierarchical relationships
-
-3. **Problem Insights**:
-- **Relevant Data Scope**: Identify which specific sheets, ranges, or data points are most relevant
-- **Potential Challenges**: Identify data structure complexities that might affect analysis
-- **Validation Strategy**: Recommend ways to verify the accuracy of results
-- **Hierarchical Data Considerations**: Note any parent-child relationships, subtotals, or nested categories
+1. **Clarified Question**: the question as one precise sentence in the workbook's terminology.
+2. **Term Mapping**: one line per entity, metric, category, and time expression in the question: `"question phrase" -> "exact workbook label" (cell coordinate)`; add the unit or scale when the workbook states it.
+3. **Scope and Conditions**: the sheets, sections, rows, and columns to use; every filter, time period, grouping, and condition that must hold; and which hierarchy level counts (for example detail rows only, or a section's own total row).
+4. **Decisions on Ambiguous Points**: one line per term that could be read more than one way: `term: chosen reading`. Write "None" when nothing is ambiguous.
+5. **Required Operation**: the operation (lookup, filter, count, sum, average, difference, ratio, ranking, comparison, description), the order of its operands (for example "A minus B"), and the ordered steps, without computing them.
+6. **Checks**: one or two concrete conditions the result must satisfy (for example the exact row label to use, or a total row that must not be added to its own children).
+7. **Expected Answer Form**: the answer type, unit, precision, and format (single value, one item or every matching item, list order, and which fields to report).
 """
