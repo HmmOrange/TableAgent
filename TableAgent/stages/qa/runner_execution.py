@@ -37,6 +37,8 @@ class QAExecutionMixin:
             self._set_active_tables([table_id])
 
         understanding = self._understand_question(question)
+        # Later stages read the decisions from the environment; the planner always receives them.
+        self.env.question_decisions = understanding if self.propagate_decisions else None
         replan_count = 0
         planning_failure = None
         while True:

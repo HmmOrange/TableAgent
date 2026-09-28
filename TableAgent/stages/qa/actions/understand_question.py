@@ -8,6 +8,12 @@ from TableAgent.stages.qa.prompts.understanding import (
     UNDERSTANDING_USER_PROMPT_TEMPLATE,
 )
 
+
+def decisions_block(env: Any, template: str) -> str:
+    """Render the question decisions for a later stage, or nothing when none were made."""
+    decisions = str(getattr(env, "question_decisions", None) or "").strip()
+    return template.format(decisions=decisions) if decisions else ""
+
 MAX_WORKBOOK_CHARS = 40000
 MAX_PREVIEW_COLUMNS = 100
 MAX_PREVIEW_VALUE_LENGTH = 1000

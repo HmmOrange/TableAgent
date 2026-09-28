@@ -48,6 +48,7 @@ class TableAgentConfig:
     qa_max_experience_records: int
     qa_final_answer_review: bool
     qa_question_understanding: bool
+    qa_propagate_decisions: bool
     qa_log_path: Path | None
     qa_max_observation_chars: int
     qa_max_error_chars: int
@@ -108,6 +109,7 @@ class TableAgentConfig:
             qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
             qa_final_answer_review=_bool(merged.get("qa_final_answer_review", False)),
             qa_question_understanding=_bool(merged.get("qa_question_understanding", True)),
+            qa_propagate_decisions=_bool(merged.get("qa_propagate_decisions", True)),
             qa_log_path=_optional_path(merged.get("qa_log_path")),
             qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
             qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),

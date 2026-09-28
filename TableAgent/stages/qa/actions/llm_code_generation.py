@@ -12,6 +12,8 @@ from TableAgent.stages.qa.actions.base_action import (
 from TableAgent.stages.qa.header_hints import question_header_hints
 from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.utils import range_to_a1
+from TableAgent.stages.qa.actions.understand_question import decisions_block
+from TableAgent.stages.qa.prompts.understanding import DECISIONS_FOR_CODE, DECISIONS_FOR_SYNTHESIS
 from TableAgent.stages.qa.prompts.react import (
     REACT_SYSTEM_PROMPT,
     REACT_USER_PROMPT_TEMPLATE,
@@ -323,6 +325,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}.\n"
                         f"{subtask_goal}"
+                        f"{decisions_block(self.env, DECISIONS_FOR_CODE)}"
                         f"Table structure:\n{struct_summary}\n\n"
                         f"Exact question-to-header matches:\n{header_hints}\n\n"
                         f"Question-to-group matches:\n{group_hints}\n\n"
@@ -346,6 +349,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                     subtask_description=(
                         f"Subtask: {request.subtask_id}\n"
                         f"{subtask_goal}"
+                        f"{decisions_block(self.env, DECISIONS_FOR_CODE)}"
                         f"Previous attempts and reasoning:\n{self.env.experience_pool.format()}"
                     ),
                     failed_code=failed_code,
@@ -365,6 +369,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 prompt = SYNTHESIS_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     subtask_goal=subtask_goal,
+                    question_decisions=decisions_block(self.env, DECISIONS_FOR_SYNTHESIS),
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     prior_outcomes=prior_outcomes,
@@ -380,6 +385,7 @@ class LLMCodeGenerationAction(BaseCodeGenerationAction):
                 prompt = SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE.format(
                     question=request.question,
                     subtask_goal=subtask_goal,
+                    question_decisions=decisions_block(self.env, DECISIONS_FOR_SYNTHESIS),
                     available_variables=", ".join(available_vars) if available_vars else "None",
                     inspection_variables=inspection_variables,
                     failed_code=failed_code,

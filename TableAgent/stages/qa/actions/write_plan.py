@@ -9,6 +9,7 @@ from TableAgent.stages.qa.actions.llm_code_generation import get_structure_summa
 from TableAgent.stages.qa.header_hints import question_header_hints
 from TableAgent.stages.qa.group_hints import question_group_hints
 from TableAgent.stages.qa.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
+from TableAgent.stages.qa.prompts.understanding import PLANNER_DECISIONS_RULE
 from TableAgent.stages.qa.models.subtask import SubTask
 
 PLAN_REPAIR_SYSTEM_PROMPT = """You are a strict JSON formatter for a table-QA plan.
@@ -188,6 +189,8 @@ class WriteQAPlanAction(BasePlanAction):
                 "\n\nQuestion understanding (guidance; verify against structure and workbook evidence):\n"
                 f"{request.understanding}"
             )
+            if getattr(self.env, "question_decisions", None):
+                prompt += f"\n{PLANNER_DECISIONS_RULE}"
         if request.failure_context:
             previous_plan = json.dumps(request.previous_plan or [], ensure_ascii=False, indent=2)
             prompt += (

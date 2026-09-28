@@ -5,6 +5,8 @@ import re
 from typing import Any
 
 from TableAgent.stages.qa.actions.base_action import ReviewResult
+from TableAgent.stages.qa.actions.understand_question import decisions_block
+from TableAgent.stages.qa.prompts.understanding import DECISIONS_FOR_FINAL_REVIEW
 from TableAgent.stages.qa.prompts.review import (
     FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
     FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE,
@@ -47,6 +49,7 @@ class ReviewFinalAnswerAction:
         groups = self._group_context(question)
         prompt = FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE.format(
             question=question,
+            question_decisions=decisions_block(self.env, DECISIONS_FOR_FINAL_REVIEW),
             plan=plan_text,
             evidence=evidence,
             grouped_headers=grouped_headers,

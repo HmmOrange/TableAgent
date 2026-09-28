@@ -42,7 +42,7 @@ Example:
 """
 
 SYNTHESIS_USER_PROMPT_TEMPLATE = """User Question: {question}
-{subtask_goal}Variables in namespace: {available_variables}
+{subtask_goal}{question_decisions}Variables in namespace: {available_variables}
 Accepted inspection evidence:
 {inspection_variables}
 
@@ -53,7 +53,7 @@ Write the final Python code to compute and assign `final_answer`. Print only a c
 """
 
 SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE = """User Question: {question}
-{subtask_goal}Variables in namespace: {available_variables}
+{subtask_goal}{question_decisions}Variables in namespace: {available_variables}
 Accepted inspection evidence:
 {inspection_variables}
 

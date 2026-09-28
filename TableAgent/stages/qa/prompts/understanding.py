@@ -28,3 +28,23 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 6. **Checks**: one or two concrete conditions the result must satisfy (for example the exact row label to use, or a total row that must not be added to its own children).
 7. **Expected Answer Form**: the answer type, unit, precision, and format (single value, one item or every matching item, list order, and which fields to report).
 """
+
+# Blocks that carry the decision sheet to later stages; each is empty when no decisions exist.
+DECISIONS_FOR_CODE = """Question decisions (follow them exactly; do only this subtask's part and do not compute extra totals, sums, or verification values the decisions do not ask for):
+{decisions}
+"""
+
+DECISIONS_FOR_SYNTHESIS = """Question decisions (compute `final_answer` with exactly the Required Operation and report only what the Expected Answer Form lists):
+{decisions}
+"""
+
+DECISIONS_FOR_REVIEW = """Question decisions (reject an attempt that departs from them):
+{decisions}
+"""
+
+DECISIONS_FOR_FINAL_REVIEW = """Question decisions made before planning:
+{decisions}
+Check both that the final answer follows these decisions and that the decisions themselves match the question; reject when either fails and say which one.
+"""
+
+PLANNER_DECISIONS_RULE = "Write each subtask description as the action to take; do not put data values or reasoning in it."

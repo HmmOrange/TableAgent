@@ -51,6 +51,7 @@ class QAEnvironment:
         
         # Logger
         self.logger = QALogger(log_path)
+        self.question_decisions: Optional[str] = None
         
         # Try importing numpy
         try:

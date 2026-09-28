@@ -6,6 +6,8 @@ from typing import Any, Optional
 
 from TableAgent.stages.qa.actions.base_action import BaseReviewAction, ReviewRequest, ReviewResult
 from TableAgent.stages.qa.prompts.review import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT_TEMPLATE
+from TableAgent.stages.qa.actions.understand_question import decisions_block
+from TableAgent.stages.qa.prompts.understanding import DECISIONS_FOR_REVIEW
 
 _HIDDEN_WORKSPACE_NAMES = {
     "pd",
@@ -135,6 +137,7 @@ class ReviewSubtaskAction(BaseReviewAction):
             subtask_id=request.subtask.id,
             layer=request.subtask.layer,
             subtask_description=request.subtask.description,
+            question_decisions=decisions_block(self.env, DECISIONS_FOR_REVIEW),
             description=request.description,
             code=request.code,
             success=request.execution.success,

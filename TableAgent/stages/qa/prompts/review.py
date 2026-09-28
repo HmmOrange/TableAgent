@@ -33,7 +33,7 @@ Subtask layer: {layer}
 Subtask description:
 {subtask_description}
 
-Code description:
+{question_decisions}Code description:
 {description}
 
 Code:
@@ -90,7 +90,7 @@ corrected plan must inspect or calculate. Do not solve the question yourself.
 FINAL_ANSWER_REVIEW_USER_PROMPT_TEMPLATE = """User Question:
 {question}
 
-Executed plan:
+{question_decisions}Executed plan:
 {plan}
 
 Verified runtime evidence and code:

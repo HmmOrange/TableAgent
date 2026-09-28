@@ -232,6 +232,7 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
             and bool(self.settings.get("qa_question_understanding", True))
             else None
         )
+        self.propagate_decisions = bool(self.settings.get("qa_propagate_decisions", True))
 
         self.table_id = None
         if isinstance(config, dict):

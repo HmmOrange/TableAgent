@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import collections
 import datetime
 import json
 import subprocess
@@ -1332,3 +1333,148 @@ def test_runner_sends_each_planner_description_to_its_code_generation_prompt():
     ]
     assert any("Inspect the fields needed to answer the question." in prompt for prompt in generation_prompts)
     assert any("Use inspected variables to compute final_answer." in prompt for prompt in generation_prompts)
+
+
+_DECISIONS = "5. **Required Operation**: Lookup the score of Alice only; keep {braces} literal."
+
+
+class DecisionLLM(FakeLLM):
+    """Scripted LLM that answers understanding, planning, code, and final-review prompts."""
+
+    def __init__(self):
+        super().__init__({
+            "Verify coverage, exact target identity": _llm_json({
+                "accepted": True, "score": 1.0, "feedback": "Accepted.",
+            }),
+            "Table Structure": _two_step_plan_json(),
+            "Assigned Subtask:": _llm_json({
+                "reasoning": "Read one field so the inspection has evidence.",
+                "code": "firsts = operators.read_range_flat(operators.get_header(env.default_table_id(), 'first_name').data_range)\nprint(firsts[:3])",
+                "description": "Reads first names.",
+            }),
+            "Variables in namespace:": _llm_json({
+                "reasoning": "Set a fixed final answer.",
+                "code": "final_answer = '82.5'",
+                "description": "Sets the final answer.",
+            }),
+        })
+
+    def generate(self, prompt: str, system_prompt: str = None) -> Any:
+        if "Excel Workbook Content" in prompt:
+            self.calls.append((prompt, system_prompt))
+            return LLMResponse(content=_DECISIONS)
+        return super().generate(prompt, system_prompt)
+
+
+def _decision_run(**settings):
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=DecisionLLM(),
+        config={"table_agent": {"qa_final_answer_review": True, **settings}},
+    )
+    result = runner.run("What is the average score?")
+    assert result.success
+    prompts = collections.defaultdict(list)
+    for event in result.logs:
+        if event.get("event_type") in {
+            "planner_prompt", "generate_call", "review_prompt", "final_answer_review_prompt",
+        }:
+            prompts[event["event_type"]].append(event["prompt"])
+    return prompts
+
+
+def test_decisions_reach_code_generation_review_and_final_review():
+    prompts = _decision_run()
+
+    inspect_prompts = [p for p in prompts["generate_call"] if "Assigned Subtask:" in p]
+    synthesis_prompts = [p for p in prompts["generate_call"] if "Variables in namespace:" in p]
+    assert inspect_prompts and synthesis_prompts
+    assert all(_DECISIONS in prompt for prompt in inspect_prompts + synthesis_prompts)
+    assert prompts["review_prompt"] and all(_DECISIONS in prompt for prompt in prompts["review_prompt"])
+    final_review = prompts["final_answer_review_prompt"]
+    assert final_review and all(_DECISIONS in prompt for prompt in final_review)
+    # Final review checks both directions: answer against decisions and decisions against the question.
+    assert all("decisions themselves" in prompt for prompt in final_review)
+    assert all("do not put data values or reasoning" in prompt for prompt in prompts["planner_prompt"])
+
+
+def test_turning_off_decision_propagation_keeps_decisions_in_the_planner_only():
+    prompts = _decision_run(qa_propagate_decisions=False)
+
+    assert all(_DECISIONS in prompt for prompt in prompts["planner_prompt"])
+    for kind in ("generate_call", "review_prompt", "final_answer_review_prompt"):
+        assert prompts[kind] and not any(_DECISIONS in prompt for prompt in prompts[kind])
+    assert not any("do not put data values or reasoning" in prompt for prompt in prompts["planner_prompt"])
+
+
+def test_no_decision_block_without_question_understanding():
+    prompts = _decision_run(qa_question_understanding=False)
+
+    for kind in ("planner_prompt", "generate_call", "review_prompt", "final_answer_review_prompt"):
+        assert prompts[kind] and not any("Question decisions" in prompt for prompt in prompts[kind])
+
+
+class DecisionRetryLLM(DecisionLLM):
+    """Force one replan, one failed inspect attempt, and one failed synthesis attempt."""
+
+    def __init__(self, fail_understanding: bool = False):
+        super().__init__()
+        self.fail_understanding = fail_understanding
+        self.seen = collections.Counter()
+
+    def generate(self, prompt: str, system_prompt: str = None) -> Any:
+        if "Excel Workbook Content" in prompt and self.fail_understanding:
+            raise RuntimeError("understanding unavailable")
+        for key, broken in (
+            ("Table Structure", "not a plan"),
+            ("Assigned Subtask:", _llm_json({"reasoning": "Fail once.", "code": "raise ValueError('boom')", "description": "Fails."})),
+            ("Variables in namespace:", _llm_json({"reasoning": "Forget the answer once.", "code": "draft = 1", "description": "No final answer."})),
+        ):
+            if key in prompt and "Review whether this attempt" not in prompt:
+                self.seen[key] += 1
+                if self.seen[key] == 1:
+                    self.calls.append((prompt, system_prompt))
+                    return LLMResponse(content=broken)
+        return super().generate(prompt, system_prompt)
+
+
+def _prompts_after(events, start_index):
+    return [
+        event["prompt"] for event in events[start_index:]
+        if event.get("event_type") in {"generate_call", "review_prompt", "final_answer_review_prompt"}
+    ]
+
+
+def test_decisions_are_identical_through_replans_and_revision_prompts():
+    runner = TableQARunner(
+        STRUCTURE_PATH, WORKBOOK_PATH, llm_client=DecisionRetryLLM(),
+        config={"table_agent": {"qa_final_answer_review": True}},
+    )
+    result = runner.run("What is the average score?")
+
+    assert result.success and result.replan_count >= 1
+    generation = [e["prompt"] for e in result.logs if e.get("event_type") == "generate_call"]
+    inspect_revisions = [p for p in generation if "Your previous code execution failed" in p]
+    synthesis_revisions = [p for p in generation if "previous synthesis attempt failed" in p]
+    assert inspect_revisions and synthesis_revisions
+    planner_prompts = [e["prompt"] for e in result.logs if e.get("event_type") == "planner_prompt"]
+    assert len(planner_prompts) >= 2
+    for prompt in planner_prompts + _prompts_after(result.logs, 0):
+        assert prompt.count(_DECISIONS) == 1
+
+
+def test_a_reused_runner_does_not_carry_decisions_into_the_next_question():
+    llm = DecisionRetryLLM()
+    runner = TableQARunner(
+        STRUCTURE_PATH, WORKBOOK_PATH, llm_client=llm,
+        config={"table_agent": {"qa_final_answer_review": True}},
+    )
+    first = runner.run("What is the average score?")
+    assert any(_DECISIONS in prompt for prompt in _prompts_after(first.logs, 0))
+
+    llm.fail_understanding = True
+    start = len(runner.env.logger.events)
+    second = runner.run("What is the average score?")
+    later = _prompts_after(second.logs, start)
+    assert later and not any("Question decisions" in prompt for prompt in later)
