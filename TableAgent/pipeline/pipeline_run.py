@@ -227,8 +227,8 @@ class PipelineRunner(RuntimeComponent):
             structure_path=record.structure_path,
             workbook_path=workbook_path,
             qa_artifact_dir=self._qa_sample_dir(sample),
-            fallback_prompt=self.prompts.answer_prompt(
-                sample, self._fit_context(sample.table_content), structure_text
+            fallback_prompt=lambda: self.prompts.answer_prompt(
+                sample, self._fallback_table_context(sample, workbook_path), structure_text
             ),
             enable_final_answer_review=self.settings.qa_final_answer_review,
         ))
@@ -278,6 +278,24 @@ class PipelineRunner(RuntimeComponent):
                 "stage_runtimes": stage_runtimes,
             },
         )
+
+    def _fallback_table_context(self, sample: EvalSample, workbook_path: Path) -> str:
+        """Table text for the fallback prompt; workbook samples carry no text, so preview the workbook."""
+        if str(sample.table_content or "").strip():
+            return self._fit_context(sample.table_content)
+        import openpyxl
+
+        from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+        try:
+            workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+        except Exception:
+            # An unreadable workbook must not break the fallback answer; it then runs without table text.
+            return ""
+        try:
+            return workbook_preview(workbook, Path(workbook_path).name)
+        finally:
+            workbook.close()
 
     def get_config(self) -> dict[str, Any]:
         return {

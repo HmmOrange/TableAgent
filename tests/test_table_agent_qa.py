@@ -3,6 +3,7 @@ import os
 import collections
 import datetime
 import json
+import re
 import subprocess
 import sys
 import pytest
@@ -1239,7 +1240,7 @@ def test_workbook_preview_respects_budget_and_excluded_sheets():
     assert "Sheet: 'Data'" in preview
     assert "Hidden" not in preview and "secret" not in preview
     assert "| A1:row0 | B1:0 |" in preview
-    assert "A199:" not in preview
+    assert "omitted]" in preview and "A200:row199" in preview
 
 
 def test_workbook_preview_caps_wide_rows_and_skips_chart_sheets():
@@ -1478,3 +1479,98 @@ def test_a_reused_runner_does_not_carry_decisions_into_the_next_question():
     second = runner.run("What is the average score?")
     later = _prompts_after(second.logs, start)
     assert later and not any("Question decisions" in prompt for prompt in later)
+
+
+def test_understanding_prompt_sent_at_run_time_carries_the_answer_form_rules():
+    from TableAgent.stages.qa.prompts.understanding import ANSWER_FORM_RULES
+
+    llm = UnderstandingLLM()
+    _understanding_runner(llm).run("What is the average score?")
+
+    assert llm.understanding_prompts and ANSWER_FORM_RULES in llm.understanding_prompts[0]
+
+
+def test_workbook_preview_of_a_long_sheet_keeps_its_head_and_tail_and_marks_the_gap():
+    import openpyxl
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Industry", "Rate"])
+    for index in range(1, 400):
+        sheet.append([f"industry {index}", index])
+    sheet.append(["Note: data for rail transportation are provided by an outside agency.", None])
+
+    preview = workbook_preview(workbook, "book.xlsx", max_chars=2000)
+
+    assert "A1:Industry" in preview
+    assert "Note: data for rail transportation" in preview
+    gap = re.search(r"\[rows (\d+)-(\d+) omitted\]", preview)
+    assert gap is not None
+    first_hidden, last_hidden = int(gap.group(1)), int(gap.group(2))
+    assert f"A{first_hidden - 1}:" in preview and f"A{last_hidden + 1}:" in preview
+    assert f"A{first_hidden}:" not in preview and f"A{last_hidden}:" not in preview
+    assert len(preview) < 2000 + 400
+
+
+def test_workbook_preview_of_a_short_sheet_has_no_gap_marker():
+    import openpyxl
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    for index in range(5):
+        workbook.active.append([f"row {index}", index])
+
+    assert "omitted" not in workbook_preview(workbook, "book.xlsx", max_chars=2000)
+
+
+def test_workbook_preview_keeps_the_tail_when_the_first_row_is_too_long():
+    import openpyxl
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["x" * 900])
+    for index in range(50):
+        workbook.active.append([f"row {index}"])
+    workbook.active.append(["Source: survey footnote"])
+
+    preview = workbook_preview(workbook, "book.xlsx", max_chars=600)
+    assert "Source: survey footnote" in preview
+    assert re.search(r"\[rows \d+-\d+ omitted\]", preview)
+
+
+class _FixedPlanLLM:
+    def __init__(self, content: str):
+        self.content = content
+
+    def generate(self, prompt: str, system_prompt: str = None) -> LLMResponse:
+        return LLMResponse(content=self.content)
+
+
+@pytest.mark.parametrize("table_is_fixed", [True, False])
+def test_planner_drops_table_selection_only_when_the_table_is_fixed(table_is_fixed):
+    from TableAgent.stages.qa.actions.base_action import PlanGenerationRequest
+    from TableAgent.stages.qa.actions.write_plan import WriteQAPlanAction
+
+    plan_json = _llm_json({"subtasks": [
+        {"id": "select_tables", "layer": "table_inspect", "depends_on": [], "description": "Select the table."},
+        {"id": "inspect_fields", "layer": "inspect", "depends_on": ["select_tables"], "description": "Read the fields."},
+        {"id": "synthesize_answer", "layer": "synthesis", "depends_on": ["inspect_fields"], "description": "Answer."},
+    ]})
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    try:
+        table_id = env.operators.list_tables()[0] if table_is_fixed else None
+        plan = WriteQAPlanAction(env, _FixedPlanLLM(plan_json)).run(
+            PlanGenerationRequest(question="What is the total?", table_id=table_id)
+        ).subtasks
+    finally:
+        env.workbook.close()
+
+    by_id = {subtask.id: subtask for subtask in plan}
+    if table_is_fixed:
+        assert list(by_id) == ["inspect_fields", "synthesize_answer"]
+        assert by_id["inspect_fields"].depends_on == []
+    else:
+        assert list(by_id) == ["select_tables", "inspect_fields", "synthesize_answer"]
+        assert by_id["inspect_fields"].depends_on == ["select_tables"]

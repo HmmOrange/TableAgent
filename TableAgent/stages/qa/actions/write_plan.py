@@ -109,6 +109,17 @@ def _split_depends_on(value: Any) -> list[str]:
     return []
 
 
+def _drop_table_selection(subtasks: list[SubTask]) -> list[SubTask]:
+    """Remove table-selection subtasks once the table is fixed before planning; they have nothing to choose."""
+    removed = {subtask.id for subtask in subtasks if subtask.layer == "table_inspect"}
+    kept = [subtask for subtask in subtasks if subtask.id not in removed]
+    if not removed or not kept:
+        return subtasks
+    for subtask in kept:
+        subtask.depends_on = [dependency for dependency in subtask.depends_on if dependency not in removed]
+    return kept
+
+
 def _related_structure_summary(env: Any) -> str:
     lines = []
     seen = set()
@@ -227,11 +238,17 @@ class WriteQAPlanAction(BasePlanAction):
                 raise exc
 
         subtasks = self._apply_routing_policy(subtasks)
+        if request.table_id:
+            subtasks = _drop_table_selection(subtasks)
         has_normal_inspection = any(
             subtask.layer == "inspect" and subtask.category == "normal"
             for subtask in subtasks
         )
-        needs_table_inspect = len(self.env.operators.list_tables()) > 1 and has_normal_inspection
+        needs_table_inspect = (
+            not request.table_id
+            and len(self.env.operators.list_tables()) > 1
+            and has_normal_inspection
+        )
         if needs_table_inspect and not any(subtask.layer == "table_inspect" for subtask in subtasks):
             subtasks.insert(0, SubTask(
                 id="select_relevant_tables",

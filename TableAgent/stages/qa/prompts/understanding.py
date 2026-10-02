@@ -4,6 +4,12 @@ UNDERSTANDING_SYSTEM_PROMPT = """You are an expert Excel data analyst.
 Decide once what a spreadsheet question asks in terms of the workbook, so that a planner
 can follow a single interpretation. State decisions only. Do not answer the question."""
 
+# General answer-form rules keyed to the shape of the question.
+ANSWER_FORM_RULES = """- When the question asks which or who, or asks for a category or item, the answer is that item's name, not a yes/no or true/false value; when the workbook label omits a qualifier the question states for that item (such as its group), keep the question's wording.
+- When the question offers alternatives (X or Y), the answer names the chosen alternative, even when it is phrased as a yes/no question.
+- Only a question about whether a single statement holds is answered starting with Yes or No.
+"""
+
 UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreadsheet content and write a decision sheet.
 
 **User Question:** {question}
@@ -17,7 +23,7 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 - Do not answer the question or compute any value from the data.
 - Use the workbook's exact labels and cell coordinates as they appear in the content above.
 - The content above may be a preview; do not conclude that data is absent because it is not shown.
-
+""" + ANSWER_FORM_RULES + """
 **Decision Sheet** (use exactly these headings):
 
 1. **Clarified Question**: the question as one precise sentence in the workbook's terminology.

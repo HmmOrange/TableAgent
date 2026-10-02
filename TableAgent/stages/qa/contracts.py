@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from TableAgent.llm import LLMResponse
 
@@ -13,7 +13,7 @@ class QAInput:
     structure_path: Path
     workbook_path: Path
     qa_artifact_dir: Path
-    fallback_prompt: str
+    fallback_prompt: str | Callable[[], str]  # a callable is built only if a fallback runs
     fallback_image_path: Path | None = None
     fallback_text_prompt: str | None = None
     related_structure_paths: tuple[Path, ...] = ()

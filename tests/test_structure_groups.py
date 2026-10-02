@@ -306,6 +306,7 @@ def test_groups_reach_planner_and_react_prompts(tmp_path: Path):
         for advertised in (
             "operators.read_group_data(",
             "operators.find_in_group(",
+            "operators.find_cells(",
             "operators.group_row_mask(",
             "operators.filter_in_group(",
             "__section_label_row__",
@@ -315,6 +316,23 @@ def test_groups_reach_planner_and_react_prompts(tmp_path: Path):
 
         hints = question_group_hints(env, "How many men participated", ["employment"])
         assert "Exact label matches" in hints and "group_id=men" in hints
+    finally:
+        env.workbook.close()
+
+
+def test_find_cells_searches_the_whole_worksheet(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        # Unlike find_in_group, the label is found in every section, with spacing and case ignored.
+        assert [(cell.row, cell.col) for cell, _ in env.operators.find_cells("participation  RATE")] == [(3, 1), (6, 1)]
+        assert [value for _, value in env.operators.find_cells("Women", sheet="Sheet1")] == ["Women"]
+        # Whole words only: "men" must not match inside "Women".
+        assert [cell.row for cell, _ in env.operators.find_cells("men")] == [2]
+        assert env.operators.find_cells("   ") == []
+        # A table_id passed as the sheet fails with the worksheet names to use instead.
+        with pytest.raises(ValueError, match="Sheet1"):
+            env.operators.find_cells("Men", sheet="employment")
     finally:
         env.workbook.close()
 

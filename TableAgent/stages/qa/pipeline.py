@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -12,6 +12,14 @@ from TableAgent.pipeline.component import RuntimeComponent
 from TableAgent.pipeline.contracts import PipelineRuntimeContract
 from TableAgent.pipeline.pipeline_run import serialize_config_value
 from TableAgent.stages.qa.runner import TableQARunner
+
+
+FAILED_ATTEMPT_NOTE_CHARS = 1500
+
+
+def _resolve_prompt(prompt: str | Callable[[], str]) -> str:
+    """Fallback prompts may be built lazily, only when a fallback actually runs."""
+    return prompt() if callable(prompt) else prompt
 
 
 class VerifiedQAPipeline(RuntimeComponent):
@@ -27,7 +35,7 @@ class VerifiedQAPipeline(RuntimeComponent):
         structure_path: Path,
         workbook_path: Path,
         qa_artifact_dir: Path,
-        fallback_prompt: str,
+        fallback_prompt: str | Callable[[], str],
         fallback_image_path: Path | None = None,
         fallback_text_prompt: str | None = None,
         related_structure_paths: list[Path] | None = None,
@@ -54,7 +62,7 @@ class VerifiedQAPipeline(RuntimeComponent):
 
         if structure_error is not None:
             response = self.qa_agent.run(
-                prompt=fallback_prompt,
+                prompt=_resolve_prompt(fallback_prompt),
                 image_path=fallback_image_path,
                 fallback_prompt=fallback_text_prompt,
             )
@@ -136,14 +144,15 @@ class VerifiedQAPipeline(RuntimeComponent):
         verified_fallback_prompt = self._verified_observation_fallback_prompt(
             question, result
         )
+        failure_note = self._failed_attempt_note(result)
         if verified_fallback_prompt:
-            response = self.qa_agent.run(prompt=verified_fallback_prompt)
+            response = self.qa_agent.run(prompt=failure_note + verified_fallback_prompt)
             qa_info["fallback_source"] = "verified_inspection_observations"
         else:
             response = self.qa_agent.run(
-                prompt=fallback_prompt,
+                prompt=failure_note + _resolve_prompt(fallback_prompt),
                 image_path=fallback_image_path,
-                fallback_prompt=fallback_text_prompt,
+                fallback_prompt=(failure_note + fallback_text_prompt) if fallback_text_prompt else None,
             )
             qa_info["fallback_source"] = "source_context"
         response.prompt_tokens += int(result.token_usage.get("prompt", 0) or 0)
@@ -151,6 +160,25 @@ class VerifiedQAPipeline(RuntimeComponent):
             result.token_usage.get("completion", 0) or 0
         )
         return response, qa_info
+
+    @staticmethod
+    def _failed_attempt_note(result: Any) -> str:
+        """Why the verified QA attempt failed, so the fallback does not repeat the rejected answer.
+
+        Planning failures say nothing about the answer and are skipped; a traceback is reduced to
+        the text before it plus its final error line.
+        """
+        error = str(getattr(result, "error", "") or "").strip()
+        if not error or error.startswith("Planning failed"):
+            return ""
+        marker = "Traceback (most recent call last)"
+        if marker in error:
+            lines = [line.strip() for line in error.splitlines() if line.strip()]
+            error = f"{error.split(marker)[0].strip()} {lines[-1]}".strip()
+        return (
+            "A verified attempt on this question failed; do not repeat its mistake:\n"
+            f"{error[:FAILED_ATTEMPT_NOTE_CHARS]}\n\n"
+        )
 
     @staticmethod
     def _parse_structure(structure_text: str) -> dict[str, Any]:

@@ -7,6 +7,7 @@ Review whether the latest code attempt solved the assigned subtask.
 - For synthesis subtasks, it is valid for code to use variables produced by successful inspect subtasks when those variables appear in the current workspace or prior notebook history.
 - Do not reject a synthesis attempt solely because it does not reconstruct upstream filters in the same cell.
 - Reject attempts that attribute a value to the wrong header.
+- Reject an attempt when the printed row label or column header of a value it uses does not match the row and column the question (and the question decisions, when given) name; a value from a neighboring row or column is a common error.
 - Reject unverified fixed-position column selection when verified header IDs, labels, or worksheet headers are available.
 - When the requested field is a layered parent header, verify that code uses `operators.resolve_header_columns`/`operators.group_header_mask` or explicitly uses every relevant descendant column.
 - User-facing answers should use clean labels rather than internal IDs or raw bilingual headers, unless the question explicitly requests the source header text.

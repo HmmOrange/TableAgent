@@ -2290,3 +2290,136 @@ def test_verified_fallback_rejects_unsafe_evidence():
         result.question,
         result,
     ) is None
+
+
+def _failing_runner(observations, error="Final answer review rejected the plan: the answer omitted the requested year."):
+    from TableAgent.stages.qa.models.results import AgentOutput
+    from TableAgent.stages.qa.models.subtask import SubTask
+
+    class FailingRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def run(self, question):
+            class Result:
+                success = False
+                final_answer = None
+                execution_time = 0.0
+                token_usage = {"prompt": 1, "completion": 1}
+                artifacts = {}
+                plan = [SubTask(id="inspect", description="Read the value.", layer="inspect")]
+                subtask_outputs = [
+                    AgentOutput("inspect", "Read the value.", "", True, text, layer="inspect")
+                    for text in observations
+                ]
+
+            result = Result()
+            result.error = error
+            return result
+
+    return FailingRunner
+
+
+@pytest.mark.parametrize("observations, source", [
+    (["value=42 for year 2021"], "verified_inspection_observations"),
+    ([], "source_context"),
+])
+def test_qa_fallback_prompt_carries_the_failed_attempt_feedback(tmp_path: Path, monkeypatch, observations, source):
+    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "TableQARunner", _failing_runner(observations))
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text(yaml.safe_dump({"table1": {"id": "table1", "name": "T", "sheet": "Sheet1", "headers": []}}), encoding="utf-8")
+    llm = FakeLLM()
+    pipeline = TableAgentPipeline(llm_client=llm, layout_vlm_client=None, config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"})
+
+    _, qa_info = pipeline._run_verified_qa(
+        question="What is the value?",
+        structure_path=structure_path,
+        workbook_path=tmp_path / "book.xlsx",
+        qa_artifact_dir=tmp_path / "qa",
+        fallback_prompt="Workbook context goes here.",
+    )
+
+    assert qa_info["fallback_source"] == source
+    prompt = llm.calls[-1][0]
+    assert "the answer omitted the requested year" in prompt
+    if "Answer:" in prompt:
+        assert prompt.index("the answer omitted") < prompt.rindex("Answer:")
+
+
+def _run_failing_fallback(tmp_path, monkeypatch, error, fallback_prompt="Workbook context goes here."):
+    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "TableQARunner", _failing_runner([], error=error))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    structure_path = tmp_path / "structure.yaml"
+    structure_path.write_text(yaml.safe_dump({"table1": {"id": "table1", "name": "T", "sheet": "Sheet1", "headers": []}}), encoding="utf-8")
+    llm = FakeLLM()
+    pipeline = TableAgentPipeline(llm_client=llm, layout_vlm_client=None, config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"})
+    pipeline._run_verified_qa(
+        question="What is the value?",
+        structure_path=structure_path,
+        workbook_path=tmp_path / "book.xlsx",
+        qa_artifact_dir=tmp_path / "qa",
+        fallback_prompt=fallback_prompt,
+    )
+    return llm.calls[-1][0]
+
+
+def test_failed_attempt_note_keeps_the_last_traceback_line_and_skips_planning_failures(tmp_path: Path, monkeypatch):
+    traceback_error = (
+        "Failed at subtask 'inspect': Error during execution: Traceback (most recent call last):\n"
+        '  File "/site-packages/pandas/core/frame.py", line 10, in __getitem__\n'
+        "    raise KeyError(key)\n"
+        "KeyError: 'Employed total'"
+    )
+    prompt = _run_failing_fallback(tmp_path, monkeypatch, traceback_error)
+    assert "KeyError: 'Employed total'" in prompt and "Failed at subtask 'inspect'" in prompt
+    assert "site-packages" not in prompt
+
+    planning = _run_failing_fallback(tmp_path / "planning", monkeypatch, "Planning failed: connection reset")
+    assert "connection reset" not in planning
+
+
+def test_fallback_prompt_callable_runs_only_when_the_fallback_is_needed(tmp_path: Path, monkeypatch):
+    calls = []
+
+    def build_prompt():
+        calls.append(1)
+        return "Lazily built context."
+
+    prompt = _run_failing_fallback(tmp_path, monkeypatch, "Final answer review rejected the plan: wrong row.", build_prompt)
+    assert calls == [1] and "Lazily built context." in prompt
+
+
+def test_fallback_table_context_uses_a_workbook_preview_when_the_sample_has_no_text(tmp_path: Path):
+    from types import SimpleNamespace
+
+    import openpyxl
+    from TableAgent.pipeline.pipeline_run import PipelineRunner
+
+    workbook_path = tmp_path / "book.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["Year", "Value"])
+    workbook.active.append([2021, 42])
+    workbook.save(workbook_path)
+    runner = SimpleNamespace(_fit_context=lambda text: text)
+
+    empty = SimpleNamespace(table_content="")
+    context = PipelineRunner._fallback_table_context(runner, empty, workbook_path)
+    assert "A2:2021" in context and "B2:42" in context
+
+    textual = SimpleNamespace(table_content="Year | Value")
+    assert PipelineRunner._fallback_table_context(runner, textual, workbook_path) == "Year | Value"
+
+    broken = tmp_path / "broken.xlsx"
+    broken.write_text("not a workbook", encoding="utf-8")
+    assert PipelineRunner._fallback_table_context(runner, empty, broken) == ""
+    assert PipelineRunner._fallback_table_context(runner, empty, tmp_path / "missing.xlsx") == ""

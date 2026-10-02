@@ -1,4 +1,6 @@
 from __future__ import annotations
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any, List, Optional, Union
 import pandas as pd
@@ -26,6 +28,23 @@ def _normalize_label(value: Any) -> str:
     return " ".join(str(value).split()).casefold()
 
 
+def _words(value: Any) -> str:
+    return " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", str(value)).casefold()))
+
+
+def _find_cells(worksheet: Any, query: str, **bounds: Any) -> list[tuple[Cell, Any]]:
+    """Cells within `bounds` (iter_rows keywords) whose text contains the query's words in order."""
+    normalized_query = _words(query)
+    if not normalized_query:
+        return []
+    return [
+        (Cell(cell.row, cell.column), cell.value)
+        for row in worksheet.iter_rows(**bounds)
+        for cell in row
+        if cell.value is not None and f" {normalized_query} " in f" {_words(cell.value)} "
+    ]
+
+
 class TableOperators(BaseOperator):
     """
     Facade operator that delegates to structure, range, and workbook operators.
@@ -43,6 +62,10 @@ class TableOperators(BaseOperator):
         "operators.find_in_group(table_id, group_id, query) -> list[tuple[Cell, Any]]  "
         "# searches the records the group owns, not just its label cell",
         "operators.group_search_range(table_id, group_id) -> CellRange | None  # the region find_in_group scans",
+        "operators.find_cells(query, sheet='') -> list[tuple[Cell, Any]]  "
+        "# every cell of a worksheet whose text contains the query; use it to locate a label "
+        "when no group or header range covers it. `sheet` is a worksheet name, not a table_id; "
+        "each Cell has `.row` and `.col` (1-indexed)",
         "operators.resolve_group_rows(df, table_id, group_id) -> list[int]  # positional rows owned by the group",
         "operators.group_row_mask(df, table_id, group_id) -> pandas.Series  # boolean row mask for the group",
         "operators.filter_in_group(table_id, group_id, header_id, gte=1) -> AxisSelection",
@@ -294,30 +317,25 @@ class TableOperators(BaseOperator):
         return CellRange(row_start, col_start, row_end, col_end, sheet)
 
     def find_in_group(self, table_id: str, group_id: str, query: str) -> list[tuple[Cell, Any]]:
-        import re
-        import unicodedata
-
         search_range = self.group_search_range(table_id, group_id)
         if search_range is None:
             return []
-        normalized_query = " ".join(re.findall(
-            r"[\w]+", unicodedata.normalize("NFKC", str(query)).casefold(), flags=re.UNICODE
-        ))
         worksheet = self.env.get_sheet(search_range.sheet) or self.env.get_active_sheet()
-        matches = []
-        for row in worksheet.iter_rows(
+        return _find_cells(
+            worksheet,
+            query,
             min_row=search_range.start_row,
             max_row=min(search_range.end_row, worksheet.max_row),
             min_col=search_range.start_col,
             max_col=min(search_range.end_col, worksheet.max_column),
-        ):
-            for cell in row:
-                normalized_value = " ".join(re.findall(
-                    r"[\w]+", unicodedata.normalize("NFKC", str(cell.value or "")).casefold(), flags=re.UNICODE
-                ))
-                if normalized_query and f" {normalized_query} " in f" {normalized_value} ":
-                    matches.append((Cell(cell.row, cell.column), cell.value))
-        return matches
+        )
+
+    def find_cells(self, query: str, sheet: str = "") -> list[tuple[Cell, Any]]:
+        """Every cell of a worksheet whose text contains `query` as whole words, ignoring case and spacing."""
+        worksheet = self.env.get_sheet(sheet) if sheet else self.env.get_active_sheet()
+        if worksheet is None:
+            raise ValueError(f"Sheet {sheet!r} not found; worksheet names: {self.env.workbook.sheetnames}.")
+        return _find_cells(worksheet, query)
 
     def read_table_as_dataframe(
         self,
