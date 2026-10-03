@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any
 
 from TableAgent.stages.qa.models.results import AgentOutput, QAResult
 from TableAgent.stages.qa.models.subtask import SubTask
+
+
+def _reuse_key(subtask: SubTask) -> tuple:
+    """What must stay the same for an accepted inspection to stand in for a rerun."""
+    return (
+        subtask.id,
+        subtask.layer,
+        subtask.category,
+        subtask.description,
+        tuple(subtask.depends_on),
+        (subtask.metadata or {}).get("table_id"),
+    )
+
+
+def _snapshot(value: Any) -> Any:
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
 
 
 class QAExecutionMixin:
@@ -108,6 +128,9 @@ class QAExecutionMixin:
         final_answer = None
         baseline_namespace = dict(self.env.execution_namespace)
         execution_attempt = 0
+        # Accepted inspections a replan may reuse instead of rerunning; see _execute_plan.
+        accepted_inspections: dict[tuple, tuple[AgentOutput, dict[str, Any]]] = {}
+        earlier_failures: list[str] = []
 
         while True:
             if execution_attempt:
@@ -119,7 +142,7 @@ class QAExecutionMixin:
             try:
                 execution_plan = self._topological_sort(plan)
                 attempt_outputs, success, error_msg = self._execute_plan(
-                    question, plan, execution_plan
+                    question, plan, execution_plan, accepted_inspections
                 )
                 subtask_outputs.extend(attempt_outputs)
             except ValueError as exc:
@@ -154,6 +177,8 @@ class QAExecutionMixin:
                         },
                     )
                     if not final_review.accepted:
+                        # A rejected answer may rest on wrong evidence, so the next plan re-derives it.
+                        accepted_inspections.clear()
                         success = False
                         error_msg = (
                             "Final answer review rejected the plan: "
@@ -164,7 +189,8 @@ class QAExecutionMixin:
                 break
 
             replan_count += 1
-            failure_context = self._replanning_context(error_msg, attempt_outputs)
+            failure_context = self._replanning_context(error_msg, attempt_outputs, earlier_failures)
+            earlier_failures.append(str(error_msg or "Unknown execution failure"))
             self._progress(
                 f"[qa] replanning start | attempt={replan_count}/{self.max_replans} "
                 f"| error={error_msg}"
@@ -260,11 +286,15 @@ class QAExecutionMixin:
         question: str,
         plan: list[SubTask],
         execution_plan: list[SubTask],
+        accepted_inspections: dict[tuple, tuple[AgentOutput, dict[str, Any]]] | None = None,
     ) -> tuple[list[Any], bool, str | None]:
         subtasks_by_id = {subtask.id: subtask for subtask in plan}
         accepted_updates: dict[str, tuple[str, ...]] = {}
         outputs = []
         completed: set[str] = set()
+        reused: set[str] = set()
+        if accepted_inspections is None:
+            accepted_inspections = {}
         self.env.logger.log_event(
             "execution_plan",
             {
@@ -309,6 +339,32 @@ class QAExecutionMixin:
                 subtask.metadata["dependency_variables"] = self._dependency_variables(
                     subtask, subtasks_by_id, accepted_updates
                 )
+
+            # An unchanged inspection whose inputs were also reused is restored, not rerun.
+            cached = (
+                accepted_inspections.get(_reuse_key(subtask))
+                if subtask.layer == "inspect" and all(dep in reused for dep in subtask.depends_on)
+                else None
+            )
+            if cached is not None:
+                output, values = cached
+                self.env.execution_namespace.update(_snapshot(values))
+                self.env.logger.log_event(
+                    "subtask_complete",
+                    {
+                        "subtask_id": subtask.id,
+                        "success": True,
+                        "reused": True,
+                        "observation": output.observation,
+                        "code": output.code,
+                        "namespace_updates": list(values),
+                    },
+                )
+                outputs.append(output)
+                accepted_updates[subtask.id] = tuple(values)
+                completed.add(subtask.id)
+                reused.add(subtask.id)
+                continue
 
             try:
                 output = self._run_subtask(question, subtask)
@@ -355,6 +411,12 @@ class QAExecutionMixin:
                 )
             accepted_updates[subtask.id] = tuple(output.namespace_updates.keys())
             completed.add(subtask.id)
+            if subtask.layer == "inspect":
+                namespace = self.env.execution_namespace
+                accepted_inspections[_reuse_key(subtask)] = (
+                    output,
+                    _snapshot({name: namespace[name] for name in output.namespace_updates if name in namespace}),
+                )
 
         return outputs, True, None
 
@@ -432,7 +494,9 @@ class QAExecutionMixin:
         ]
 
     @staticmethod
-    def _replanning_context(error_msg: str | None, outputs: list[Any]) -> str:
+    def _replanning_context(
+        error_msg: str | None, outputs: list[Any], earlier_failures: list[str] | None = None
+    ) -> str:
         recent = []
         for output in outputs[-4:]:
             observation = str(getattr(output, "observation", "") or "")
@@ -444,8 +508,15 @@ class QAExecutionMixin:
                 f"  observation={observation}"
             )
         evidence = "\n".join(recent) or "No subtask output was produced."
+        history = ""
+        if earlier_failures:
+            # Short reasons only; the full evidence of those attempts is no longer in the namespace.
+            history = "Earlier attempts also failed; do not repeat them:\n" + "\n".join(
+                f"- attempt {number}: {failure[:300]}"
+                for number, failure in enumerate(earlier_failures, start=1)
+            ) + "\n\n"
         return (
-            f"Failure: {error_msg or 'Unknown execution failure'}\n\n"
+            f"{history}Failure: {error_msg or 'Unknown execution failure'}\n\n"
             f"Recent runtime evidence:\n{evidence}"
         )
 

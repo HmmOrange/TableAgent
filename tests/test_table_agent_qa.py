@@ -27,6 +27,8 @@ from TableAgent.llm import LLMResponse
 from tests.mock_policy import MockActionPolicy
 from TableAgent.stages.qa.agents import TableQAPlanner, TableQAAgent
 from TableAgent.stages.qa.actions.write_plan import parse_planner_output
+from TableAgent.stages.qa.models.results import AgentOutput
+from TableAgent.stages.qa.models.subtask import SubTask
 
 # Setup paths
 STRUCTURE_PATH = "sample/structure.yaml"
@@ -1574,3 +1576,90 @@ def test_planner_drops_table_selection_only_when_the_table_is_fixed(table_is_fix
     else:
         assert list(by_id) == ["select_tables", "inspect_fields", "synthesize_answer"]
         assert by_id["inspect_fields"].depends_on == ["select_tables"]
+
+
+class _ReuseRunner:
+    """The plan executor with a scripted subtask runner; records which subtasks really ran."""
+
+    def __init__(self, failing: set[str] = frozenset()):
+        from types import SimpleNamespace
+
+        from TableAgent.stages.qa.runner_execution import QAExecutionMixin
+
+        self._mixin = QAExecutionMixin
+        self.failing = set(failing)
+        self.ran: list[str] = []
+        self.events: list[tuple[str, dict]] = []
+        self.env = SimpleNamespace(
+            execution_namespace={},
+            logger=SimpleNamespace(log_event=lambda kind, payload: self.events.append((kind, payload))),
+            experience_pool=SimpleNamespace(select=lambda: []),
+        )
+
+    def _progress(self, message: str) -> None:
+        pass
+
+    def _dependency_variables(self, subtask, subtasks_by_id, accepted_updates):
+        return []
+
+    def _run_subtask(self, question: str, subtask: SubTask) -> AgentOutput:
+        self.ran.append(subtask.id)
+        if subtask.id in self.failing:
+            return AgentOutput(subtask_id=subtask.id, description="", code="", success=False, observation="boom")
+        name = f"{subtask.id}_value"
+        self.env.execution_namespace[name] = [len(self.ran)]
+        return AgentOutput(
+            subtask_id=subtask.id, description="", code="", success=True,
+            observation=f"{name} set", namespace_updates={name: "list"},
+        )
+
+    def execute(self, plan: list[SubTask], cache: dict) -> tuple[bool, str | None]:
+        self.ran.clear()
+        self.env.execution_namespace.clear()  # a new attempt starts from the baseline namespace
+        _, success, error = self._mixin._execute_plan(self, "q", plan, plan, cache)
+        return success, error
+
+
+def _reuse_plan(read_description: str = "Read the rows.") -> list[SubTask]:
+    return [
+        SubTask(id="find_rows", description="Find the rows.", layer="inspect"),
+        SubTask(id="read_rows", description=read_description, layer="inspect", depends_on=["find_rows"]),
+        SubTask(id="answer", description="Answer.", layer="synthesis", depends_on=["read_rows"]),
+    ]
+
+
+def test_a_replan_reuses_unchanged_accepted_inspections_and_reruns_the_rest():
+    runner, cache = _ReuseRunner(failing={"read_rows"}), {}
+    assert runner.execute(_reuse_plan(), cache)[0] is False
+    first_value = runner.env.execution_namespace["find_rows_value"]
+
+    runner.failing.clear()
+    assert runner.execute(_reuse_plan("Read the rows inside the section."), cache) == (True, None)
+
+    # The unchanged first inspection is restored with its value; the changed one and synthesis run.
+    assert runner.ran == ["read_rows", "answer"]
+    assert runner.env.execution_namespace["find_rows_value"] == first_value
+    assert ("subtask_complete", True) in [(kind, payload.get("reused")) for kind, payload in runner.events]
+
+
+def test_reuse_stops_at_a_changed_inspection_and_never_covers_synthesis():
+    runner, cache = _ReuseRunner(), {}
+    assert runner.execute(_reuse_plan(), cache)[0] is True
+
+    # Everything is unchanged: inspections are reused, the synthesis still runs.
+    assert runner.execute(_reuse_plan(), cache)[0] is True
+    assert runner.ran == ["answer"]
+
+    # A changed upstream inspection forces every inspection that depends on it to run again.
+    changed = _reuse_plan()
+    changed[0].description = "Find the rows in the women section."
+    assert runner.execute(changed, cache)[0] is True
+    assert runner.ran == ["find_rows", "read_rows", "answer"]
+
+
+def test_replanning_context_lists_earlier_failures():
+    from TableAgent.stages.qa.runner_execution import QAExecutionMixin
+
+    context = QAExecutionMixin._replanning_context("Failed at subtask 'b'", [], ["Failed at subtask 'a'"])
+    assert context.index("attempt 1: Failed at subtask 'a'") < context.index("Failure: Failed at subtask 'b'")
+    assert "Earlier attempts" not in QAExecutionMixin._replanning_context("x", [])
