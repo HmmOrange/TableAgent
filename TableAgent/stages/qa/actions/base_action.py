@@ -69,6 +69,9 @@ class ReviewResult:
     accepted: bool
     feedback: str
     score: float = 0.0
+    # Why a final answer was rejected: "execution" (how the plan read or computed) or
+    # "interpretation" (what the question decisions took the question to ask).
+    cause: str = "execution"
 
 
 class BaseAction(ABC):

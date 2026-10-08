@@ -332,10 +332,7 @@ class TableOperators(BaseOperator):
 
     def find_cells(self, query: str, sheet: str = "") -> list[tuple[Cell, Any]]:
         """Every cell of a worksheet whose text contains `query` as whole words, ignoring case and spacing."""
-        worksheet = self.env.get_sheet(sheet) if sheet else self.env.get_active_sheet()
-        if worksheet is None:
-            raise ValueError(f"Sheet {sheet!r} not found; worksheet names: {self.env.workbook.sheetnames}.")
-        return _find_cells(worksheet, query)
+        return _find_cells(self._workbook.resolve_sheet(sheet), query)
 
     def read_table_as_dataframe(
         self,
@@ -633,6 +630,9 @@ class TableOperators(BaseOperator):
 
     def read_range_as_dataframe(self, range_or_a1: Union[CellRange, str], sheet: str = "", has_headers: bool = True) -> pd.DataFrame:
         return self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
+
+    def read_cell_formats(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[dict[str, Any]]:
+        return self._workbook.read_cell_formats(range_or_a1, sheet)
 
     def sheet_dimensions(self, sheet: str = "") -> dict[str, int | str]:
         return self._workbook.sheet_dimensions(sheet)

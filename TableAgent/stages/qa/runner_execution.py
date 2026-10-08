@@ -59,6 +59,7 @@ class QAExecutionMixin:
         understanding = self._understand_question(question)
         # Later stages read the decisions from the environment; the planner always receives them.
         self.env.question_decisions = understanding if self.propagate_decisions else None
+        decisions_revised = False
         replan_count = 0
         planning_failure = None
         while True:
@@ -174,11 +175,26 @@ class QAExecutionMixin:
                             "accepted": final_review.accepted,
                             "score": final_review.score,
                             "feedback": final_review.feedback,
+                            "cause": final_review.cause,
                         },
                     )
                     if not final_review.accepted:
                         # A rejected answer may rest on wrong evidence, so the next plan re-derives it.
                         accepted_inspections.clear()
+                        if (
+                            final_review.cause == "interpretation"
+                            and understanding
+                            and not decisions_revised
+                            and replan_count < self.max_replans
+                        ):
+                            # A replan keeps the decisions, so only revising them can change the reading.
+                            decisions_revised = True
+                            revised = self._revise_understanding(
+                                question, understanding, final_answer, final_review.feedback
+                            )
+                            if revised:
+                                understanding = revised
+                                self.env.question_decisions = revised if self.propagate_decisions else None
                         success = False
                         error_msg = (
                             "Final answer review rejected the plan: "
@@ -263,6 +279,24 @@ class QAExecutionMixin:
         self._persist_run_artifacts(result, run_dir, event_start_index)
         self._progress(f"[qa] run done | success={success} | artifact_dir={run_dir}")
         return result
+
+    def _revise_understanding(
+        self, question: str, understanding: str, answer: Any, feedback: str
+    ) -> str | None:
+        """Rewrite the decisions once after a final review rejects how they read the question."""
+        try:
+            revised = self.understanding_action.revise(question, understanding, str(answer), feedback)
+        except Exception as exc:
+            self.env.logger.log_event("question_understanding_revision_error", {"error": str(exc)})
+            return None
+        if not revised:
+            return None
+        self.env.logger.log_event(
+            "question_understanding_revised",
+            {"previous": understanding, "content": revised, "feedback": feedback},
+        )
+        self._progress("[qa] question understanding revised")
+        return revised
 
     def _understand_question(self, question: str) -> str | None:
         """Run once per question so every (re)plan shares the same interpretation."""

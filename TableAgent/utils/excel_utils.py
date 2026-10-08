@@ -26,6 +26,11 @@ def parse_a1_cell(cell_str: str) -> Tuple[int, int]:
 
 def parse_a1_range(range_str: str, sheet: str = "") -> CellRange:
     range_str = range_str.strip()
+    if "!" in range_str:
+        # Excel-style "Sheet1!A1:B2" or "'Table 1'!A1"; the sheet named in the address wins.
+        sheet_part, range_str = range_str.rsplit("!", 1)
+        sheet = sheet_part.strip().strip("'").replace("''", "'") or sheet
+        range_str = range_str.strip()
     if ":" in range_str:
         parts = range_str.split(":")
         if len(parts) != 2:

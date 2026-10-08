@@ -6,6 +6,21 @@ from TableAgent.domain.ranges import CellRange
 from TableAgent.utils import parse_a1_range, read_excel_range
 from TableAgent.stages.qa.operators.base_operator import BaseOperator
 
+def _color_name(color: Any) -> str | None:
+    """An openpyxl color as 'FFRRGGBB', 'theme:N' (with tint), or 'indexed:N'; None when unset."""
+    if color is None:
+        return None
+    kind = getattr(color, "type", None)
+    if kind == "rgb" and isinstance(color.rgb, str):
+        return None if color.rgb in ("00000000",) else color.rgb
+    if kind == "theme":
+        tint = getattr(color, "tint", 0) or 0
+        return f"theme:{color.theme}" + (f" tint:{tint:+.2f}" if tint else "")
+    if kind == "indexed":
+        return f"indexed:{color.indexed}"
+    return None
+
+
 class WorkbookOperator(BaseOperator):
     """Operator for reading cell values and converting to structures like DataFrames."""
     name = "workbook"
@@ -17,6 +32,9 @@ class WorkbookOperator(BaseOperator):
         "operators.read_range_as_dataframe(range_or_a1, sheet='', has_headers=True) -> pandas.DataFrame",
         "operators.sheet_dimensions(sheet='') -> dict[str, int | str]",
         "operators.read_sheet_as_dataframe(sheet='', min_row=1, max_row=None, min_col=1, max_col=None) -> pandas.DataFrame",
+        "operators.read_cell_formats(range_or_a1, sheet='') -> list[dict]  # per cell: cell, value, fill, "
+        "font_color, bold, italic, indent; use it when color, emphasis, or indentation carries meaning",
+        "An A1 address may name its sheet, as in 'Sheet1!A1:B5' or \"'Table 1'!A1\".",
     )
 
     def read_range(
@@ -40,15 +58,52 @@ class WorkbookOperator(BaseOperator):
                     sheet
                 )
         
-        sheet_name = cell_range.sheet
-        if not sheet_name:
-            sheet_name = self.env.get_active_sheet_name()
-        
-        sheet_obj = self.env.get_sheet(sheet_name)
-        if not sheet_obj:
-            sheet_obj = self.env.get_active_sheet()
-            
+        sheet_obj = self.resolve_sheet(cell_range.sheet)
         return read_excel_range(sheet_obj, cell_range, expand_merged=expand_merged)
+
+    def resolve_sheet(self, sheet: str = "") -> Any:
+        """The named worksheet, matched ignoring case and surrounding spaces; the active one when unnamed.
+
+        A single-sheet workbook resolves any name to its only sheet. With several sheets an
+        unknown name is an error, since reading another sheet would silently return wrong data.
+        """
+        if not sheet:
+            return self.env.get_active_sheet()
+        sheet_obj = self.env.get_sheet(sheet)
+        if sheet_obj is not None:
+            return sheet_obj
+        names = list(self.env.workbook.sheetnames)
+        wanted = " ".join(str(sheet).split()).casefold()
+        for name in names:
+            if " ".join(name.split()).casefold() == wanted:
+                return self.env.get_sheet(name)
+        if len(names) == 1:
+            return self.env.get_sheet(names[0])
+        raise ValueError(f"Workbook sheet not found: {sheet!r}; worksheet names: {names}.")
+
+    def read_cell_formats(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[dict[str, Any]]:
+        """Formatting of each cell in a range, row by row: fill and font colors, bold, italic, indent."""
+        cell_range = parse_a1_range(range_or_a1, sheet) if isinstance(range_or_a1, str) else range_or_a1
+        sheet_obj = self.resolve_sheet(sheet or cell_range.sheet)
+        records = []
+        for row in sheet_obj.iter_rows(
+            min_row=cell_range.start_row,
+            max_row=cell_range.end_row,
+            min_col=cell_range.start_col,
+            max_col=cell_range.end_col,
+        ):
+            for cell in row:
+                fill = cell.fill
+                records.append({
+                    "cell": f"{get_column_letter(cell.column)}{cell.row}",
+                    "value": cell.value,
+                    "fill": _color_name(fill.fgColor) if fill is not None and fill.fill_type else None,
+                    "font_color": _color_name(cell.font.color) if cell.font is not None else None,
+                    "bold": bool(cell.font and cell.font.bold),
+                    "italic": bool(cell.font and cell.font.italic),
+                    "indent": int(cell.alignment.indent or 0) if cell.alignment is not None else 0,
+                })
+        return records
 
     def read_range_flat(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[Any]:
         """Read values from range and flatten them into a single-dimensional list."""
@@ -67,9 +122,7 @@ class WorkbookOperator(BaseOperator):
 
     def sheet_dimensions(self, sheet: str = "") -> dict[str, int | str]:
         """Return the physical used bounds for a named worksheet."""
-        sheet_obj = self.env.get_sheet(sheet) if sheet else self.env.get_active_sheet()
-        if sheet_obj is None:
-            raise ValueError(f"Workbook sheet not found: {sheet!r}")
+        sheet_obj = self.resolve_sheet(sheet)
         return {
             "sheet": sheet_obj.title,
             "min_row": 1,
@@ -89,9 +142,7 @@ class WorkbookOperator(BaseOperator):
         max_col: int | None = None,
     ) -> pd.DataFrame:
         """Read physical worksheet cells without relying on structure header grouping."""
-        sheet_obj = self.env.get_sheet(sheet) if sheet else self.env.get_active_sheet()
-        if sheet_obj is None:
-            raise ValueError(f"Workbook sheet not found: {sheet!r}")
+        sheet_obj = self.resolve_sheet(sheet)
         end_row = min(int(max_row or sheet_obj.max_row), int(sheet_obj.max_row))
         end_col = min(int(max_col or sheet_obj.max_column), int(sheet_obj.max_column))
         if min_row < 1 or min_col < 1 or end_row < min_row or end_col < min_col:

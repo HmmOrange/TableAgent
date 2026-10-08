@@ -330,9 +330,8 @@ def test_find_cells_searches_the_whole_worksheet(tmp_path: Path):
         # Whole words only: "men" must not match inside "Women".
         assert [cell.row for cell, _ in env.operators.find_cells("men")] == [2]
         assert env.operators.find_cells("   ") == []
-        # A table_id passed as the sheet fails with the worksheet names to use instead.
-        with pytest.raises(ValueError, match="Sheet1"):
-            env.operators.find_cells("Men", sheet="employment")
+        # A single-sheet workbook resolves any sheet name to its only sheet.
+        assert [cell.row for cell, _ in env.operators.find_cells("men", sheet="employment")] == [2]
     finally:
         env.workbook.close()
 
@@ -751,5 +750,77 @@ def test_label_row_trimming_and_reads_reject_non_row_groups_and_headers_without_
             )
         with pytest.raises(ValueError, match="no data_range"):
             env.operators.read_group_header_values("stats", "all_ages", "empty")
+    finally:
+        env.workbook.close()
+
+
+def _two_sheet_env(tmp_path: Path):
+    workbook_path, structure_path = _fixture(tmp_path)
+    workbook = openpyxl.load_workbook(workbook_path)
+    other = workbook.create_sheet("Table 2")
+    other["A1"] = "Other value"
+    workbook.save(workbook_path)
+    return QAEnvironment(str(structure_path), str(workbook_path))
+
+
+def test_a1_addresses_may_name_their_sheet(tmp_path: Path):
+    from TableAgent.utils import parse_a1_range, range_to_a1
+
+    assert (parse_a1_range("Sheet1!B3:C4").sheet, range_to_a1(parse_a1_range("Sheet1!B3:C4"))) == ("Sheet1", "B3:C4")
+    assert parse_a1_range("'Table 2'!A1").sheet == "Table 2"
+    assert parse_a1_range("'O''Brien'!A1").sheet == "O'Brien"
+    assert parse_a1_range("A1", "Sheet1").sheet == "Sheet1"
+
+    env = _two_sheet_env(tmp_path)
+    try:
+        assert env.operators.read_range("Sheet1!B3:C3") == [[70, 60]]
+        assert env.operators.read_range("'Table 2'!A1") == [["Other value"]]
+        # Sheet names match ignoring case and spacing.
+        assert env.operators.read_range("A1", sheet=" table 2 ") == [["Other value"]]
+        # With several sheets an unknown name fails instead of reading the active sheet.
+        with pytest.raises(ValueError, match="Table 2"):
+            env.operators.read_range("employment!A1")
+    finally:
+        env.workbook.close()
+
+
+def test_intersection_falls_back_to_header_columns_when_its_rows_miss_the_group(tmp_path: Path):
+    from TableAgent.utils import range_to_a1
+
+    workbook_path, structure_path = _fixture(tmp_path)
+    structure = yaml.safe_load(structure_path.read_text(encoding="utf-8"))
+    # The header's recorded data_range stops before the women section starts.
+    structure["employment"]["headers"][1]["data_range"] = "B2:B4"
+    structure_path.write_text(yaml.safe_dump(structure, sort_keys=False), encoding="utf-8")
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        assert range_to_a1(env.operators.intersect_group_with_header("employment", "men", "value")) == "B3:B4"
+        assert range_to_a1(env.operators.intersect_group_with_header("employment", "women", "value")) == "B6"
+        assert [r["values"] for r in env.operators.read_group_header_values("employment", "women", "value")] == [
+            {"value": 65}
+        ]
+    finally:
+        env.workbook.close()
+
+
+def test_read_cell_formats_reports_fill_font_and_indent(tmp_path: Path):
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    workbook_path, structure_path = _fixture(tmp_path)
+    workbook = openpyxl.load_workbook(workbook_path)
+    sheet = workbook.active
+    sheet["A2"].fill = PatternFill("solid", fgColor="FF0000FF")
+    sheet["A2"].font = Font(bold=True, color="FFFF0000")
+    sheet["A3"].alignment = Alignment(indent=2)
+    workbook.save(workbook_path)
+    env = QAEnvironment(str(structure_path), str(workbook_path))
+    try:
+        men, rate = env.operators.read_cell_formats("Sheet1!A2:A3")
+        assert men == {
+            "cell": "A2", "value": "Men", "fill": "FF0000FF", "font_color": "FFFF0000",
+            "bold": True, "italic": False, "indent": 0,
+        }
+        assert (rate["cell"], rate["fill"], rate["bold"], rate["indent"]) == ("A3", None, False, 2)
+        assert "operators.read_cell_formats(" in env.operators.operator_catalog()
     finally:
         env.workbook.close()

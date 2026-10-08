@@ -293,7 +293,7 @@ class PipelineRunner(RuntimeComponent):
             # An unreadable workbook must not break the fallback answer; it then runs without table text.
             return ""
         try:
-            return workbook_preview(workbook, Path(workbook_path).name)
+            return workbook_preview(workbook, Path(workbook_path).name, question=sample.question)
         finally:
             workbook.close()
 

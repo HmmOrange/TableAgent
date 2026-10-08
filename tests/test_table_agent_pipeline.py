@@ -2412,7 +2412,7 @@ def test_fallback_table_context_uses_a_workbook_preview_when_the_sample_has_no_t
     workbook.save(workbook_path)
     runner = SimpleNamespace(_fit_context=lambda text: text)
 
-    empty = SimpleNamespace(table_content="")
+    empty = SimpleNamespace(table_content="", question="What is the value?")
     context = PipelineRunner._fallback_table_context(runner, empty, workbook_path)
     assert "A2:2021" in context and "B2:42" in context
 

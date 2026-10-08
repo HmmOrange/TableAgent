@@ -64,6 +64,36 @@ def _format_prior_history(env: Any) -> str:
     return "No notebook history is available."
 
 
+def _salvage_review(content: str) -> dict[str, Any] | None:
+    """Recover a verdict from reviewer output that is not one clean JSON object.
+
+    Long reviews often wrap the object in extra text, repeat it, or break its string escaping;
+    the verdict is still stated. The last parseable object with `accepted` wins; failing that,
+    the last `"accepted": true|false` field, with whatever feedback text can be read.
+    """
+    decoder = json.JSONDecoder()
+    found = None
+    for match in re.finditer(r"\{", content):
+        try:
+            candidate, _ = decoder.raw_decode(content[match.start():])
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and isinstance(candidate.get("accepted"), bool):
+            found = candidate
+    if found is not None:
+        return found
+    verdicts = re.findall(r'"accepted"\s*:\s*(true|false)', content, re.IGNORECASE)
+    if not verdicts:
+        return None
+    feedback = re.findall(r'"feedback"\s*:\s*"(.*?)(?:"\s*[,}]|$)', content, re.DOTALL)
+    causes = re.findall(r'"cause"\s*:\s*"(interpretation|execution)"', content, re.IGNORECASE)
+    return {
+        "accepted": verdicts[-1].lower() == "true",
+        "feedback": feedback[-1].strip() if feedback else "",
+        "cause": causes[-1].lower() if causes else "execution",
+    }
+
+
 class ReviewSubtaskAction(BaseReviewAction):
     """Action that decides whether a ReAct attempt completed its subtask."""
     name = "review_subtask"
@@ -167,11 +197,13 @@ class ReviewSubtaskAction(BaseReviewAction):
         try:
             data = json.loads(payload)
         except Exception as exc:
-            return ReviewResult(
-                accepted=False,
-                feedback=f"Reviewer output must be valid JSON: {exc}",
-                score=0.0,
-            )
+            data = _salvage_review(content)
+            if data is None:
+                return ReviewResult(
+                    accepted=False,
+                    feedback=f"Reviewer output must be valid JSON: {exc}",
+                    score=0.0,
+                )
         if not isinstance(data, dict):
             return ReviewResult(
                 accepted=False,

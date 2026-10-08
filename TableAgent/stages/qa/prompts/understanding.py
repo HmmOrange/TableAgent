@@ -8,6 +8,7 @@ can follow a single interpretation. State decisions only. Do not answer the ques
 ANSWER_FORM_RULES = """- When the question asks which or who, or asks for a category or item, the answer is that item's name, not a yes/no or true/false value; when the workbook label omits a qualifier the question states for that item (such as its group), keep the question's wording.
 - When the question offers alternatives (X or Y), the answer names the chosen alternative, even when it is phrased as a yes/no question.
 - Only a question about whether a single statement holds is answered starting with Yes or No.
+- When the question asks for the difference between two values without saying which is subtracted from which, the answer is its magnitude, a non-negative number; keep a sign only when the question asks how much one increased, decreased, or changed relative to the other.
 """
 
 UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreadsheet content and write a decision sheet.
@@ -23,6 +24,8 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 - Do not answer the question or compute any value from the data.
 - Use the workbook's exact labels and cell coordinates as they appear in the content above.
 - The content above may be a preview; do not conclude that data is absent because it is not shown.
+- `[indent n]` before a label is its indentation level: a label is a component of the nearest label above it with a smaller level, and a label with a larger level below it is one of its components.
+- When a label you need is not in the content above, map it as `"question phrase" -> "label" (not shown; search the sheet for it)` instead of guessing a coordinate.
 """ + ANSWER_FORM_RULES + """
 **Decision Sheet** (use exactly these headings):
 
@@ -35,9 +38,24 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 7. **Expected Answer Form**: the answer type, unit, precision, and format (single value, one item or every matching item, list order, and which fields to report).
 """
 
+UNDERSTANDING_REVISION_TEMPLATE = """{understanding_prompt}
+
+**Previous Decision Sheet:**
+{decisions}
+
+**Rejected Answer:** {answer}
+
+**Reviewer Feedback:** {feedback}
+
+The reviewer found that the previous decisions read the question wrongly. Write a corrected decision sheet with the
+same headings and rules: change the decisions the feedback shows to be wrong, keep the others, and do not repeat
+the reading that led to the rejected answer.
+"""
+
 # Blocks that carry the decision sheet to later stages; each is empty when no decisions exist.
 DECISIONS_FOR_CODE = """Question decisions (follow them exactly; do only this subtask's part and do not compute extra totals, sums, or verification values the decisions do not ask for):
 {decisions}
+The decisions' cell coordinates come from a preview of the sheet. When the label printed at a coordinate differs from the label the decisions name, or a label is marked "search the sheet", locate the label with `operators.find_cells(label, sheet=...)` and use where it is found.
 """
 
 DECISIONS_FOR_SYNTHESIS = """Question decisions (compute `final_answer` with exactly the Required Operation and report only what the Expected Answer Form lists):

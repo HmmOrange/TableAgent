@@ -1346,7 +1346,7 @@ class DecisionLLM(FakeLLM):
 
     def __init__(self):
         super().__init__({
-            "Verify coverage, exact target identity": _llm_json({
+            "verify coverage, exact target identity": _llm_json({
                 "accepted": True, "score": 1.0, "feedback": "Accepted.",
             }),
             "Table Structure": _two_step_plan_json(),
@@ -1663,3 +1663,286 @@ def test_replanning_context_lists_earlier_failures():
     context = QAExecutionMixin._replanning_context("Failed at subtask 'b'", [], ["Failed at subtask 'a'"])
     assert context.index("attempt 1: Failed at subtask 'a'") < context.index("Failure: Failed at subtask 'b'")
     assert "Earlier attempts" not in QAExecutionMixin._replanning_context("x", [])
+
+
+@pytest.mark.parametrize(
+    ("content", "accepted", "feedback"),
+    [
+        # A clean object after prose and a second fenced block.
+        ('Looks fine.\n```json\n{"accepted": true, "score": 1.0, "feedback": "ok"}\n```\n```json\n{}\n```', True, "ok"),
+        # A broken escape inside feedback: no object parses, the fields still read.
+        ('```json\n{"accepted": false, "score": 0.2, "feedback": "uses "B8" not D8"}\n```', False, "uses "),
+        # Two objects: the last verdict wins.
+        ('{"accepted": false, "feedback": "first"} then {"accepted": true, "feedback": "second"}', True, "second"),
+    ],
+)
+def test_reviewer_verdict_is_recovered_from_imperfect_json(content, accepted, feedback):
+    from TableAgent.stages.qa.actions.review import _salvage_review
+
+    data = _salvage_review(content)
+    assert data["accepted"] is accepted
+    assert data["feedback"].startswith(feedback)
+
+
+def test_reviewer_output_without_a_verdict_is_still_rejected():
+    from TableAgent.stages.qa.actions.review import _salvage_review
+
+    assert _salvage_review("I think the code is correct.") is None
+    assert _salvage_review('{"score": 1.0}') is None
+
+
+def _sectioned_workbook():
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Category", "2015", "2016"])
+    for section in range(1, 31):
+        sheet.append([f"Section {section}"])
+        for item in ("Alpha", "Beta", "Gamma"):
+            sheet.append([f"{item} item", section, section + 1])
+    sheet.append(["Grand total", 999, 999])
+    return workbook
+
+
+def test_preview_of_a_long_sheet_keeps_middle_rows_that_match_the_question():
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = _sectioned_workbook()
+    plain = workbook_preview(workbook, "book.xlsx", max_chars=1500)
+    guided = workbook_preview(workbook, "book.xlsx", max_chars=1500, question='What is "Section 17" Gamma item in 2016?')
+
+    # The section's rows sit in the omitted middle of the plain preview.
+    assert "A66:Section 17" not in plain and "A69:Gamma item" not in plain
+    # The guided preview keeps the matching row and the section label above it, inside the budget.
+    assert "A66:Section 17" in guided and "A69:Gamma item" in guided
+    assert "Grand total" in guided and "omitted]" in guided
+    assert "mention the question's terms" in guided
+    assert len(guided) <= len(plain) + 200
+
+
+def test_preview_without_matches_is_unchanged_by_the_question():
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = _sectioned_workbook()
+    assert workbook_preview(workbook, "book.xlsx", max_chars=1500, question="Zzz qqq?") == workbook_preview(
+        workbook, "book.xlsx", max_chars=1500
+    )
+
+
+def test_preview_writes_row_label_indentation_as_text():
+    import openpyxl
+    from openpyxl.styles import Alignment
+
+    from TableAgent.stages.qa.actions.understand_question import workbook_preview
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Total", 10])
+    sheet.append(["Housework", 4])
+    sheet["A2"].alignment = Alignment(indent=2)
+    sheet.append(["\xa0\xa0\xa0\xa0Lawn care", 1])
+    sheet.append(["·  ·  Market output", 3])
+    sheet.append(["   ", 0])
+    preview = workbook_preview(workbook, "book.xlsx")
+
+    assert "A1:Total" in preview  # no indentation, no marker
+    assert "A2:[indent 2] Housework" in preview  # a cell-format indent keeps Excel's level
+    assert "A3:[indent 2] Lawn care" in preview  # four leading spaces are two levels
+    assert "A4:[indent 2] Market output" in preview  # one level per leading bullet
+    assert "A5:    " in preview and "A5:[indent" not in preview  # blank text is not a label
+
+
+def test_final_review_shows_the_worksheet_around_the_cells_the_code_used(tmp_path):
+    from types import SimpleNamespace
+
+    import openpyxl
+    from openpyxl.styles import Alignment
+
+    from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+
+    workbook_path = tmp_path / "book.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Activity", "Hours", None])
+    sheet.append([None, "Mothers", "Fathers"])
+    sheet.merge_cells("B1:C1")
+    sheet.append(["Under 18"])
+    sheet.append(["Caring", 1.35, 0.88])
+    sheet.append(["Physical care", 0.57, 0.26])
+    sheet["A5"].alignment = Alignment(indent=1)
+    workbook.save(workbook_path)
+    env = SimpleNamespace(workbook=openpyxl.load_workbook(workbook_path, data_only=True))
+    env.operators = SimpleNamespace(_workbook=SimpleNamespace(resolve_sheet=lambda name: env.workbook["Data"]))
+    review = ReviewFinalAnswerAction(env)
+
+    def output(code):
+        return SimpleNamespace(success=True, code=code, observation="", subtask_id="read", layer="inspect")
+
+    context = review._cell_context([output("rows = operators.read_range('Data!B5:C5')"), output("x = 'ZZ999'")])
+    assert "### 'Data'!B5" in context
+    # A merged parent header is carried over to every column it spans.
+    assert "B: Hours / Mothers" in context and "C: Hours / Fathers" in context
+    assert "section above: A3:Under 18" in context
+    assert "> | A5:[indent 1] Physical care | B5:0.57 | C5:0.26 |" in context
+    assert "A4:Caring | B4:1.35" in context  # the parent row next to the cell is visible
+    assert "ZZ999" not in context  # addresses outside the sheet are ignored
+    assert review._cell_context([output("print('done')")]) == "The code referenced no worksheet cells by address."
+    # Cells printed by operators count too, for code that reads through groups and headers.
+    printed = SimpleNamespace(success=True, code="rows = operators.find_in_group(t, g, 'Physical care')",
+                              observation="[(Cell(row=5, col=1), 'Physical care')]", subtask_id="find", layer="inspect")
+    assert "> | A5:[indent 1] Physical care" in review._cell_context([printed])
+
+
+def test_final_review_shows_percentages_as_the_workbook_displays_them():
+    from types import SimpleNamespace
+
+    import openpyxl
+
+    from TableAgent.stages.qa.actions.review_final_answer import _value_text
+
+    sheet = openpyxl.Workbook().active
+    sheet["A1"], sheet["B1"], sheet["C1"], sheet["D1"] = 1, 0.006, 0.25, 1.35
+    sheet["A1"].number_format = sheet["B1"].number_format = "0.0%"
+    sheet["C1"].number_format = "0%"
+    assert _value_text(sheet["A1"]) == "1 (shown as 100.0%)"  # a section's own share of itself
+    assert _value_text(sheet["B1"]) == "0.006 (shown as 0.6%)"
+    assert _value_text(sheet["C1"]) == "0.25 (shown as 25%)"
+    assert _value_text(sheet["D1"]) == "1.35"  # numbers without a percent format are unchanged
+
+
+def test_final_review_reads_the_verdict_after_value_checks():
+    from types import SimpleNamespace
+
+    from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    try:
+        content = (
+            '```json\n{"checks": ["1.35: B4, row Caring, column Mothers, section Under 18, matches"], '
+            '"accepted": true, "score": 0.9, "feedback": "ok", "cause": "execution"}\n```'
+        )
+        llm = SimpleNamespace(generate=lambda prompt, system_prompt=None: LLMResponse(content=content))
+        result = ReviewFinalAnswerAction(env, llm).run(question="Q?", plan=[], outputs=[], final_answer="1.35")
+        assert result.accepted is True and result.score == 0.9
+    finally:
+        env.workbook.close()
+
+
+def test_final_review_reads_the_verdict_from_imperfect_json():
+    from types import SimpleNamespace
+
+    from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+
+    env = QAEnvironment(STRUCTURE_PATH, WORKBOOK_PATH)
+    try:
+        def review_with(content):
+            llm = SimpleNamespace(generate=lambda prompt, system_prompt=None: LLMResponse(content=content))
+            return ReviewFinalAnswerAction(env, llm).run(question="Q?", plan=[], outputs=[], final_answer="1")
+
+        broken = '```json\n{"accepted": false, "score": 0.1, "feedback": "uses the "total" row"}\n```'
+        assert review_with(broken).accepted is False
+        assert review_with("I cannot decide.").accepted is True  # no verdict: the review is skipped as before
+    finally:
+        env.workbook.close()
+
+
+_REVISED = "5. **Required Operation**: Sum the scores of every person."
+
+
+class _FinalReviewCauseLLM(DecisionLLM):
+    """Final review rejects with a given cause until it has rejected `rejections` times."""
+
+    def __init__(self, cause: str, rejections: int = 1, fail_revision: bool = False):
+        super().__init__()
+        self.cause, self.rejections, self.fail_revision = cause, rejections, fail_revision
+        self.reviews = 0
+
+    def generate(self, prompt: str, system_prompt: str = None) -> Any:
+        if "Previous Decision Sheet" in prompt:
+            self.calls.append((prompt, system_prompt))
+            if self.fail_revision:
+                raise RuntimeError("revision unavailable")
+            return LLMResponse(content=_REVISED)
+        if "verify coverage, exact target identity" in prompt:
+            self.calls.append((prompt, system_prompt))
+            self.reviews += 1
+            rejected = self.reviews <= self.rejections
+            return LLMResponse(content=_llm_json({
+                "accepted": not rejected, "score": 0.0 if rejected else 1.0,
+                "feedback": "The decisions sum the wrong rows." if rejected else "Accepted.",
+                "cause": self.cause if rejected else "execution",
+            }))
+        return super().generate(prompt, system_prompt)
+
+
+def _cause_run(llm):
+    runner = TableQARunner(
+        STRUCTURE_PATH, WORKBOOK_PATH, llm_client=llm,
+        config={"table_agent": {"qa_final_answer_review": True, "qa_max_replans": 3}},
+    )
+    result = runner.run("What is the average score?")
+    revised = [e for e in result.logs if e.get("event_type") == "question_understanding_revised"]
+    revision_prompts = [p for p, _ in llm.calls if "Previous Decision Sheet" in p]
+    later = [e for e in result.logs if e.get("event_type") in {"planner_prompt", "generate_call"}]
+    return result, revised, revision_prompts, later
+
+
+def test_an_interpretation_rejection_revises_the_decisions_once():
+    result, revised, revision_prompts, later = _cause_run(_FinalReviewCauseLLM("interpretation", rejections=2))
+
+    assert result.success
+    # Two interpretation rejections, but the decisions are revised only once.
+    assert len(revised) == 1 and len(revision_prompts) == 1
+    assert _DECISIONS in revision_prompts[0] and "The decisions sum the wrong rows." in revision_prompts[0]
+    # Plans and code written after the revision carry the revised decisions.
+    after = result.logs.index(revised[0])
+    assert any(_REVISED in e["prompt"] for e in result.logs[after:] if e.get("event_type") == "planner_prompt")
+    assert any(_REVISED in e["prompt"] for e in result.logs[after:] if e.get("event_type") == "generate_call")
+    review_events = [e for e in result.logs if e.get("event_type") == "final_answer_review"]
+    assert review_events[0]["cause"] == "interpretation"
+
+
+def test_an_execution_rejection_keeps_the_decisions():
+    result, revised, revision_prompts, _ = _cause_run(_FinalReviewCauseLLM("execution"))
+
+    assert result.success and result.replan_count >= 1
+    assert revised == [] and revision_prompts == []
+
+
+def test_a_failed_revision_keeps_the_previous_decisions():
+    llm = _FinalReviewCauseLLM("interpretation", fail_revision=True)
+    result, revised, _, _ = _cause_run(llm)
+
+    assert result.success and revised == []
+    assert any(e.get("event_type") == "question_understanding_revision_error" for e in result.logs)
+    planner_prompts = [e["prompt"] for e in result.logs if e.get("event_type") == "planner_prompt"]
+    assert all(_DECISIONS in prompt and _REVISED not in prompt for prompt in planner_prompts)
+
+
+def test_reviewer_salvage_reads_the_rejection_cause():
+    from TableAgent.stages.qa.actions.review import _salvage_review
+
+    broken = '{"accepted": false, "feedback": "uses "total" row", "cause": "interpretation"}'
+    assert _salvage_review(broken)["cause"] == "interpretation"
+    assert _salvage_review('{"accepted": true, "feedback": "ok"')["cause"] == "execution"
+
+
+def test_a_cell_whose_loop_never_ends_is_stopped(monkeypatch):
+    import time
+
+    from TableAgent.stages.qa.environment import notebook as notebook_module
+
+    monkeypatch.setattr(notebook_module, "CELL_TIME_LIMIT_SECONDS", 0.2)
+    notebook = notebook_module.Notebook({})
+    started = time.monotonic()
+    looping = notebook.execute_cell("loop", "i = 0\nwhile True:\n    i += 1\n")
+    nested = notebook.execute_cell("nested", "def scan():\n    while True:\n        pass\nscan()\n")
+    assert time.monotonic() - started < 5
+    for result in (looping, nested):
+        assert result.success is False and "TimeoutError" in result.error and "does not end" in result.error
+    # The limit applies per cell: later cells run normally and keep the namespace.
+    after = notebook.execute_cell("after", "total = sum(range(10))\nprint(i > 0, total)")
+    assert after.success is True and after.stdout.strip() == "True 45"

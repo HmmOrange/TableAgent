@@ -25,6 +25,9 @@ class StructureOperator(BaseOperator):
         "operators.intersect_group_with_header(table_id, group_id, header_id) -> CellRange | None",
         "NOTE: the identifier attribute is `.id` on both Header and StructureGroup. "
         "`header.header_id` and `group.group_id` do not exist and raise AttributeError.",
+        "NOTE: Cell has only `.row` and `.col`; CellRange has `.start_row`, `.start_col`, `.end_row`, `.end_col`, "
+        "and `.sheet`. `cell.coordinate`, `range.start_cell`, and `operators.cell_to_a1` do not exist; build an "
+        "A1 address with `openpyxl.utils.get_column_letter(col) + str(row)`.",
         "NOTE: a StructureGroup scopes a block of records (a worksheet section); a Header names a field. "
         "Cross them with intersect_group_with_header instead of assuming row offsets.",
     )
@@ -155,10 +158,16 @@ class StructureOperator(BaseOperator):
         if axis == "row":
             row_start = max(group_range.start_row, header_range.start_row)
             row_end = min(group_range.end_row, header_range.end_row)
+            if row_start > row_end:
+                # The header's recorded data_range often misses whole sections; its columns
+                # still name the field, so read them across the group's own rows.
+                row_start, row_end = group_range.start_row, group_range.end_row
             col_start, col_end = header_range.start_col, header_range.end_col
         elif axis == "column":
             col_start = max(group_range.start_col, header_range.start_col)
             col_end = min(group_range.end_col, header_range.end_col)
+            if col_start > col_end:
+                col_start, col_end = group_range.start_col, group_range.end_col
             row_start, row_end = header_range.start_row, header_range.end_row
         else:
             return group_range.intersection(header_range)

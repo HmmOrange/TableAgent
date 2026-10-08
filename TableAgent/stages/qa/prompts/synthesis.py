@@ -19,6 +19,9 @@ Keep output small. Use existing variables, summaries, filters, and aggregates; d
 - Preserve the group ownership of evidence and do not substitute the same label from a different group.
 - If inspection found multiple distinct criteria/details for one requested item, preserve and combine all of them; you may use appropriate operators.
 - Treat accepted inspection variables as the primary evidence and reusing useful filtered, matched, selected, target, or result values instead of unnecessarily repeating inspection work.
+- `final_answer` is the answer itself: the requested values or names, not a dict, a table, or an explanatory sentence, unless the question asks for an explanation or a table. Give every part the question asks for, in the order it asks for them.
+- When the question asks for the difference between two values without saying which is subtracted from which, report its magnitude as a non-negative number.
+- Round a number to the precision the question states; otherwise round every non-integer number in the answer to two decimal places, so no floating-point noise remains.
 
 Output contract:
 - Your entire assistant message must be exactly one JSON object or exactly one ```json fenced JSON object.
@@ -50,6 +53,7 @@ Prior inspection code and outcomes:
 {prior_outcomes}
 
 Write the final Python code to compute and assign `final_answer`. Print only a concise confirmation or the final answer.
+`final_answer` holds only the requested values or names, with every non-integer number rounded to two decimal places unless the question states another precision.
 """
 
 SYNTHESIS_REVISION_USER_PROMPT_TEMPLATE = """User Question: {question}
@@ -69,6 +73,6 @@ Execution error or reviewer feedback:
 Previous attempts and runtime evidence:
 {experience}
 
-Revise the synthesis code using the accepted inspection evidence as the primary source. Exact variable-name reuse is not mandatory, but every verified table/sheet, target identity, date, equipment, status, and matching condition must be preserved. Preserve verified header-to-value relationships and every label explicitly enumerated in the question. Use clean user-facing labels, and set `final_answer`.
+Revise the synthesis code using the accepted inspection evidence as the primary source. Exact variable-name reuse is not mandatory, but every verified table/sheet, target identity, date, equipment, status, and matching condition must be preserved. Preserve verified header-to-value relationships and every label explicitly enumerated in the question. Use clean user-facing labels, and set `final_answer` to only the requested values or names, with every non-integer number rounded to two decimal places unless the question states another precision.
 Inspect the error carefully and revise your code to fix it. Preserve all previously verified table, sheet, item, date, equipment, and status constraints.
 """
