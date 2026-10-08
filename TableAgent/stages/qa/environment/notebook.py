@@ -6,6 +6,7 @@ import traceback
 import builtins
 import datetime
 import json
+import time
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -180,6 +181,56 @@ for exc in exceptions:
 safe_builtins["__import__"] = safe_import
 safe_builtins["getattr"] = safe_getattr
 
+CELL_TIME_LIMIT_SECONDS = 300
+
+# Generated code runs in a worker thread, which cannot be killed; a loop that never ends would
+# hold the sample, and the run, forever. Each loop iteration of generated code checks a deadline
+# instead. Only the cell's own code objects are monitored, so library code runs at full speed.
+_MONITOR = sys.monitoring
+_MONITOR_TOOL = next((tool for tool in range(6) if _MONITOR.get_tool(tool) is None), None)
+_deadlines: Dict[Any, float] = {}
+
+
+def _check_deadline(code: Any, offset: int, destination: int) -> None:
+    deadline = _deadlines.get(code)
+    if deadline is not None and destination <= offset and time.monotonic() > deadline:
+        raise TimeoutError(
+            f"Execution stopped after {CELL_TIME_LIMIT_SECONDS} seconds; a loop in this code does not end. "
+            "Make every loop terminate."
+        )
+
+
+if _MONITOR_TOOL is not None:
+    _MONITOR.use_tool_id(_MONITOR_TOOL, "TableAgent cell time limit")
+    _MONITOR.register_callback(_MONITOR_TOOL, _MONITOR.events.JUMP, _check_deadline)
+
+
+def _code_objects(code: Any) -> List[Any]:
+    """A compiled cell and every function, class, and generator body defined in it."""
+    codes = [code]
+    for item in codes:
+        codes.extend(const for const in item.co_consts if hasattr(const, "co_code"))
+    return codes
+
+
+def _run_with_time_limit(source: str, namespace: Dict[str, Any]) -> None:
+    compiled = compile(source, "<string>", "exec")
+    if _MONITOR_TOOL is None:
+        exec(compiled, namespace)
+        return
+    codes = _code_objects(compiled)
+    deadline = time.monotonic() + CELL_TIME_LIMIT_SECONDS
+    for code in codes:
+        _deadlines[code] = deadline
+        _MONITOR.set_local_events(_MONITOR_TOOL, code, _MONITOR.events.JUMP)
+    try:
+        exec(compiled, namespace)
+    finally:
+        for code in codes:
+            _deadlines.pop(code, None)
+            _MONITOR.set_local_events(_MONITOR_TOOL, code, 0)
+
+
 class Notebook:
     def __init__(
         self,
@@ -233,7 +284,7 @@ class Notebook:
         try:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 # Execute in the persistent namespace
-                exec(code, self.namespace)
+                _run_with_time_limit(code, self.namespace)
         except Exception as e:
             success = False
             # Get traceback
