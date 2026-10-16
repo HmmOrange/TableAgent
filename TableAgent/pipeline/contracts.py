@@ -65,6 +65,7 @@ class PipelineRuntimeContract(Protocol):
     source_retriever: Any
     structure_cache: Any
     layout_workflow: Any
+    verifier: Any
     artifact_dir: Path
     _artifact_dir: Path
     structure_stage: StructureStageContract
@@ -81,6 +82,11 @@ class PipelineRuntimeContract(Protocol):
         ...
 
     def _qa_sample_dir(self, sample: EvalSample) -> Path:
+        ...
+
+    def _answer_prompt(
+        self, sample: EvalSample, table_context: str, structure_text: str
+    ) -> str:
         ...
 
     def _run_verified_qa(self, **kwargs: Any) -> Any:

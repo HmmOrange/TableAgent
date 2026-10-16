@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -11,6 +12,8 @@ from openpyxl.utils.cell import get_column_letter, range_boundaries
 
 
 _LABEL_MATCH_THRESHOLD = 0.80
+_SEMANTIC_TOKEN = re.compile(r"[^\W_]+", flags=re.UNICODE)
+_HEADER_PATH_LOOKAROUND = 8
 
 
 def _header_display_map(structure: Any) -> dict[str, str]:
@@ -270,6 +273,190 @@ def _label_similarity(label: str, text: str) -> float:
     ).ratio()
 
 
+def _semantic_tokens(value: Any) -> list[str]:
+    """Tokenize labels while smoothing common plural differences."""
+    tokens: list[str] = []
+    for raw in _SEMANTIC_TOKEN.findall(_clean_text(value).casefold()):
+        token = raw
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us")):
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
+
+
+def _tokens_match(left: str, right: str) -> bool:
+    return left == right or SequenceMatcher(None, left, right).ratio() >= 0.88
+
+
+def _label_is_covered_by_texts(label: str, texts: list[str]) -> bool:
+    """Return true when workbook texts jointly express the semantic label."""
+    label_tokens = _semantic_tokens(label)
+    source_tokens = [token for text in texts for token in _semantic_tokens(text)]
+    if not label_tokens or not source_tokens:
+        return False
+    matched_label = [
+        token
+        for token in label_tokens
+        if any(_tokens_match(token, source) for source in source_tokens)
+    ]
+    if len(matched_label) != len(label_tokens):
+        return False
+    matched_source = sum(
+        any(_tokens_match(source, token) for token in label_tokens)
+        for source in source_tokens
+    )
+    return matched_source / len(source_tokens) >= 0.55
+
+
+def _axis_header_entries(
+    worksheet: Any,
+    data_box: tuple[int, int, int, int],
+    orientation: str,
+    used_box: tuple[int, int, int, int],
+    header_box: tuple[int, int, int, int] | None,
+) -> list[tuple[tuple[int, int, int, int], str]]:
+    """Collect visible header cells on the data leaf's ancestor path."""
+    entries: list[tuple[tuple[int, int, int, int], str]] = []
+    seen: set[tuple[tuple[int, int, int, int], str]] = set()
+    if orientation == "row":
+        row = data_box[1]
+        end = min(used_box[2], data_box[0] - 1)
+        if end < used_box[0]:
+            return []
+        if header_box is None:
+            start = max(used_box[0], end - _HEADER_PATH_LOOKAROUND)
+        else:
+            start = max(used_box[0], header_box[0] - _HEADER_PATH_LOOKAROUND)
+            end = min(end, header_box[2] + _HEADER_PATH_LOOKAROUND)
+        coordinates = ((row, col) for col in range(start, end + 1))
+    else:
+        col = data_box[0]
+        end = min(used_box[3], data_box[1] - 1)
+        if end < used_box[1]:
+            return []
+        if header_box is None:
+            start = max(used_box[1], end - _HEADER_PATH_LOOKAROUND)
+        else:
+            start = max(used_box[1], header_box[1] - _HEADER_PATH_LOOKAROUND)
+            end = min(end, header_box[3] + _HEADER_PATH_LOOKAROUND)
+        coordinates = ((row, col) for row in range(start, end + 1))
+
+    for row, col in coordinates:
+        value = _effective_value(worksheet, row, col)
+        if value is None or not str(value).strip():
+            continue
+        source_box = _merged_box_for(worksheet, (col, row, col, row)) or (
+            col,
+            row,
+            col,
+            row,
+        )
+        key = (source_box, _clean_text(value))
+        if key not in seen:
+            entries.append(key)
+            seen.add(key)
+    return entries
+
+
+def _hierarchical_header_match(
+    worksheet: Any,
+    label: str,
+    data_box: tuple[int, int, int, int],
+    orientation: str,
+    used_box: tuple[int, int, int, int],
+    header_box: tuple[int, int, int, int] | None,
+) -> tuple[tuple[int, int, int, int], list[str]] | None:
+    entries = _axis_header_entries(
+        worksheet, data_box, orientation, used_box, header_box
+    )
+    label_tokens = _semantic_tokens(label)
+    candidates = [
+        (box, text)
+        for box, text in entries
+        if any(
+            _tokens_match(source, target)
+            for source in _semantic_tokens(text)
+            for target in label_tokens
+        )
+    ]
+    best: tuple[
+        tuple[float, int, int],
+        tuple[tuple[tuple[int, int, int, int], str], ...],
+    ] | None = None
+    for size in range(1, min(6, len(candidates)) + 1):
+        for selected in combinations(candidates, size):
+            texts = [text for _, text in selected]
+            if not _label_is_covered_by_texts(label, texts):
+                continue
+            source_tokens = [
+                token for text in texts for token in _semantic_tokens(text)
+            ]
+            matched_source = sum(
+                any(_tokens_match(source, target) for target in label_tokens)
+                for source in source_tokens
+            )
+            precision = matched_source / len(source_tokens)
+            if orientation == "row":
+                proximity = max(box[2] for box, _ in selected)
+            else:
+                proximity = max(box[3] for box, _ in selected)
+            score = (precision, -size, proximity)
+            if best is None or score > best[0]:
+                best = (score, selected)
+    if best is None:
+        return None
+    contributing = list(best[1])
+    texts = [text for _, text in contributing]
+    if orientation == "row":
+        row = data_box[1]
+        path_box = (
+            min(box[0] for box, _ in contributing),
+            row,
+            max(box[2] for box, _ in contributing),
+            row,
+        )
+    else:
+        col = data_box[0]
+        path_box = (
+            col,
+            min(box[1] for box, _ in contributing),
+            col,
+            max(box[3] for box, _ in contributing),
+        )
+    return path_box, texts
+
+
+def _leaf_path_options(
+    worksheet: Any,
+    data_box: tuple[int, int, int, int],
+    orientation: str,
+    used_box: tuple[int, int, int, int],
+    header_box: tuple[int, int, int, int] | None,
+) -> list[str]:
+    options: list[str] = []
+    if orientation == "row":
+        leaf_boxes = (
+            (data_box[0], row, data_box[2], row)
+            for row in range(data_box[1], data_box[3] + 1)
+        )
+    else:
+        leaf_boxes = (
+            (col, data_box[1], col, data_box[3])
+            for col in range(data_box[0], data_box[2] + 1)
+        )
+    for leaf_box in leaf_boxes:
+        texts = [
+            text
+            for _, text in _axis_header_entries(
+                worksheet, leaf_box, orientation, used_box, header_box
+            )
+        ]
+        options.append(f"{_box_to_range(leaf_box)}={' > '.join(texts)!r}")
+    return options
+
+
 def _repair_label(header: dict[str, Any], texts: list[str], actions: list[str], path: str) -> float:
     if not texts:
         return 0.0
@@ -447,12 +634,140 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
     header_range = header.get("header_range") or header.get("range")
     data_range = header.get("data_range")
     orientation = str(header.get("orientation") or "column").strip().lower()
+    sub_headers = header.get("sub_headers") or []
+    has_sub_headers = isinstance(sub_headers, list) and bool(sub_headers)
     if orientation not in {"row", "column"}:
         _invalidate_header(header, path, null_fields)
         errors.append(f"{path}.orientation must be row or column: {orientation}")
 
     header_box = None
     data_box = None
+    hierarchy_bound = False
+    try:
+        header_box_hint = _range_box(header_range) if header_range is not None else None
+    except (TypeError, ValueError):
+        header_box_hint = None
+    try:
+        data_box_hint = _range_box(data_range) if data_range is not None else None
+    except (TypeError, ValueError):
+        data_box_hint = None
+
+    if (
+        orientation in {"row", "column"}
+        and not has_sub_headers
+        and header_box_hint is not None
+        and data_box_hint is not None
+        and _contains(used_box, header_box_hint)
+        and _contains(used_box, data_box_hint)
+    ):
+        data_span = (
+            data_box_hint[3] - data_box_hint[1] + 1
+            if orientation == "row"
+            else data_box_hint[2] - data_box_hint[0] + 1
+        )
+        if data_span > 1:
+            if orientation == "row":
+                leaf_boxes = [
+                    (data_box_hint[0], row, data_box_hint[2], row)
+                    for row in range(data_box_hint[1], data_box_hint[3] + 1)
+                ]
+            else:
+                leaf_boxes = [
+                    (col, data_box_hint[1], col, data_box_hint[3])
+                    for col in range(data_box_hint[0], data_box_hint[2] + 1)
+                ]
+            identifier = re.sub(
+                r"[_-]+", " ", str(header.get("id") or "")
+            ).strip()
+            corroborating_tokens = _semantic_tokens(label) + _semantic_tokens(
+                header.get("description")
+            )
+            confirmed_identifier = " ".join(
+                token
+                for token in _semantic_tokens(identifier)
+                if any(
+                    _tokens_match(token, other)
+                    for other in corroborating_tokens
+                )
+            )
+            binding_hints = [f"{label} {confirmed_identifier}".strip(), label]
+            matches = []
+            matched_hint = label
+            for hint in dict.fromkeys(binding_hints):
+                hint_matches = []
+                for leaf_box in leaf_boxes:
+                    match = _hierarchical_header_match(
+                        worksheet,
+                        hint,
+                        leaf_box,
+                        orientation,
+                        used_box,
+                        header_box_hint,
+                    )
+                    if match is not None:
+                        hint_matches.append((leaf_box, match))
+                matches = hint_matches
+                matched_hint = hint
+                if len(matches) == 1:
+                    break
+            if len(matches) == 1:
+                leaf_box, (matched_header_box, matched_texts) = matches[0]
+                actions.append(
+                    f"{path} narrowed from parent data range {data_range} to leaf "
+                    f"{_box_to_range(leaf_box)} using hierarchical header hint "
+                    f"{matched_hint!r}"
+                )
+                if matched_hint != label:
+                    label = " - ".join(matched_texts)
+                    header["label"] = label
+                    actions.append(f"{path}.label completed to leaf path {label!r}")
+                data_box_hint = leaf_box
+                data_range = _box_to_range(leaf_box)
+                header["data_range"] = data_range
+                header_box_hint = matched_header_box
+                header_range = _box_to_range(matched_header_box)
+                header["header_range"] = header_range
+                hierarchy_bound = True
+            else:
+                options = _leaf_path_options(
+                    worksheet,
+                    data_box_hint,
+                    orientation,
+                    used_box,
+                    header_box_hint,
+                )
+                formatted = ", ".join(options[:8])
+                _invalidate_header(header, path, null_fields)
+                errors.append(
+                    f"{path}.data_range {data_range} spans multiple leaf "
+                    f"{'rows' if orientation == 'row' else 'columns'} without "
+                    f"sub_headers. Bind this scalar field to one exact leaf or "
+                    f"declare sub_headers. Candidate leaf paths: {formatted}"
+                )
+                return
+
+        if data_box_hint is not None:
+            match = _hierarchical_header_match(
+                worksheet,
+                label,
+                data_box_hint,
+                orientation,
+                used_box,
+                header_box_hint,
+            )
+            if match is not None and len(match[1]) > 1:
+                matched_header_box, path_texts = match
+                if matched_header_box != header_box_hint:
+                    actions.append(
+                        f"{path}.header_range rebound from {header_range} to "
+                        f"{_box_to_range(matched_header_box)} using hierarchical "
+                        f"path {' > '.join(path_texts)!r}"
+                    )
+                header_box_hint = matched_header_box
+                header_range = _box_to_range(matched_header_box)
+                header["header_range"] = header_range
+                hierarchy_bound = True
+
     if header_range is not None:
         try:
             header_box = _range_box(header_range)
@@ -462,7 +777,7 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
         else:
             original_header_box = header_box
             merged_box = _merged_box_for(worksheet, header_box)
-            if merged_box and merged_box != header_box:
+            if not hierarchy_bound and merged_box and merged_box != header_box:
                 merged_texts = _cell_texts(worksheet, merged_box)
                 direct_value = worksheet.cell(row=original_header_box[1], column=original_header_box[0]).value
                 merged_similarity = max((_label_similarity(label, text) for text in merged_texts), default=0.0)
@@ -476,8 +791,43 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                     )
                     header_box = None
                 else:
-                    actions.append(f"{path}.header_range expanded from {header_range} to {_box_to_range(merged_box)} using workbook merged cells")
-                    header_box = merged_box
+                    scalar_leaf_box = None
+                    if not has_sub_headers and data_box_hint is not None:
+                        if (
+                            orientation == "column"
+                            and data_box_hint[0] == data_box_hint[2]
+                            and merged_box[0] != merged_box[2]
+                        ):
+                            scalar_leaf_box = (
+                                data_box_hint[0],
+                                merged_box[1],
+                                data_box_hint[0],
+                                merged_box[3],
+                            )
+                        elif (
+                            orientation == "row"
+                            and data_box_hint[1] == data_box_hint[3]
+                            and merged_box[1] != merged_box[3]
+                        ):
+                            scalar_leaf_box = (
+                                merged_box[0],
+                                data_box_hint[1],
+                                merged_box[2],
+                                data_box_hint[1],
+                            )
+                    if scalar_leaf_box is not None:
+                        actions.append(
+                            f"{path}.header_range bound from merged parent "
+                            f"{header_range} to leaf "
+                            f"{_box_to_range(scalar_leaf_box)}"
+                        )
+                        header_box = scalar_leaf_box
+                    else:
+                        actions.append(
+                            f"{path}.header_range expanded from {header_range} to "
+                            f"{_box_to_range(merged_box)} using workbook merged cells"
+                        )
+                        header_box = merged_box
                 if header_box is not None:
                     header["header_range"] = _box_to_range(header_box)
                     header_range = header["header_range"]
@@ -492,7 +842,11 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
             else:
                 # Header labels may be split across adjacent cells; compare the
                 # accumulated visible text before rejecting the range.
-                similarity = _repair_label(header, texts, actions, path)
+                similarity = (
+                    1.0
+                    if hierarchy_bound and _label_is_covered_by_texts(label, texts)
+                    else _repair_label(header, texts, actions, path)
+                )
                 if similarity < _LABEL_MATCH_THRESHOLD:
                     workbook_text = " / ".join(texts)
                     _invalidate_header(header, path, null_fields)
@@ -556,7 +910,6 @@ def _check_header(worksheet, path, header, used_box, errors, actions, null_field
                     _set_null(header, path, "data_range", null_fields)
                     errors.append(f"{path}.data_range contains no visible data: {data_range}")
 
-    sub_headers = header.get("sub_headers") or []
     child_header_boxes = []
     if isinstance(sub_headers, list):
         for index, child in enumerate(sub_headers):

@@ -32,6 +32,20 @@ vlm_models:
 
 table_agent:
   phase: "all"
+  # Hybrid static-index -> query locate -> compact verified structure flow.
+  query_scoped_structure_enabled: false
+  query_static_cache_dir: "cache/table_agent/query_static"
+  query_static_chunk_rows: 50
+  query_static_chunk_overlap_rows: 5
+  query_static_header_rows: 10
+  query_static_max_columns: 100
+  query_static_max_summary_chars: 120000
+  query_static_reuse_compatible_cache: true
+  query_static_error_retries: 3
+  query_static_error_retry_delay_seconds: 2
+  query_location_max_regions: 6
+  query_location_max_prompt_chars: 180000
+  query_structure_max_retries: 2
   compression_before_structure: false
   compression_similarity_threshold: 0.8
   compression_keep_rows: 2

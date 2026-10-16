@@ -59,6 +59,19 @@ class TableAgentConfig:
     compression_keep_rows: int
     compression_insert_ellipsis: bool
     compression_before_structure: bool
+    query_scoped_structure_enabled: bool
+    query_static_cache_dir: Path
+    query_static_chunk_rows: int
+    query_static_chunk_overlap_rows: int
+    query_static_header_rows: int
+    query_static_max_columns: int
+    query_static_max_summary_chars: int
+    query_static_reuse_compatible_cache: bool
+    query_static_error_retries: int
+    query_static_error_retry_delay_seconds: float
+    query_location_max_regions: int
+    query_location_max_prompt_chars: int
+    query_structure_max_retries: int
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -124,6 +137,60 @@ class TableAgentConfig:
                 merged.get("compression_insert_ellipsis", merged.get("compression_include_ellipsis", False))
             ),
             compression_before_structure=_bool(merged.get("compression_before_structure", False)),
+            query_scoped_structure_enabled=_bool(
+                merged.get("query_scoped_structure_enabled", False)
+            ),
+            query_static_cache_dir=Path(
+                str(
+                    merged.get(
+                        "query_static_cache_dir",
+                        "cache/table_agent/query_static",
+                    )
+                )
+            ),
+            query_static_chunk_rows=_positive_int(
+                merged.get("query_static_chunk_rows", 50),
+                "query_static_chunk_rows",
+            ),
+            query_static_chunk_overlap_rows=_chunk_overlap(
+                merged.get("query_static_chunk_overlap_rows", 5),
+                merged.get("query_static_chunk_rows", 50),
+            ),
+            query_static_header_rows=_positive_int(
+                merged.get("query_static_header_rows", 10),
+                "query_static_header_rows",
+            ),
+            query_static_max_columns=_positive_int(
+                merged.get("query_static_max_columns", 100),
+                "query_static_max_columns",
+            ),
+            query_static_max_summary_chars=_positive_int(
+                merged.get("query_static_max_summary_chars", 120000),
+                "query_static_max_summary_chars",
+            ),
+            query_static_reuse_compatible_cache=_bool(
+                merged.get("query_static_reuse_compatible_cache", True)
+            ),
+            query_static_error_retries=_non_negative_int(
+                merged.get("query_static_error_retries", 3),
+                "query_static_error_retries",
+            ),
+            query_static_error_retry_delay_seconds=max(
+                0.0,
+                float(merged.get("query_static_error_retry_delay_seconds", 2.0)),
+            ),
+            query_location_max_regions=_positive_int(
+                merged.get("query_location_max_regions", 6),
+                "query_location_max_regions",
+            ),
+            query_location_max_prompt_chars=_positive_int(
+                merged.get("query_location_max_prompt_chars", 180000),
+                "query_location_max_prompt_chars",
+            ),
+            query_structure_max_retries=_non_negative_int(
+                merged.get("query_structure_max_retries", 2),
+                "query_structure_max_retries",
+            ),
         )
 
     @property
@@ -270,6 +337,24 @@ def _positive_int(value: Any, key: str) -> int:
     if parsed < 1:
         raise ValueError(f"table_agent.{key} must be a positive integer")
     return parsed
+
+
+def _non_negative_int(value: Any, key: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"table_agent.{key} must be a non-negative integer")
+    return parsed
+
+
+def _chunk_overlap(value: Any, chunk_rows: Any) -> int:
+    overlap = _non_negative_int(value, "query_static_chunk_overlap_rows")
+    size = _positive_int(chunk_rows, "query_static_chunk_rows")
+    if overlap >= size:
+        raise ValueError(
+            "table_agent.query_static_chunk_overlap_rows must be smaller than "
+            "table_agent.query_static_chunk_rows"
+        )
+    return overlap
 
 
 def _bool(value: Any) -> bool:

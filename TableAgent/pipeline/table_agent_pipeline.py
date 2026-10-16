@@ -44,6 +44,7 @@ from TableAgent.stages.retrieval.pipeline import RetrievalPipeline
 from TableAgent.stages.structure import StructureStage
 from TableAgent.stages.structure.group_enrichment import GroupEnrichmentStage
 from TableAgent.stages.structure.pipeline import StructurePipeline
+from TableAgent.stages.query_scoped import QueryScopedStructurePipeline
 
 if TYPE_CHECKING:
     from TableAgent.stages.retrieval import TableRetrieverContract
@@ -75,7 +76,31 @@ class TableAgentPipeline(BasePipeline):
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         if self.settings.phase in {"qa", "all"} and self.llm is None:
             raise ValueError(f"TableAgent phase '{self.settings.phase}' requires an answer LLM client")
-        if self.settings.phase in {"structure", "all"} and self.layout_vlm is None:
+        if self.settings.query_scoped_structure_enabled:
+            if self.settings.phase not in {"qa", "all"}:
+                raise ValueError(
+                    "query-scoped structure is a query-time flow and requires "
+                    "table_agent.phase to be 'qa' or 'all'"
+                )
+            if self.settings.compression_before_structure:
+                raise ValueError(
+                    "query-scoped structure does not support "
+                    "compression_before_structure; its A1 ranges must address "
+                    "the original workbook"
+                )
+            if (
+                self.settings.embed_retrieval_cards
+                or self.settings.prepare_retrieval_embeddings
+            ):
+                raise ValueError(
+                    "query-scoped structure uses summary-based location and does "
+                    "not export or prepare retrieval-card embeddings"
+                )
+        if (
+            self.settings.phase in {"structure", "all"}
+            and not self.settings.query_scoped_structure_enabled
+            and self.layout_vlm is None
+        ):
             raise ValueError(f"TableAgent phase '{self.settings.phase}' requires a layout VLM client")
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, logger)
@@ -109,6 +134,7 @@ class TableAgentPipeline(BasePipeline):
         configured_models = available_models(config or {})
         if (
             embedding_client is None
+            and not self.settings.query_scoped_structure_enabled
             and (
                 self.settings.prepare_retrieval_embeddings
                 or (
@@ -121,6 +147,7 @@ class TableAgentPipeline(BasePipeline):
             embedding_client = MockEmbeddingModel()
         if (
             embedding_client is None
+            and not self.settings.query_scoped_structure_enabled
             and self.settings.retrieval_embedding_provider not in {None, "mock"}
             and self.settings.retrieval_embedding_provider in configured_models
         ):
@@ -150,13 +177,16 @@ class TableAgentPipeline(BasePipeline):
                 "Retrieval embedding preparation requires a configured real embedding provider and model"
             )
         prepare_corpus_embeddings = bool(
-            self.settings.embed_retrieval_cards
-            or self.settings.prepare_retrieval_embeddings
-            or (
-                self.settings.phase == "all"
-                and self.settings.routing.retrieval.use_embeddings
-                and embedding_client is not None
-                and embedding_model
+            not self.settings.query_scoped_structure_enabled
+            and (
+                self.settings.embed_retrieval_cards
+                or self.settings.prepare_retrieval_embeddings
+                or (
+                    self.settings.phase == "all"
+                    and self.settings.routing.retrieval.use_embeddings
+                    and embedding_client is not None
+                    and embedding_model
+                )
             )
         )
         self.source_preparer = SourcePreparer(
@@ -193,9 +223,16 @@ class TableAgentPipeline(BasePipeline):
             qa=self.qa_stage,
         )
         self._runner = PipelineRunner(self)
+        self._query_scoped_pipeline = (
+            QueryScopedStructurePipeline(self)
+            if self.settings.query_scoped_structure_enabled
+            else None
+        )
         self._apply_generation_cap()
 
     def run(self, sample: EvalSample) -> PipelineOutput:
+        if self._query_scoped_pipeline is not None:
+            return self._query_scoped_pipeline.run(sample)
         return self._runner.run(sample)
 
     def get_config(self) -> dict[str, Any]:
@@ -245,6 +282,10 @@ class TableAgentPipeline(BasePipeline):
         return self._source_qa_pipeline._qa_sample_dir(sample)
 
     def prepare_samples(self, samples: list[EvalSample], logger: Any | None = None) -> None:
+        if self._query_scoped_pipeline is not None:
+            self._query_scoped_pipeline.prepare_samples(samples)
+            self._structure_prepared = True
+            return
         if self.settings.phase == "qa":
             missing = []
             for sample in samples:

@@ -435,6 +435,43 @@ def _layered_merged_header_workbook(path: Path) -> None:
     workbook.save(path)
 
 
+def _semantic_leaf_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("B1:E1")
+    worksheet["B1"] = "Men"
+    worksheet.merge_cells("B2:C2")
+    worksheet["B2"] = "Employed"
+    worksheet.merge_cells("D2:E2")
+    worksheet["D2"] = "Unemployment rates"
+    for cell, value in zip(
+        ("B3", "C3", "D3", "E3"), (2022, 2023, 2022, 2023)
+    ):
+        worksheet[cell] = value
+    for row in range(4, 7):
+        for col in range(2, 6):
+            worksheet.cell(row=row, column=col).value = row * col
+    workbook.save(path)
+
+
+def _broad_leaf_workbook(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.merge_cells("B1:E1")
+    worksheet["B1"] = "Full-time workers"
+    for cell, value in zip(
+        ("B2", "C2", "D2", "E2"),
+        ("Total", "At work", "1-34 hours", "35 hours or more"),
+    ):
+        worksheet[cell] = value
+    for row in range(3, 6):
+        for col in range(2, 6):
+            worksheet.cell(row=row, column=col).value = row * col
+    workbook.save(path)
+
+
 def _run_verifier(tmp_path: Path, workbook_path: Path, structure: dict) -> dict:
     structure_path = tmp_path / "structure_after.yaml"
     structure_path.write_text(yaml.safe_dump(structure, sort_keys=False), encoding="utf-8")
@@ -833,8 +870,8 @@ def test_verifier_repairs_header_label_and_ranges_from_workbook(tmp_path: Path):
 
     assert report["status"] == "good"
     assert header["label"] == "Month Plan"
-    assert header["header_range"] == "A1:B1"
-    assert header["data_range"] == "A2:B2"
+    assert header["header_range"] == "B1"
+    assert header["data_range"] == "B2:B2"
 
 
 def test_verifier_repairs_merged_children_before_parent_coverage(tmp_path: Path):
@@ -1044,7 +1081,7 @@ def test_verifier_expands_similar_blank_merged_follower_to_full_range(tmp_path: 
     assert header["data_range"] == "B4"
 
 
-def test_verifier_accepts_header_text_split_across_cells(tmp_path: Path):
+def test_verifier_rejects_scalar_split_across_multiple_leaf_columns(tmp_path: Path):
     workbook_path = tmp_path / "book.xlsx"
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
@@ -1065,8 +1102,69 @@ def test_verifier_accepts_header_text_split_across_cells(tmp_path: Path):
         }]},
     })
 
+    assert report["status"] == "not_good"
+    assert any(
+        "multiple leaf columns without sub_headers" in error
+        for error in report["errors"]
+    )
+
+
+def test_verifier_binds_flattened_hierarchical_label_to_leaf_column(tmp_path: Path):
+    workbook_path = tmp_path / "hierarchical.xlsx"
+    _semantic_leaf_workbook(workbook_path)
+    report = _run_verifier(tmp_path, workbook_path, {
+        "table1": {"headers": [{
+            "label": "Men - Unemployment rates - 2023",
+            "orientation": "column",
+            "header_range": "E3",
+            "data_range": "E4:E6",
+            "sub_headers": [],
+        }]},
+    })
+    header = yaml.safe_load(report["repaired_structure_yaml"])["table1"]["headers"][0]
+
     assert report["status"] == "good"
-    assert report["errors"] == []
+    assert header["header_range"] == "E1:E3"
+    assert header["data_range"] == "E4:E6"
+
+
+def test_verifier_narrows_broad_range_when_metadata_names_one_leaf(tmp_path: Path):
+    workbook_path = tmp_path / "broad.xlsx"
+    _broad_leaf_workbook(workbook_path)
+    report = _run_verifier(tmp_path, workbook_path, {
+        "table1": {"headers": [{
+            "id": "full_time_total",
+            "label": "Full-time workers",
+            "description": "Total number of full-time workers",
+            "orientation": "column",
+            "header_range": "B1:E2",
+            "data_range": "B3:E5",
+            "sub_headers": [],
+        }]},
+    })
+    header = yaml.safe_load(report["repaired_structure_yaml"])["table1"]["headers"][0]
+
+    assert report["status"] == "good"
+    assert header["label"] == "Full-time workers - Total"
+    assert header["header_range"] == "B1:B2"
+    assert header["data_range"] == "B3:B5"
+
+
+def test_verifier_rejects_ambiguous_parent_without_leaf_binding(tmp_path: Path):
+    workbook_path = tmp_path / "broad.xlsx"
+    _broad_leaf_workbook(workbook_path)
+    report = _run_verifier(tmp_path, workbook_path, {
+        "table1": {"headers": [{
+            "label": "Full-time workers",
+            "orientation": "column",
+            "header_range": "B1:E1",
+            "data_range": "B3:E5",
+            "sub_headers": [],
+        }]},
+    })
+
+    assert report["status"] == "not_good"
+    assert any("Candidate leaf paths" in error for error in report["errors"])
 
 
 def test_verifier_does_not_compare_child_data_range_to_parent(tmp_path: Path):
