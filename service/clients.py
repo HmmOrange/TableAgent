@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import email.utils
 import json
+import logging
 import mimetypes
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,12 @@ import requests
 from TableAgent.configs import resolve_llm_config, resolve_vlm_config
 from TableAgent.llm import BaseLLM, LLMResponse
 
+
+logger = logging.getLogger(__name__)
+
+# Gateway codes for "the model cannot be reached"; worth waiting for, unlike
+# overload or timeouts that a later attempt may hit again right away.
+_MODEL_UNREACHABLE_CODES = {"MODEL_PROVIDER_UNAVAILABLE", "MODEL_UPSTREAM_DISCONNECTED"}
 
 OPENAI_COMPATIBLE_PROVIDERS = {
     "gpt_oss",
@@ -63,6 +70,8 @@ class OpenAICompatibleLLM(BaseLLM):
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
         session: requests.Session | None = None,
+        unavailable_wait_seconds: float = 0,
+        availability_poll_seconds: float = 15,
     ):
         super().__init__(model_name=model_name, temperature=temperature)
         self.base_url = base_url.rstrip("/")
@@ -74,6 +83,10 @@ class OpenAICompatibleLLM(BaseLLM):
         self.extra_headers = dict(extra_headers or {})
         self.extra_body = dict(extra_body or {})
         self.session = session or requests.Session()
+        # >0: when the model cannot be reached, poll the gateway workload
+        # health until it is back (up to this long), then resend the call.
+        self.unavailable_wait_seconds = max(0.0, float(unavailable_wait_seconds))
+        self.availability_poll_seconds = max(1.0, float(availability_poll_seconds))
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
         messages = self._messages(prompt, system_prompt=system_prompt)
@@ -105,6 +118,54 @@ class OpenAICompatibleLLM(BaseLLM):
         return messages
 
     def _complete(self, messages: list[dict[str, Any]]) -> LLMResponse:
+        deadline: float | None = None
+        while True:
+            try:
+                return self._complete_once(messages)
+            except ModelGatewayRequestError as exc:
+                if (
+                    self.unavailable_wait_seconds <= 0
+                    or exc.error_code not in _MODEL_UNREACHABLE_CODES
+                ):
+                    raise
+                if deadline is None:
+                    deadline = time.monotonic() + self.unavailable_wait_seconds
+                if not self._wait_until_available(deadline, exc):
+                    raise
+
+    def _health_url(self) -> str | None:
+        # Gateway workload URLs end in /v1; health sits next to it.
+        if "/workloads/" in self.base_url and self.base_url.endswith("/v1"):
+            return self.base_url[: -len("/v1")] + "/health"
+        return None
+
+    def _wait_until_available(self, deadline: float, error: ModelGatewayRequestError) -> bool:
+        """Wait until the workload health says up; False once the deadline passes."""
+        health_url = self._health_url()
+        headers = {**self.extra_headers}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        logger.warning(
+            "Model unreachable (%s); waiting up to %ds for it to come back",
+            error.error_code,
+            max(0, round(deadline - time.monotonic())),
+        )
+        while time.monotonic() < deadline:
+            time.sleep(min(self.availability_poll_seconds, max(0.0, deadline - time.monotonic())))
+            if health_url is None:
+                return True  # no health endpoint: just resend after the pause
+            try:
+                response = self.session.get(health_url, headers=headers, timeout=10)
+            except requests.RequestException:
+                continue  # gateway itself unreachable; keep waiting
+            if response.status_code == 404:
+                return True  # older gateway without workload health: resend
+            if response.status_code == 200:
+                logger.info("Model is reachable again; resending the request")
+                return True
+        return False
+
+    def _complete_once(self, messages: list[dict[str, Any]]) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
@@ -207,6 +268,7 @@ def create_model_client(
         retry_delay_seconds=float(model_config.get("retry_delay_seconds", 1)),
         extra_headers=model_config.get("headers"),
         extra_body=model_config.get("extra_body"),
+        unavailable_wait_seconds=float(model_config.get("unavailable_wait_seconds", 0) or 0),
     )
 
 
