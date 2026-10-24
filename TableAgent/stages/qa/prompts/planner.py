@@ -13,7 +13,7 @@ Each subtask must have a category:
 Classify by the subject. A subtask that asks about a product, incident, person, date, value, or other record is `normal`, even when it asks for "general information". Use `common_info` only when the subject is the workbook, sheet, or table itself. For every non-synthesis common-info task, set metadata.common_info_scope to `workbook`, `sheet`, or `table`; optional metadata.target_names identifies explicit targets.
 For mixed questions, use both categories and make the final synthesis `normal`.
 
-Aware when a requested field is a parent header, plan to resolve all applicable children with `operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with `operators.group_header_mask(...)`. A month/year in a sheet title or report name is context, not permission to replace the requested business field with a monthly tracking column unless the question explicitly asks for that tracking data.
+Aware when a requested field is a parent header, plan to resolve all applicable children with `operators.resolve_header_columns(table_id, parent_header_id)` and apply grouped conditions with `operators.group_header_mask(...)`.
 When the question explicitly names a structure group, preserve that group ID and range scope in the planned subtask.
 
 Provide your plan as JSON only, preferably inside a ```json code block.

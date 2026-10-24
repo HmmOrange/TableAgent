@@ -8,7 +8,9 @@ can follow a single interpretation. State decisions only. Do not answer the ques
 ANSWER_FORM_RULES = """- When the question asks which or who, or asks for a category or item, the answer is that item's name, not a yes/no or true/false value; when the workbook label omits a qualifier the question states for that item (such as its group), keep the question's wording.
 - When the question offers alternatives (X or Y), the answer names the chosen alternative, even when it is phrased as a yes/no question.
 - Only a question about whether a single statement holds is answered starting with Yes or No.
-- When the question asks for the difference between two values without saying which is subtracted from which, the answer is its magnitude, a non-negative number; keep a sign only when the question asks how much one increased, decreased, or changed relative to the other.
+- When the question asks for the difference or gap between two values without an order, the answer is its magnitude, a non-negative number; when it names a change from one point to another ("change from A to B", "increase", "decrease"), keep the sign of the later value minus the earlier one.
+- Every part the question asks for is part of the answer, in the question's order: when it asks to calculate, find, or match a value and also to check or compare it, the answer gives the value and then the Yes/No or comparison result; when it asks for several values, give each of them rather than their difference or sum.
+- A list of items names each item once.
 """
 
 UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreadsheet content and write a decision sheet.
@@ -24,7 +26,7 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 - Do not answer the question or compute any value from the data.
 - Use the workbook's exact labels and cell coordinates as they appear in the content above.
 - The content above may be a preview; do not conclude that data is absent because it is not shown.
-- `[indent n]` before a label is its indentation level: a label is a component of the nearest label above it with a smaller level, and a label with a larger level below it is one of its components.
+- `[indent n]` before a label is its indentation level: a label is a component of the nearest label above it with a smaller level, and a label with a larger level below it is one of its components. Quote labels without the `[indent n]` marker.
 - When a label you need is not in the content above, map it as `"question phrase" -> "label" (not shown; search the sheet for it)` instead of guessing a coordinate.
 """ + ANSWER_FORM_RULES + """
 **Decision Sheet** (use exactly these headings):
@@ -35,7 +37,7 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 4. **Decisions on Ambiguous Points**: one line per term that could be read more than one way: `term: chosen reading`. Write "None" when nothing is ambiguous.
 5. **Required Operation**: the operation (lookup, filter, count, sum, average, difference, ratio, ranking, comparison, description), the order of its operands (for example "A minus B"), and the ordered steps, without computing them.
 6. **Checks**: one or two concrete conditions the result must satisfy (for example the exact row label to use, or a total row that must not be added to its own children).
-7. **Expected Answer Form**: the answer type, unit, precision, and format (single value, one item or every matching item, list order, and which fields to report).
+7. **Expected Answer Form**: every value, item, or name the question asks for, in its order (for "calculate X and check Y", both X and the Yes/No for Y), with its type, unit, precision, and format (single value, one item or every matching item, list order).
 """
 
 UNDERSTANDING_REVISION_TEMPLATE = """{understanding_prompt}
@@ -58,7 +60,7 @@ DECISIONS_FOR_CODE = """Question decisions (follow them exactly; do only this su
 The decisions' cell coordinates come from a preview of the sheet. When the label printed at a coordinate differs from the label the decisions name, or a label is marked "search the sheet", locate the label with `operators.find_cells(label, sheet=...)` and use where it is found.
 """
 
-DECISIONS_FOR_SYNTHESIS = """Question decisions (compute `final_answer` with exactly the Required Operation and report only what the Expected Answer Form lists):
+DECISIONS_FOR_SYNTHESIS = """Question decisions (compute `final_answer` with exactly the Required Operation and report every value, item, or name the Expected Answer Form lists, and nothing else):
 {decisions}
 """
 

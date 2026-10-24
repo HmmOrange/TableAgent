@@ -34,7 +34,7 @@ Observation policy:
 - Identifier attributes are `header.id` and `group.id`. `header.header_id` and `group.group_id` do not exist.
 - When a requested field is a layered parent header with `sub_headers`, inspect every relevant child header before filtering or aggregating. Never use the first child as a proxy for the group. For an "any" condition, combine child conditions with OR; for an "all" condition, use AND, and report which child columns were covered.
   Prefer `operators.resolve_header_columns(table_id, parent_header_id)` and
-  `operators.group_header_mask(table_df, table_id, parent_header_id, ..., mode="any"|"all")` so the condition cannot drift to an unrelated header group. Treat a month/year in the sheet or report title as context unless the question explicitly asks for monthly tracking values.
+  `operators.group_header_mask(table_df, table_id, parent_header_id, ..., mode="any"|"all")` so the condition cannot drift to an unrelated header group.
 - When the question names or enumerates target records/items, match the complete normalized labels before using broad substring matching. Do not substitute a different item merely because it shares a generic token with the target.
 - If the verified table is collapsed into one coarse field, omits the named target sheet's master columns, or does not contain the exact named target, inspect the named worksheet directly with `operators.sheet_dimensions(...)` and `operators.read_sheet_as_dataframe(...)`. Preserve physical column ownership; do not split newline-packed rows and guess field positions when the original worksheet cells can be read directly.
 
@@ -81,6 +81,6 @@ Previous Code:
 Error message / Stdout:
 {error_message}
 
-Inspect the error carefully and revise your code to fix it. Preserve all previously verified table, sheet, item, date, equipment, and status constraints. Resolve columns by verified IDs/labels rather than unverified positions, and print a compact matched-row/key validation.
+Inspect the error carefully and revise your code to fix it. Preserve every previously verified condition. Resolve columns by verified IDs/labels rather than unverified positions, and print a compact matched-row/key validation.
 If there's error that cannot be fixed due to bad structure, return the reasoning, fail code and description about why that fail.
 """

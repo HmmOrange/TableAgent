@@ -83,8 +83,7 @@ Reject the answer when any of these applies:
 - a layered parent header has multiple `sub_headers` but the code or answer covers only one child without explicit
   question evidence;
 - a grouped-field condition does not preserve the required any/all combination across all relevant child headers;
-- code filters a child belonging to an unrelated parent group, including substituting monthly tracking for a requested
-  stock/status field merely because the report title contains a month.
+- code filters a child belonging to an unrelated parent group.
 3. Section, period, and hierarchy level:
 - a value comes from a different section, period, or measure than the question names, or from a total row where the
   question asks for a component (or the reverse), as the worksheet context around the cells the code used shows;
