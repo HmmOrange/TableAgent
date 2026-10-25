@@ -246,6 +246,9 @@ class QAExecutionMixin:
                 f"{[(subtask.id, subtask.layer) for subtask in plan]}"
             )
 
+        if success and final_answer is not None and not self._is_pure_common_info_plan(plan):
+            final_answer = self._answer_sentence(question, understanding, final_answer)
+
         execution_time = time.time() - start_time
         result = QAResult(
             question=question,
@@ -297,6 +300,14 @@ class QAExecutionMixin:
         )
         self._progress("[qa] question understanding revised")
         return revised
+
+    def _answer_sentence(self, question: str, understanding: str | None, final_answer: str) -> str:
+        """Restate the computed answer with its labels and units; the computed answer stays in the log."""
+        if getattr(self, "answer_sentence", None) is None:
+            return final_answer
+        sentence = self.answer_sentence.run(question, self.env.question_decisions or understanding, final_answer)
+        self.env.logger.log_event("answer_sentence", {"answer": final_answer, "sentence": sentence})
+        return sentence or final_answer
 
     def _understand_question(self, question: str) -> str | None:
         """Run once per question so every (re)plan shares the same interpretation."""

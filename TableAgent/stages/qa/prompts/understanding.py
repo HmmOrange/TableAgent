@@ -21,15 +21,15 @@ UNDERSTANDING_USER_PROMPT_TEMPLATE = """Clarify the question against the spreads
 {workbook_content}
 
 **Rules:**
-- Commit to exactly one interpretation. Never list alternative readings, candidates, or options.
-- State each decision directly without explaining why.
+- First write **Analysis** (at most about 150 words): for each term that could be read more than one way, name the two strongest readings and the cells that support each, and pick one.
+- Then write the Decision Sheet with the chosen readings only: no alternatives, candidates, or explanations inside it.
 - Do not answer the question or compute any value from the data.
 - Use the workbook's exact labels and cell coordinates as they appear in the content above.
 - The content above may be a preview; do not conclude that data is absent because it is not shown.
 - `[indent n]` before a label is its indentation level: a label is a component of the nearest label above it with a smaller level, and a label with a larger level below it is one of its components. Quote labels without the `[indent n]` marker.
 - When a label you need is not in the content above, map it as `"question phrase" -> "label" (not shown; search the sheet for it)` instead of guessing a coordinate.
 """ + ANSWER_FORM_RULES + """
-**Decision Sheet** (use exactly these headings):
+**Analysis**, then the **Decision Sheet** (use exactly these headings):
 
 1. **Clarified Question**: the question as one precise sentence in the workbook's terminology.
 2. **Term Mapping**: one line per entity, metric, category, and time expression in the question: `"question phrase" -> "exact workbook label" (cell coordinate)`; add the unit or scale when the workbook states it.

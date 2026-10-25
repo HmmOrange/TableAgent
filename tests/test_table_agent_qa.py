@@ -597,6 +597,8 @@ class FakeLLM:
                 "score": 1.0,
                 "feedback": "Accepted.",
             }))
+        if "Computed answer: " in prompt:  # the answer sentence restates the computed answer unchanged
+            return LLMResponse(content=prompt.split("Computed answer: ", 1)[1].split("\n", 1)[0])
         for key, val in self.responses.items():
             if key in prompt:
                 return LLMResponse(content=val)
@@ -1346,7 +1348,7 @@ class DecisionLLM(FakeLLM):
 
     def __init__(self):
         super().__init__({
-            "verify coverage, exact target identity": _llm_json({
+            "exact target identity, header-to-value ownership": _llm_json({
                 "accepted": True, "score": 1.0, "feedback": "Accepted.",
             }),
             "Table Structure": _two_step_plan_json(),
@@ -1866,7 +1868,7 @@ class _FinalReviewCauseLLM(DecisionLLM):
             if self.fail_revision:
                 raise RuntimeError("revision unavailable")
             return LLMResponse(content=_REVISED)
-        if "verify coverage, exact target identity" in prompt:
+        if "exact target identity, header-to-value ownership" in prompt:
             self.calls.append((prompt, system_prompt))
             self.reviews += 1
             rejected = self.reviews <= self.rejections
@@ -1946,3 +1948,102 @@ def test_a_cell_whose_loop_never_ends_is_stopped(monkeypatch):
     # The limit applies per cell: later cells run normally and keep the namespace.
     after = notebook.execute_cell("after", "total = sum(range(10))\nprint(i > 0, total)")
     assert after.success is True and after.stdout.strip() == "True 45"
+
+
+def test_a_collection_final_answer_reads_as_plain_text():
+    import numpy as np
+
+    from TableAgent.stages.qa.runner_support import QARunnerSupportMixin
+
+    serialize = QARunnerSupportMixin._serialize_final_value
+    assert serialize((16.0, 21)) == "16.0, 21"
+    assert serialize({"employee_a_hours": 16.0, "employee_b_hours": 21}) == "16.0, 21"
+    assert serialize([np.float64(69.7), True]) == "69.7, True"
+    assert serialize(["DELTA", "UPS"]) == "DELTA, UPS"
+    assert serialize(np.int64(7)) == "7"
+    assert serialize("Yes") == "Yes"
+
+
+def test_the_understanding_analysis_stays_out_of_the_decisions():
+    from TableAgent.stages.qa.actions.understand_question import _split_analysis
+
+    content = (
+        "**Analysis**\n\"total count\" could be row 4 (Total count) or row 6 (Clone count); row 4 is the aggregate.\n\n"
+        "**Decision Sheet**\n1. **Clarified Question**: What is C4?\n2. **Term Mapping**: ..."
+    )
+    analysis, decisions = _split_analysis(content)
+    assert analysis.startswith("**Analysis**") and "Clone count" in analysis
+    assert decisions.startswith("1. **Clarified Question**") and "Analysis" not in decisions
+    assert _split_analysis("no sections here") == ("", "no sections here")
+
+
+
+def test_final_answer_cleanup_drops_repeated_names_and_float_noise():
+    from TableAgent.stages.qa.runner_support import QARunnerSupportMixin
+
+    serialize = QARunnerSupportMixin._serialize_final_value
+    assert serialize(["DELTA", "UPS", "DELTA"]) == "DELTA, UPS"
+    assert serialize([5, 5]) == "5, 5"
+    assert serialize(2.1000000000000227) == "2.1"
+    assert serialize("1460100") == "1460100"
+
+
+def test_answer_sentence_restates_the_computed_answer_and_keeps_it_on_failure():
+    from types import SimpleNamespace
+
+    from TableAgent.stages.qa.actions.answer_sentence import AnswerSentenceAction, context, expected_form
+    from TableAgent.stages.qa.runner_execution import QAExecutionMixin
+
+    decisions = (
+        "1. **Clarified Question**: days between the dates.\n2. **Term Mapping**: - \"Date 2\" -> \"Date 2\" (J1)\n"
+        "3. **Scope and Conditions**: rows 3-17.\n7. **Expected Answer Form**:\n- Number of days (integer)."
+    )
+    assert expected_form(decisions) == "- Number of days (integer)."
+    assert context(decisions).startswith("1. **Clarified Question**") and "rows 3-17" not in context(decisions)
+    prompts = []
+
+    def generate(prompt, system_prompt=None):
+        prompts.append(prompt)
+        return SimpleNamespace(content="  516 days.  ")
+
+    def failing(prompt, system_prompt=None):
+        raise RuntimeError("down")
+
+    events = []
+    env = SimpleNamespace(
+        question_decisions=decisions,
+        logger=SimpleNamespace(log_event=lambda name, data: events.append((name, data))),
+    )
+
+    class Runner(QAExecutionMixin):
+        pass
+
+    runner = Runner.__new__(Runner)
+    runner.env = env
+    runner.answer_sentence = AnswerSentenceAction(env, SimpleNamespace(generate=generate))
+    assert runner._answer_sentence("Q?", None, "516") == "516 days."
+    assert "Computed answer: 516" in prompts[0] and "Term Mapping" in prompts[0]
+    assert "rows 3-17" not in prompts[0]
+    assert events[-1] == ("answer_sentence", {"answer": "516", "sentence": "516 days."})
+
+    runner.answer_sentence = AnswerSentenceAction(env, SimpleNamespace(generate=failing))
+    assert runner._answer_sentence("Q?", None, "516") == "516"  # a failed call keeps the computed answer
+    runner.answer_sentence = None
+    assert runner._answer_sentence("Q?", None, "516") == "516"
+
+
+def test_answer_sentence_keeps_the_computed_answer_when_it_adds_a_number():
+    from types import SimpleNamespace
+
+    from TableAgent.stages.qa.actions.answer_sentence import AnswerSentenceAction, numbers_supported
+
+    assert numbers_supported("Employee A: 16.0; Employee B: 21; Difference: -5.0", "16.0, 21, -5.0", "Q?")
+    assert numbers_supported("0.0424 (about 0.04)", "0.0424", "Q?")
+    assert numbers_supported("Total: 1,460,100 people in 2007", "1460100", "How many in 2007?")
+    assert not numbers_supported("Protected marine areas: 37.00%", "Protected marine areas", "Q?")
+
+    events = []
+    env = SimpleNamespace(logger=SimpleNamespace(log_event=lambda name, data: events.append((name, data))))
+    llm = SimpleNamespace(generate=lambda prompt, system_prompt=None: SimpleNamespace(content="Men: 8,300 thousand"))
+    assert AnswerSentenceAction(env, llm).run("Who had more?", None, "Men") is None
+    assert events[-1] == ("answer_sentence_rejected", {"sentence": "Men: 8,300 thousand"})

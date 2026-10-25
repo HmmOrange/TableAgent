@@ -20,6 +20,8 @@ def decisions_block(env: Any, template: str) -> str:
 MAX_WORKBOOK_CHARS = 40000
 MAX_PREVIEW_COLUMNS = 100
 MAX_PREVIEW_VALUE_LENGTH = 1000
+# The decision sheet starts at its first section, "1. **Clarified Question**" (heading marks may vary).
+DECISION_SHEET_START = re.compile(r"^\s*(?:#+\s*)?1\.\s*\**\s*Clarified Question", re.MULTILINE)
 TAIL_BUDGET_DIVISOR = 4  # a quarter of each sheet's budget is kept for its last rows
 MATCH_BUDGET_DIVISOR = 4  # with question matches, a quarter goes to matching rows from the middle
 QUESTION_STOPWORDS = frozenset(
@@ -239,4 +241,19 @@ class UnderstandQuestionAction:
     def _generate(self, prompt: str, event: str) -> str:
         self.env.logger.log_event(event, {"prompt": prompt, "system_prompt": UNDERSTANDING_SYSTEM_PROMPT})
         response = self.llm_client.generate(prompt, system_prompt=UNDERSTANDING_SYSTEM_PROMPT)
-        return str(response.content or "").strip()
+        analysis, decisions = _split_analysis(str(response.content or "").strip())
+        if analysis:
+            self.env.logger.log_event("question_understanding_analysis", {"content": analysis})
+        return decisions
+
+
+def _split_analysis(content: str) -> tuple[str, str]:
+    """Separate the free analysis from the decision sheet that later stages follow.
+
+    Later stages should see only the committed decisions; the weighing of readings stays in the log.
+    Without a recognizable first section the whole text is kept as the decisions.
+    """
+    match = DECISION_SHEET_START.search(content)
+    if match is None:
+        return "", content
+    return content[: match.start()].strip(), content[match.start():].strip()

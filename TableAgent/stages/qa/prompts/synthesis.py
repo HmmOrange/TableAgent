@@ -19,7 +19,7 @@ Keep output small. Use existing variables, summaries, filters, and aggregates; d
 - Preserve the group ownership of evidence and do not substitute the same label from a different group.
 - If inspection found multiple distinct criteria/details for one requested item, preserve and combine all of them; you may use appropriate operators.
 - Treat accepted inspection variables as the primary evidence and reusing useful filtered, matched, selected, target, or result values instead of unnecessarily repeating inspection work.
-- `final_answer` is the answer itself: the requested values or names, not a dict, a table, or an explanatory sentence, unless the question asks for an explanation or a table. Give every part the question asks for, in the order it asks for them.
+- `final_answer` is the answer itself as a plain string: the requested values or names joined with ", ", not a dict, tuple, list, table, variable names, or an explanatory sentence, unless the question asks for an explanation or a table. Give every part the question asks for, in the order it asks for them. When the question only asks whether a statement holds, `final_answer` is Yes or No.
 - Round a number to the precision the question states; otherwise round every non-integer number in the answer to two decimal places, so no floating-point noise remains; keep three significant digits for a number smaller than 1 in magnitude.
 
 Output contract:

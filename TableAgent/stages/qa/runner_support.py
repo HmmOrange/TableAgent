@@ -6,6 +6,10 @@ from typing import Any
 from TableAgent.stages.qa.models.subtask import SubTask
 
 
+# Floating-point noise such as 2.1000000000000227; ten decimals keep every real digit.
+FLOAT_NOISE = re.compile(r"(?<![\d.])-?\d+\.\d{11,}")
+
+
 class QARunnerSupportMixin:
     """Shared answer formatting, table state, and lifecycle helpers."""
 
@@ -70,7 +74,33 @@ class QARunnerSupportMixin:
                     + " |"
                 )
             return "\n".join(lines)
-        return str(value)
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, (list, tuple, set)):
+            # A collection of answer parts reads as "a, b, c", not as a Python literal; a repeated
+            # name is listed once, while repeated numbers stay (they can be distinct values).
+            parts: list[str] = []
+            for item in value:
+                part = cls._answer_part(item)
+                if isinstance(item, str) and part in parts:
+                    continue
+                parts.append(part)
+            return ", ".join(parts)
+        return cls._answer_part(value)
+
+    @classmethod
+    def _answer_part(cls, value: Any) -> str:
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(cls._answer_part(item) for item in value)
+        item = getattr(value, "item", None)
+        if callable(item) and not isinstance(value, (str, bytes)):
+            try:
+                value = item()  # numpy scalars print as np.float64(...) otherwise
+            except (TypeError, ValueError):
+                pass
+        return FLOAT_NOISE.sub(lambda m: repr(round(float(m.group(0)), 10)), str(value))
 
     @staticmethod
     def _markdown_cell(value: Any) -> str:

@@ -10,6 +10,7 @@ from TableAgent.stages.qa.actions.common_info import CommonInfoSubtaskAction
 from TableAgent.stages.qa.actions.execute_notebook import ExecuteNotebookCodeAction
 from TableAgent.stages.qa.actions.review import ReviewSubtaskAction
 from TableAgent.stages.qa.actions.review_final_answer import ReviewFinalAnswerAction
+from TableAgent.stages.qa.actions.answer_sentence import AnswerSentenceAction
 from TableAgent.stages.qa.actions.understand_question import UnderstandQuestionAction
 from TableAgent.stages.qa.agents.planner import TableQAPlanner
 from TableAgent.stages.qa.agents.react_agent import TableQAAgent
@@ -233,6 +234,11 @@ class TableQARunner(QAExecutionMixin, QARunnerSupportMixin, QAArtifactMixin):
             else None
         )
         self.propagate_decisions = bool(self.settings.get("qa_propagate_decisions", True))
+        self.answer_sentence = (
+            AnswerSentenceAction(self.env, self.llm_client)
+            if self.llm_client is not None and bool(self.settings.get("qa_answer_sentence", True))
+            else None
+        )
 
         self.table_id = None
         if isinstance(config, dict):
