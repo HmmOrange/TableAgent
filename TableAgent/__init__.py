@@ -4,8 +4,7 @@ __all__ = [
     "TableAgentPipeline",
     "TableAgentConfig",
     "TableAgentSettings",
-    "QAEnvironment",
-    "TableQARunner",
+    "answer_question",
 ]
 
 
@@ -14,8 +13,7 @@ def __getattr__(name: str):
         "TableAgentPipeline": "TableAgent.pipeline",
         "TableAgentConfig": "TableAgent.configs",
         "TableAgentSettings": "TableAgent.configs",
-        "QAEnvironment": "TableAgent.stages.qa.environment.qa_env",
-        "TableQARunner": "TableAgent.stages.qa.runner",
+        "answer_question": "TableAgent.stages.qa",
     }
     if name not in modules:
         raise AttributeError(name)

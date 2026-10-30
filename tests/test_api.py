@@ -17,7 +17,7 @@ class FakeService:
         self.accept_local_paths = False
         self.indexed_calls = []
 
-    def run(self, *, stage, queries, workbooks, embed, sheets, qa_max_replans, persist):
+    def run(self, *, stage, queries, workbooks, embed, sheets, persist):
         workbook_names = [Path(path).name for path in workbooks]
         self.calls.append(
             {
@@ -25,7 +25,6 @@ class FakeService:
                 "queries": queries,
                 "embed": embed,
                 "sheets": sheets,
-                "qa_max_replans": qa_max_replans,
                 "persist": persist,
                 "workbooks": [str(path) for path in workbooks],
             }
@@ -65,8 +64,6 @@ class FakeService:
         query,
         workbooks,
         artifacts,
-        qa_max_replans,
-        qa_enable_final_review,
         mode,
     ):
         self.indexed_calls.append(
@@ -74,8 +71,6 @@ class FakeService:
                 "query": query,
                 "workbooks": [str(path) for path in workbooks],
                 "artifacts": artifacts,
-                "qa_max_replans": qa_max_replans,
-                "qa_enable_final_review": qa_enable_final_review,
                 "mode": mode,
             }
         )
@@ -109,8 +104,7 @@ def test_health_status_and_upload_job(tmp_path: Path):
             data={
                 "payload": (
                     '{"stage":"all","queries":["question"],'
-                    '"embed":true,"sheets":["Summary,Detail","Archive"],'
-                    '"qa_max_replans":2}'
+                    '"embed":true,"sheets":["Summary,Detail","Archive"]}'
                 )
             },
             files={"files": ("book.xlsx", b"workbook-bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
@@ -125,7 +119,6 @@ def test_health_status_and_upload_job(tmp_path: Path):
         assert service.calls[0]["queries"] == ["question"]
         assert service.calls[0]["embed"] is True
         assert service.calls[0]["sheets"] == ["Summary,Detail", "Archive"]
-        assert service.calls[0]["qa_max_replans"] == 2
         assert service.calls[0]["persist"] is False
         uploaded_path = Path(service.calls[0]["workbooks"][0])
         assert client.get("/v1/jobs/ephemeral-run").status_code == 404
@@ -178,9 +171,7 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
             "/v1/jobs/upload",
             data={
                 "payload": (
-                    '{"stage":"qa","queries":["question"],"qa_max_replans":2,'
-                    '"mode":"instant",'
-                    '"qa_enable_final_review":false,"artifacts":'
+                    '{"stage":"qa","queries":["question"],"mode":"instant","artifacts":'
                     '[{"upload_name":"book.xlsx","sheet":"Sheet","structure_yaml":"table1: {}"}]}'
                 )
             },
@@ -191,8 +182,6 @@ def test_upload_job_routes_indexed_artifacts_to_qa_only_runtime(tmp_path: Path):
     assert response.json()["answers"][0]["answer"] == "indexed"
     assert not service.calls
     assert service.indexed_calls[0]["query"] == "question"
-    assert service.indexed_calls[0]["qa_max_replans"] == 2
-    assert service.indexed_calls[0]["qa_enable_final_review"] is False
     assert service.indexed_calls[0]["mode"] == "instant"
 
 
@@ -228,7 +217,6 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
                 "workbooks": [str(tmp_path / "book.xlsx")],
                 "embed": True,
                 "sheets": ["Summary,Detail"],
-                "qa_max_replans": 0,
             },
         )
 
@@ -237,7 +225,6 @@ def test_path_jobs_forward_artifact_and_sheet_options(tmp_path: Path):
     assert service.calls[0]["queries"] == []
     assert service.calls[0]["embed"] is True
     assert service.calls[0]["sheets"] == ["Summary,Detail"]
-    assert service.calls[0]["qa_max_replans"] == 0
     assert service.calls[0]["persist"] is False
 
 
@@ -247,22 +234,6 @@ def test_all_stage_requires_a_query(tmp_path: Path):
         response = client.post(
             "/v1/jobs",
             json={"stage": "all", "queries": [], "workbooks": [str(tmp_path / "book.xlsx")]},
-        )
-
-    assert response.status_code == 422
-
-
-def test_api_rejects_negative_qa_max_replans(tmp_path: Path):
-    app = create_app(FakeService(tmp_path / "service"))
-    with TestClient(app) as client:
-        response = client.post(
-            "/v1/jobs",
-            json={
-                "stage": "qa",
-                "queries": ["question"],
-                "workbooks": [str(tmp_path / "book.xlsx")],
-                "qa_max_replans": -1,
-            },
         )
 
     assert response.status_code == 422

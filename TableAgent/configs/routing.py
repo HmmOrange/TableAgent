@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 
 RetrievalMode = Literal["off", "auto", "lexical", "hybrid", "indexed", "perfect"]
-QARoutingMode = Literal["auto", "normal", "common_info"]
 
 
 @dataclass(frozen=True)
@@ -37,36 +36,19 @@ class RetrievalRoutingConfig:
 
 
 @dataclass(frozen=True)
-class QARoutingConfig:
-    mode: QARoutingMode = "auto"
-    common_info_enabled: bool = True
-    common_info_fallback: Literal["normal", "error"] = "normal"
-
-
-@dataclass(frozen=True)
 class RoutingConfig:
     retrieval: RetrievalRoutingConfig
-    qa: QARoutingConfig
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "RoutingConfig":
         routing = _mapping(config.get("routing"), "table_agent.routing")
         retrieval = _mapping(routing.get("retrieval"), "table_agent.routing.retrieval")
-        qa = _mapping(routing.get("qa"), "table_agent.routing.qa")
 
         retrieval_mode = _retrieval_mode(
             _legacy_retrieval_mode(config)
             if "run_retrieval" in config or "perfect_retrieval" in config
             else retrieval.get("mode", "auto")
         )
-        qa_mode = _qa_mode(qa.get("mode", config.get("qa_routing_mode", "auto")))
-        common_info_fallback = str(
-            qa.get("common_info_fallback", config.get("qa_common_info_fallback", "normal"))
-        ).strip().lower()
-        if common_info_fallback not in {"normal", "error"}:
-            raise ValueError(
-                "table_agent.routing.qa.common_info_fallback must be normal or error"
-            )
 
         return cls(
             retrieval=RetrievalRoutingConfig(
@@ -149,16 +131,6 @@ class RoutingConfig:
                     "table_agent.routing.retrieval.max_batches",
                 ),
             ),
-            qa=QARoutingConfig(
-                mode=qa_mode,
-                common_info_enabled=_bool(
-                    qa.get(
-                        "common_info_enabled",
-                        config.get("qa_common_info_enabled", True),
-                    )
-                ),
-                common_info_fallback=common_info_fallback,  # type: ignore[arg-type]
-            ),
         )
 
 
@@ -189,14 +161,6 @@ def _retrieval_mode(value: Any) -> RetrievalMode:
         )
     return mode  # type: ignore[return-value]
 
-
-def _qa_mode(value: Any) -> QARoutingMode:
-    mode = str(value).strip().lower()
-    if mode not in {"auto", "normal", "common_info"}:
-        raise ValueError(
-            "table_agent.routing.qa.mode must be one of: auto, normal, common_info"
-        )
-    return mode  # type: ignore[return-value]
 
 
 def _query_type(value: Any) -> str:

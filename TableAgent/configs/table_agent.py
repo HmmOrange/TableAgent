@@ -8,6 +8,9 @@ from TableAgent.configs.routing import RoutingConfig
 from TableAgent.utils.paths import safe_name
 
 
+QA_CHECKS = ("reverse", "independent", "debate")  # see TableAgent/stages/qa/checker.py
+
+
 @dataclass(frozen=True)
 class TableAgentConfig:
     phase: str
@@ -43,22 +46,16 @@ class TableAgentConfig:
     viewport_columns: int
     shift_cells: int
     max_retry: int
-    qa_max_retries: int
-    qa_max_replans: int
-    qa_max_experience_records: int
-    qa_final_answer_review: bool
-    qa_question_understanding: bool
-    qa_propagate_decisions: bool
-    qa_log_path: Path | None
-    qa_max_observation_chars: int
-    qa_max_error_chars: int
-    qa_max_value_repr_chars: int
     embed_retrieval_cards: bool
     prepare_retrieval_embeddings: bool
     compression_similarity_threshold: float
     compression_keep_rows: int
     compression_insert_ellipsis: bool
     compression_before_structure: bool
+    qa_checker: tuple[str, ...]
+    qa_checker_sees_value: bool
+    qa_checker_view: str
+    qa_synthesis_check: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> "TableAgentConfig":
@@ -104,16 +101,6 @@ class TableAgentConfig:
             viewport_columns=int(merged.get("viewport_columns", 20)),
             shift_cells=int(merged.get("shift_cells", 15)),
             max_retry=int(merged.get("max_retry", 3)),
-            qa_max_retries=int(merged.get("qa_max_retries", 3)),
-            qa_max_replans=int(merged.get("qa_max_replans", 5)),
-            qa_max_experience_records=int(merged.get("qa_max_experience_records", 5)),
-            qa_final_answer_review=_bool(merged.get("qa_final_answer_review", False)),
-            qa_question_understanding=_bool(merged.get("qa_question_understanding", True)),
-            qa_propagate_decisions=_bool(merged.get("qa_propagate_decisions", True)),
-            qa_log_path=_optional_path(merged.get("qa_log_path")),
-            qa_max_observation_chars=int(merged.get("qa_max_observation_chars", 2000)),
-            qa_max_error_chars=int(merged.get("qa_max_error_chars", 2000)),
-            qa_max_value_repr_chars=int(merged.get("qa_max_value_repr_chars", 800)),
             embed_retrieval_cards=_bool(merged.get("embed_retrieval_cards", False)),
             prepare_retrieval_embeddings=_bool(
                 merged.get("prepare_retrieval_embeddings", False)
@@ -124,6 +111,10 @@ class TableAgentConfig:
                 merged.get("compression_insert_ellipsis", merged.get("compression_include_ellipsis", False))
             ),
             compression_before_structure=_bool(merged.get("compression_before_structure", False)),
+            qa_checker=_checks(merged.get("qa_checker")),
+            qa_checker_sees_value=_bool(merged.get("qa_checker_sees_value", True)),
+            qa_checker_view=_choice(merged.get("qa_checker_view", "grid"), "qa_checker_view", ("grid", "image", "frame")),
+            qa_synthesis_check=_bool(merged.get("qa_synthesis_check", False)),
         )
 
     @property
@@ -169,18 +160,6 @@ class TableAgentConfig:
     @property
     def retrieval_max_batches(self) -> int:
         return self.routing.retrieval.max_batches
-
-    @property
-    def qa_routing_mode(self) -> str:
-        return self.routing.qa.mode
-
-    @property
-    def qa_common_info_enabled(self) -> bool:
-        return self.routing.qa.common_info_enabled
-
-    @property
-    def qa_common_info_fallback(self) -> str:
-        return self.routing.qa.common_info_fallback
 
     def should_retrieve(self, sample: Any) -> bool:
         """Decide source selection independently from the downstream QA route."""
@@ -278,8 +257,26 @@ def _bool(value: Any) -> bool:
     return bool(value)
 
 
+def _checks(value: Any) -> tuple[str, ...]:
+    """The QA checks, in order: a list or a comma-separated string of reverse, independent, debate."""
+    names = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    checks = tuple(str(name).strip().lower() for name in names if str(name).strip())
+    unknown = [name for name in checks if name not in QA_CHECKS]
+    if unknown or len(set(checks)) != len(checks):
+        raise ValueError(f"table_agent.qa_checker must list distinct checks among: {', '.join(QA_CHECKS)}")
+    return checks
+
+
+def _choice(value: Any, key: str, choices: tuple[str, ...]) -> str:
+    choice = str(value).strip().lower()
+    if choice not in choices:
+        raise ValueError(f"table_agent.{key} must be one of: {', '.join(choices)}")
+    return choice
+
+
 def _phase(value: Any) -> str:
     phase = str(value).strip().lower()
     if phase not in {"structure", "qa", "understanding", "compression", "all"}:
         raise ValueError("table_agent.phase must be one of: structure, qa, understanding, compression, all")
     return phase
+

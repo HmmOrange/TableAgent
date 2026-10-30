@@ -115,7 +115,7 @@ class FakeIndexedPipeline:
         )
         type(self).instances.append(self)
 
-    def _run_verified_qa(self, **kwargs):
+    def _answer_question(self, **kwargs):
         type(self).calls.append(kwargs)
         assert Path(kwargs["structure_path"]).is_file()
         return (
@@ -444,7 +444,6 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
     result = service.run_indexed_qa(
         query="question",
         workbooks=[source],
-        qa_max_replans=2,
         artifacts=[
             {
                 "id": "book:Sheet:table-1",
@@ -461,7 +460,6 @@ def test_indexed_qa_uses_persisted_structures_without_layout_extraction(tmp_path
 
     assert len(FakeIndexedPipeline.instances) == 1
     assert FakeIndexedPipeline.instances[0].layout_vlm_client is None
-    assert FakeIndexedPipeline.instances[0].config["qa_max_replans"] == 2
     assert "indexed_schema_text" not in FakeIndexedPipeline.calls[0]
     assert result["answers"][0]["answer"] == "indexed answer"
     assert result["answers"][0]["retrieval"]["mode"] == "indexed_vector_multi_candidate"
@@ -479,9 +477,7 @@ def test_instant_indexed_qa_disables_thinking_and_uses_instant_limits(tmp_path: 
         {
             "service": {"root_dir": str(tmp_path / "service")},
             "table_agent": {
-                "qa_max_retries": 3,
                 "generation_max_tokens": 8192,
-                "qa_instant_max_retries": 1,
                 "qa_instant_generation_max_tokens": 2048,
             },
         },
@@ -509,7 +505,6 @@ def test_instant_indexed_qa_disables_thinking_and_uses_instant_limits(tmp_path: 
     assert pipeline.llm_client is not answer_client
     assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
     assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
-    assert pipeline.config["qa_max_retries"] == 1
     assert pipeline.config["generation_max_tokens"] == 2048
 
 
@@ -525,7 +520,6 @@ def test_thinking_indexed_qa_disables_reasoning_and_preserves_limits(tmp_path: P
         {
             "service": {"root_dir": str(tmp_path / "service")},
             "table_agent": {
-                "qa_max_retries": 3,
                 "generation_max_tokens": 8192,
             },
         },
@@ -553,7 +547,6 @@ def test_thinking_indexed_qa_disables_reasoning_and_preserves_limits(tmp_path: P
     assert pipeline.llm_client is not answer_client
     assert pipeline.llm_client.extra_body["chat_template_kwargs"]["enable_thinking"] is False
     assert answer_client.extra_body["chat_template_kwargs"]["enable_thinking"] is True
-    assert pipeline.config["qa_max_retries"] == 3
     assert pipeline.config["generation_max_tokens"] == 8192
 
 
@@ -574,7 +567,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     config["table_agent"]["retrieval_embedding_provider"] = "mock"
     qa_calls = []
 
-    def run_verified_qa(_pipeline, **kwargs):
+    def answer_question_stub(_pipeline, **kwargs):
         qa_calls.append(
             {
                 **kwargs,
@@ -592,7 +585,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
             {"success": True, "fallback_used": False, "replan_count": 0},
         )
 
-    monkeypatch.setattr(TableAgentPipeline, "_run_verified_qa", run_verified_qa)
+    monkeypatch.setattr(TableAgentPipeline, "_answer_question", answer_question_stub)
     service = TableAgentService(
         config,
         llm_client=FakeSummaryClient(),
@@ -641,7 +634,6 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     result = service.run_indexed_qa(
         query="regional revenue score",
         workbooks=[sales, maintenance],
-        qa_enable_final_review=False,
         artifacts=[
             {
                 "id": "sales:summary",
@@ -686,7 +678,6 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert qa_calls[0]["related_structure_texts"] == [
         "table1:\n  sheet: Archive\n  headers: []\n"
     ]
-    assert qa_calls[0]["enable_final_answer_review"] is False
     assert answer["workbook"] == "sales.xlsx"
     assert answer["workbooks"] == ["sales.xlsx"]
     assert answer["sheets"] == ["Sheet", "Archive"]
@@ -785,45 +776,6 @@ def test_qa_stage_generates_fresh_structure_before_answering(tmp_path: Path):
     assert FakePipeline.instances[1].layout_vlm_client is None
     assert result["answers"][0]["answer"] == "answer: question"
 
-
-def test_qa_stage_accepts_per_run_max_replans_override(tmp_path: Path):
-    FakePipeline.instances = []
-    source = _workbook(tmp_path / "book.xlsx")
-    service = TableAgentService(
-        {
-            "service": {"root_dir": str(tmp_path / "service")},
-            "table_agent": {"qa_max_replans": 5},
-        },
-        llm_client=FakeSummaryClient(),
-        layout_vlm_client=object(),
-        pipeline_factory=FakePipeline,
-    )
-
-    service.run(
-        stage="qa",
-        workbooks=[source],
-        queries=["question"],
-        qa_max_replans=2,
-    )
-
-    assert FakePipeline.instances[1].config["qa_max_replans"] == 2
-
-
-def test_service_rejects_negative_qa_max_replans(tmp_path: Path):
-    service = TableAgentService({"service": {"root_dir": str(tmp_path / "service")}})
-    source = _workbook(tmp_path / "book.xlsx")
-
-    try:
-        service.run(
-            stage="qa",
-            workbooks=[source],
-            queries=["question"],
-            qa_max_replans=-1,
-        )
-    except ValueError as exc:
-        assert "qa_max_replans" in str(exc)
-    else:
-        raise AssertionError("Expected a negative qa_max_replans validation error")
 
 
 def test_service_always_regenerates_structure_in_a_fresh_workspace(tmp_path: Path):

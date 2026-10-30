@@ -112,7 +112,6 @@ class TableAgentService:
         job_id: str | None = None,
         embed: bool = False,
         sheets: Iterable[str] = (),
-        qa_max_replans: int | None = None,
         max_workers: int | None = None,
         persist: bool = True,
         compress_before_structure: bool | None = None,
@@ -120,8 +119,6 @@ class TableAgentService:
         stage = _validate_stage(stage)
         query_list = _validate_queries(queries, required=stage in {"qa", "all"})
         worker_count = self._resolve_max_workers(max_workers)
-        if qa_max_replans is not None and qa_max_replans < 0:
-            raise ValueError("qa_max_replans must be greater than or equal to 0")
         workbook_list = [Path(value).expanduser().resolve() for value in workbooks]
         if not workbook_list:
             raise ValueError("At least one workbook is required")
@@ -333,7 +330,6 @@ class TableAgentService:
                                 output_dir,
                                 source_dir,
                                 embed=False,
-                                qa_max_replans=qa_max_replans,
                                 max_workers=worker_count,
                             ),
                         )
@@ -348,7 +344,6 @@ class TableAgentService:
                                     sample,
                                     output_dir=output_dir,
                                     source_dir=source_dir,
-                                    qa_max_replans=qa_max_replans,
                                     max_workers=worker_count,
                                 ),
                                 samples,
@@ -402,8 +397,6 @@ class TableAgentService:
         query: str,
         workbooks: Iterable[str | Path],
         artifacts: Iterable[dict[str, Any]],
-        qa_max_replans: int | None = None,
-        qa_enable_final_review: bool | None = None,
         mode: str = "thinking",
         max_workers: int | None = None,
     ) -> dict[str, Any]:
@@ -411,8 +404,6 @@ class TableAgentService:
         normalized_query = str(query).strip()
         if not normalized_query:
             raise ValueError("At least one non-empty query is required for indexed QA")
-        if qa_max_replans is not None and qa_max_replans < 0:
-            raise ValueError("qa_max_replans must be greater than or equal to 0")
         if mode not in {"instant", "thinking"}:
             raise ValueError("Indexed QA mode must be instant or thinking")
         worker_count = self._resolve_max_workers(max_workers)
@@ -429,8 +420,6 @@ class TableAgentService:
                 normalized_query=normalized_query,
                 workbook_list=workbook_list,
                 artifact_list=artifact_list,
-                qa_max_replans=qa_max_replans,
-                qa_enable_final_review=qa_enable_final_review,
                 mode=mode,
                 max_workers=worker_count,
             )
@@ -470,7 +459,6 @@ class TableAgentService:
                     output_dir,
                     source_dir,
                     embed=False,
-                    qa_max_replans=qa_max_replans,
                     mode=mode,
                     max_workers=worker_count,
                 ),
@@ -510,7 +498,7 @@ class TableAgentService:
                     f"Question: {normalized_query}\n\n"
                     f"Retrieved cards:\n{cards}"
                 )
-                answer_response, qa_info = pipeline._run_verified_qa(
+                answer_response, qa_info = pipeline._answer_question(
                     question=normalized_query,
                     structure_path=structures[0][1],
                     workbook_path=Path(by_name[workbook_name]["path"]),
@@ -518,11 +506,6 @@ class TableAgentService:
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
                     related_structure_paths=[path for _, path in structures[1:]],
-                    enable_final_answer_review=(
-                        True
-                        if qa_enable_final_review is None
-                        else qa_enable_final_review
-                    ),
                 )
                 total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
                 total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
@@ -776,8 +759,6 @@ class TableAgentService:
         normalized_query: str,
         workbook_list: list[Path],
         artifact_list: list[dict[str, Any]],
-        qa_max_replans: int | None,
-        qa_enable_final_review: bool | None,
         mode: str,
         max_workers: int,
     ) -> dict[str, Any]:
@@ -824,7 +805,6 @@ class TableAgentService:
                     output_dir,
                     source_dir,
                     embed=False,
-                    qa_max_replans=qa_max_replans,
                     mode=mode,
                     max_workers=max_workers,
                 ),
@@ -940,11 +920,6 @@ class TableAgentService:
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
                 related_structure_paths=tuple(related_structure_paths),
-                enable_final_answer_review=(
-                    True
-                    if qa_enable_final_review is None
-                    else qa_enable_final_review
-                ),
             ))
             answer_response, qa_info = qa_output.response, qa_output.metadata
             public_qa_info = dict(qa_info)
@@ -1340,7 +1315,6 @@ class TableAgentService:
         *,
         output_dir: Path,
         source_dir: Path,
-        qa_max_replans: int | None,
         max_workers: int,
     ) -> PipelineOutput:
         llm_client, llm_owned = self._worker_client("llm")
@@ -1353,7 +1327,6 @@ class TableAgentService:
                     output_dir,
                     source_dir,
                     embed=False,
-                    qa_max_replans=qa_max_replans,
                     max_workers=max_workers,
                 ),
             )
@@ -1416,7 +1389,6 @@ class TableAgentService:
         *,
         embed: bool = False,
         prepare_embeddings: bool = False,
-        qa_max_replans: int | None = None,
         retrieval_rerank_with_llm: bool | None = None,
         mode: str | None = None,
         max_workers: int | None = None,
@@ -1440,12 +1412,7 @@ class TableAgentService:
         for key in ("models", "vlm_models", "llm_providers", "embedding"):
             if key in self.config:
                 agent_config[key] = self.config[key]
-        if qa_max_replans is not None:
-            agent_config["qa_max_replans"] = qa_max_replans
         if mode == "instant":
-            agent_config["qa_max_retries"] = int(
-                agent_config.get("qa_instant_max_retries", 1)
-            )
             agent_config["generation_max_tokens"] = int(
                 agent_config.get("qa_instant_generation_max_tokens", 2048)
             )

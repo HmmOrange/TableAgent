@@ -59,74 +59,39 @@ class FakeLLM:
 
 
 class SuccessfulQALLM(FakeLLM):
+    """Answers the QA loop's roles: frame, one inspection, synthesis, review."""
+
     def generate(self, prompt: str, system_prompt: str | None = None) -> LLMResponse:
-        self.calls.append((prompt, system_prompt))
-        if system_prompt and "verification agent" in system_prompt:
-            return LLMResponse(
-                content="status: good\nfeedback: Structure uses meaningful detected labels.\n",
-                prompt_tokens=4,
-                completion_tokens=2,
-            )
-        if system_prompt and "spreadsheet QA planner" in system_prompt:
-            return LLMResponse(
-                content=json.dumps(
-                    {
-                        "subtasks": [
-                            {
-                                "id": "inspect_table",
-                                "layer": "inspect",
-                                "depends_on": [],
-                                "description": "Inspect the available table.",
-                            },
-                            {
-                                "id": "synthesize_answer",
-                                "layer": "synthesis",
-                                "depends_on": ["inspect_table"],
-                                "description": "Compute the final answer.",
-                            },
-                        ]
-                    },
-                    sort_keys=False,
-                ),
-                prompt_tokens=7,
-                completion_tokens=3,
-            )
-        if system_prompt and "spreadsheet analysis ReAct agent" in system_prompt:
-            return LLMResponse(
-                content=json.dumps(
-                    {
-                        "reasoning": "Inspect a compact preloaded table summary.",
-                        "code": "inspected_shape = table_df.shape\nprint(inspected_shape)",
-                        "description": "Stores and prints the table shape.",
-                    }
-                ),
-                prompt_tokens=11,
-                completion_tokens=4,
-            )
-        if system_prompt and "spreadsheet synthesis agent" in system_prompt:
-            return LLMResponse(
-                content=json.dumps(
-                    {
-                        "reasoning": "The sample answer is directly computed for this fixture.",
-                        "code": "final_answer = '100'\nprint(final_answer)",
-                        "description": "Sets the final answer.",
-                    }
-                ),
-                prompt_tokens=13,
-                completion_tokens=4,
-            )
-        if system_prompt and "strict table-QA reviewer" in system_prompt:
-            return LLMResponse(
-                content=json.dumps(
-                    {
-                        "accepted": True,
-                        "score": 1.0,
-                        "feedback": "Accepted.",
-                    }
-                ),
-                prompt_tokens=5,
-                completion_tokens=2,
-            )
+        from TableAgent.stages.qa.prompts import (
+            INSPECTOR_SYSTEM_PROMPT,
+            INSPECTOR_SYSTEM_PROMPT_WITH_LOOK,
+            REASONER_SYSTEM_PROMPT,
+            SYNTHESIZER_SYSTEM_PROMPT,
+        )
+
+        if system_prompt == REASONER_SYSTEM_PROMPT:
+            self.calls.append((prompt, system_prompt))
+            if "before anything is read" in prompt:
+                reply = {
+                    "analysis": "One value.", "hypothesis": "Read it.", "answer_form": "a number",
+                    "answer_slots": [{"slot": "the revenue", "asked_by": "revenue"}],
+                    "needs": [{"id": "n1", "description": "the 2024 revenue"}],
+                }
+            elif "Proposed answer:" in prompt:
+                reply = {"assessment": "Fits.", "verdict": "accept"}
+            elif "Open needs:" in prompt:
+                reply = {"assessment": "Open.", "action": "inspect", "need_id": "n1", "strategy": "structure"}
+            else:
+                reply = {"assessment": "Found.", "action": "synthesize"}
+            return LLMResponse(content=json.dumps(reply), prompt_tokens=5, completion_tokens=1)
+        if system_prompt in (INSPECTOR_SYSTEM_PROMPT, INSPECTOR_SYSTEM_PROMPT_WITH_LOOK):  # with a VLM, it may look
+            self.calls.append((prompt, system_prompt))
+            reply = {"thought": "Read it.", "code": "evidence_n1 = {'value': 100, 'cells': []}", "done": True}
+            return LLMResponse(content=json.dumps(reply), prompt_tokens=7, completion_tokens=3)
+        if system_prompt == SYNTHESIZER_SYSTEM_PROMPT:
+            self.calls.append((prompt, system_prompt))
+            reply = {"thought": "One slot.", "code": "answer_parts = [evidence_n1['value']]"}
+            return LLMResponse(content=json.dumps(reply), prompt_tokens=6, completion_tokens=2)
         return super().generate(prompt, system_prompt=system_prompt)
 
 
@@ -238,8 +203,8 @@ def test_table_agent_writes_verified_structure(tmp_path: Path):
     assert "group_range" in layout_vlm.calls[2][0]
     assert layout_vlm.calls[0][1].name == "viewport.png"
     assert layout_vlm.calls[2][1].name == "worksheet.png"
-    assert output.metadata["qa"]["token_usage"] == {"prompt": 78, "completion": 13}
-    assert output.token_usage == {"prompt": 84, "completion": 14}
+    assert output.metadata["qa"]["fallback_used"] is True  # the fake model gives no JSON, so QA falls back
+    assert output.metadata["qa"]["token_usage"] == output.token_usage
 
 
 def test_table_agent_repairs_unquoted_colon_text_end_to_end(tmp_path: Path):
@@ -337,8 +302,8 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     assert output.predicted_answer == "100"
     assert output.metadata["qa"]["success"] is True
     assert output.metadata["qa"]["fallback_used"] is False
-    assert output.metadata["qa"]["token_usage"] == {"prompt": 41, "completion": 15}
-    assert output.token_usage == {"prompt": 41, "completion": 15}
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 33, "completion": 9}
+    assert output.metadata["qa"]["llm_call_count"] == 6
 
 
 def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):
@@ -613,12 +578,12 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     )
     captured = {}
 
-    def fake_run_verified_qa(**kwargs):
+    def fake_answer_question(**kwargs):
         captured["structure_path"] = kwargs["structure_path"]
         captured["qa_artifact_dir"] = kwargs["qa_artifact_dir"]
         return LLMResponse(content="100"), {"success": True}
 
-    monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
+    monkeypatch.setattr(pipeline, "_answer_question", fake_answer_question)
 
     output = pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
     selected_path = captured["structure_path"]
@@ -681,11 +646,11 @@ def test_prepared_source_qa_maps_compressed_structure_to_original_workbook(
     )
     captured = {}
 
-    def fake_run_verified_qa(**kwargs):
+    def fake_answer_question(**kwargs):
         captured.update(kwargs)
         return LLMResponse(content="value"), {"success": True}
 
-    monkeypatch.setattr(pipeline, "_run_verified_qa", fake_run_verified_qa)
+    monkeypatch.setattr(pipeline, "_answer_question", fake_answer_question)
 
     pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
 
@@ -695,7 +660,7 @@ def test_prepared_source_qa_maps_compressed_structure_to_original_workbook(
 def test_cached_qa_maps_artifact_workbook_through_compression_manifest(
     tmp_path: Path,
 ):
-    from TableAgent.stages.qa.workbook_paths import original_workbook_for_sample
+    from TableAgent.stages.qa.utils.workbook_paths import original_workbook_for_sample
 
     original = tmp_path / "book.xlsx"
     compression_source = tmp_path / "compression" / "book.xlsx" / "book.xlsx"
@@ -959,108 +924,7 @@ def test_source_preparer_force_regenerates_valid_structure(tmp_path: Path):
     assert len(layout_vlm.calls) > initial_call_count
 
 
-def test_table_agent_pipeline_does_not_preselect_table_for_qa(tmp_path: Path, monkeypatch):
-    import openpyxl
-    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
-
-    captured_configs = []
-
-    class _WorkbookHandle:
-        def close(self):
-            pass
-
-    class _Env:
-        workbook = _WorkbookHandle()
-
-    class CapturingRunner:
-        def __init__(
-            self,
-            *,
-            structure_path,
-            workbook_path,
-            llm_client,
-            config,
-            table_retriever=None,
-            related_structure_paths=None,
-        ):
-            captured_configs.append(config)
-            self.env = _Env()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            self.env.workbook.close()
-
-        def run(self, question):
-            class Result:
-                success = True
-                final_answer = "ok"
-                error = None
-                execution_time = 0.0
-                token_usage = {"prompt": 1, "completion": 1}
-                artifacts = {}
-
-            return Result()
-
-        def token_usage(self):
-            return {"prompt": 1, "completion": 1}
-
-    monkeypatch.setattr(pipeline_module, "TableQARunner", CapturingRunner)
-
-    workbook_path = tmp_path / "book.xlsx"
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Sheet1"
-    ws["A1"] = "Metric"
-    ws["B1"] = "Value"
-    wb.save(workbook_path)
-
-    structure_path = tmp_path / "structure.yaml"
-    structure_path.write_text(
-        yaml.safe_dump(
-            {
-                "table1": {
-                    "id": "table1",
-                    "name": "Wrong lexical match",
-                    "description": "This table should not be preselected.",
-                    "sheet": "Sheet1",
-                    "headers": [],
-                },
-                "table2": {
-                    "id": "table2",
-                    "name": "Right table",
-                    "description": "The table inspect layer should choose this later.",
-                    "sheet": "Sheet1",
-                    "headers": [],
-                },
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    pipeline = TableAgentPipeline(
-        llm_client=FakeLLM(),
-        layout_vlm_client=FakeLayoutVLM(),
-        config={"artifact_dir": str(tmp_path)},
-    )
-
-    response, qa_info = pipeline._run_verified_qa(
-        question="Which table is right?",
-        structure_path=structure_path,
-        workbook_path=workbook_path,
-        qa_artifact_dir=tmp_path / "qa",
-        fallback_prompt="fallback",
-    )
-
-    assert response.content == "ok"
-    assert qa_info["success"] is True
-    assert captured_configs
-    assert "table_id" not in captured_configs[0]
-
-
-def test_verified_qa_falls_back_before_runner_when_structure_is_missing(tmp_path: Path):
+def test_qa_falls_back_before_exploring_when_structure_is_missing(tmp_path: Path):
     llm = FakeLLM()
     pipeline = TableAgentPipeline(
         llm_client=llm,
@@ -1068,7 +932,7 @@ def test_verified_qa_falls_back_before_runner_when_structure_is_missing(tmp_path
         config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"},
     )
 
-    response, qa_info = pipeline._run_verified_qa(
+    response, qa_info = pipeline._answer_question(
         question="What is the value?",
         structure_path=tmp_path / "missing" / "structure.yaml",
         workbook_path=tmp_path / "book.xlsx",
@@ -2215,188 +2079,60 @@ def legacy_table_agent_llm_reranker(tmp_path: Path):
     assert output2.metadata["retrieval_info"]["fallback_used"] is True
 
 
-def test_table_agent_default_max_replans_is_five(tmp_path: Path):
-    pipeline = TableAgentPipeline(
-        llm_client=FakeLLM(),
-        layout_vlm_client=FakeLayoutVLM(),
-        config={"artifact_dir": str(tmp_path)},
-    )
+def _failed_exploration(tmp_path: Path, monkeypatch, evidence=None):
+    """Run the QA stage with an exploration that fails, optionally after finding one checked need."""
+    import TableAgent.stages.qa.workbook_qa as workbook_qa
+    from TableAgent.stages.qa.orchestrator import AnswerResult
+    from TableAgent.stages.qa.ledger import Evidence, Ledger
 
-    assert pipeline.settings.qa_max_replans == 5
-
-
-def test_verified_fallback_uses_successful_inspections_only():
-    from types import SimpleNamespace
-
-    from TableAgent.stages.qa.models.results import AgentOutput, QAResult
-    from TableAgent.stages.qa.models.subtask import SubTask
-
-    result = QAResult(
-        question="Describe the matching record.",
-        plan=[
-            SubTask(id="route", description="Select a table.", layer="table_inspect"),
-            SubTask(id="inspect", description="Read the exact matching row.", layer="inspect"),
-            SubTask(
-                id="sheet_info",
-                description="Describe the sheet.",
-                layer="inspect",
-            ),
-        ],
-        subtask_outputs=[
-            AgentOutput("route", "", "", True, "selected table", namespace_updates={}),
-            AgentOutput("inspect", "", "", True, "error_code=E-1; fault_content=blocked", namespace_updates={}),
-            AgentOutput("sheet_info", "", "", True, "sheet headers", namespace_updates={}),
-        ],
-    )
-    pipeline = SimpleNamespace(settings=SimpleNamespace(max_context_chars=10000))
-
-    prompt = TableAgentPipeline._verified_observation_fallback_prompt(
-        pipeline,
-        "Describe error E-1.",
-        result,
-    )
-
-    assert prompt is not None
-    assert "error_code=E-1; fault_content=blocked" in prompt
-    assert "selected table" not in prompt
-    assert "sheet headers" in prompt
-
-
-def test_verified_fallback_rejects_unsafe_evidence():
-    from types import SimpleNamespace
-
-    from TableAgent.stages.qa.models.results import AgentOutput, QAResult
-    from TableAgent.stages.qa.models.subtask import SubTask
-
-    result = QAResult(
-        question="Return the matching record.",
-        plan=[SubTask(id="inspect", description="Inspect the requested field.", layer="inspect")],
-        subtask_outputs=[
-            AgentOutput(
-                "inspect",
-                "Inspect the requested field.",
-                "print(wrong_header_value)",
-                True,
-                "value=from a neighboring header",
-                layer="inspect",
-            )
-        ],
-        error="Final answer review rejected the plan: incorrect header mapping.",
-    )
-    pipeline = SimpleNamespace(settings=SimpleNamespace(max_context_chars=10000))
-
-    assert TableAgentPipeline._verified_observation_fallback_prompt(
-        pipeline,
-        result.question,
-        result,
-    ) is None
-
-
-def _failing_runner(observations, error="Final answer review rejected the plan: the answer omitted the requested year."):
-    from TableAgent.stages.qa.models.results import AgentOutput
-    from TableAgent.stages.qa.models.subtask import SubTask
-
-    class FailingRunner:
-        def __init__(self, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def run(self, question):
-            class Result:
-                success = False
-                final_answer = None
-                execution_time = 0.0
-                token_usage = {"prompt": 1, "completion": 1}
-                artifacts = {}
-                plan = [SubTask(id="inspect", description="Read the value.", layer="inspect")]
-                subtask_outputs = [
-                    AgentOutput("inspect", "Read the value.", "", True, text, layer="inspect")
-                    for text in observations
-                ]
-
-            result = Result()
-            result.error = error
-            return result
-
-    return FailingRunner
-
-
-@pytest.mark.parametrize("observations, source", [
-    (["value=42 for year 2021"], "verified_inspection_observations"),
-    ([], "source_context"),
-])
-def test_qa_fallback_prompt_carries_the_failed_attempt_feedback(tmp_path: Path, monkeypatch, observations, source):
-    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
-
-    monkeypatch.setattr(pipeline_module, "TableQARunner", _failing_runner(observations))
+    ledger = Ledger("What is the value?")
+    ledger.start({
+        "analysis": "", "hypothesis": "", "answer_form": "", "answer_slots": [],
+        "needs": [{"id": "n1", "description": "the 2021 value"}],
+    })
+    if evidence is not None:
+        ledger.record(Evidence("n1", 1, 1, "search_sheet", "", **evidence))
+    failed = AnswerResult("What is the value?", None, False, "Synthesis failed: no parts", 1.0,
+                          {"prompt": 3, "completion": 1}, [], ledger)
+    monkeypatch.setattr(workbook_qa, "answer_question", lambda *args, **kwargs: failed)
     structure_path = tmp_path / "structure.yaml"
     structure_path.write_text(yaml.safe_dump({"table1": {"id": "table1", "name": "T", "sheet": "Sheet1", "headers": []}}), encoding="utf-8")
     llm = FakeLLM()
     pipeline = TableAgentPipeline(llm_client=llm, layout_vlm_client=None, config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"})
+    built = []
 
-    _, qa_info = pipeline._run_verified_qa(
+    def context():
+        built.append(1)
+        return "Workbook context goes here."
+
+    response, qa_info = pipeline._answer_question(
         question="What is the value?",
         structure_path=structure_path,
         workbook_path=tmp_path / "book.xlsx",
         qa_artifact_dir=tmp_path / "qa",
-        fallback_prompt="Workbook context goes here.",
+        fallback_prompt=context,
     )
-
-    assert qa_info["fallback_source"] == source
-    prompt = llm.calls[-1][0]
-    assert "the answer omitted the requested year" in prompt
-    if "Answer:" in prompt:
-        assert prompt.index("the answer omitted") < prompt.rindex("Answer:")
+    return llm.calls[-1][0], qa_info, built, response
 
 
-def _run_failing_fallback(tmp_path, monkeypatch, error, fallback_prompt="Workbook context goes here."):
-    import TableAgent.pipeline.table_agent_pipeline as pipeline_module
-
-    monkeypatch.setattr(pipeline_module, "TableQARunner", _failing_runner([], error=error))
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    structure_path = tmp_path / "structure.yaml"
-    structure_path.write_text(yaml.safe_dump({"table1": {"id": "table1", "name": "T", "sheet": "Sheet1", "headers": []}}), encoding="utf-8")
-    llm = FakeLLM()
-    pipeline = TableAgentPipeline(llm_client=llm, layout_vlm_client=None, config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"})
-    pipeline._run_verified_qa(
-        question="What is the value?",
-        structure_path=structure_path,
-        workbook_path=tmp_path / "book.xlsx",
-        qa_artifact_dir=tmp_path / "qa",
-        fallback_prompt=fallback_prompt,
+def test_a_failed_exploration_answers_from_the_checked_needs_it_found(tmp_path: Path, monkeypatch):
+    prompt, qa_info, built, response = _failed_exploration(
+        tmp_path, monkeypatch, {"found": True, "value": 42, "cells": ["B2"], "checks": [
+            {"by": "reverse", "verdict": "confirmed", "reason": "B2 is the 2021 value", "cells": ["B2"]}]},
     )
-    return llm.calls[-1][0]
+    assert qa_info["fallback_source"] == "found_evidence" and built == []
+    assert "- the 2021 value: 42 (cells B2" in prompt
+    assert response.prompt_tokens == 6 + 3  # the fallback call plus the exploration
 
 
-def test_failed_attempt_note_keeps_the_last_traceback_line_and_skips_planning_failures(tmp_path: Path, monkeypatch):
-    traceback_error = (
-        "Failed at subtask 'inspect': Error during execution: Traceback (most recent call last):\n"
-        '  File "/site-packages/pandas/core/frame.py", line 10, in __getitem__\n'
-        "    raise KeyError(key)\n"
-        "KeyError: 'Employed total'"
+def test_a_failed_exploration_with_only_refuted_needs_falls_back_to_the_source_context(tmp_path: Path, monkeypatch):
+    prompt, qa_info, built, _ = _failed_exploration(
+        tmp_path, monkeypatch, {"found": True, "value": 7, "cells": ["C2"], "checks": [
+            {"by": "reverse", "verdict": "refuted", "reason": "C2 holds 8", "cells": ["C2"]}]},
     )
-    prompt = _run_failing_fallback(tmp_path, monkeypatch, traceback_error)
-    assert "KeyError: 'Employed total'" in prompt and "Failed at subtask 'inspect'" in prompt
-    assert "site-packages" not in prompt
-
-    planning = _run_failing_fallback(tmp_path / "planning", monkeypatch, "Planning failed: connection reset")
-    assert "connection reset" not in planning
-
-
-def test_fallback_prompt_callable_runs_only_when_the_fallback_is_needed(tmp_path: Path, monkeypatch):
-    calls = []
-
-    def build_prompt():
-        calls.append(1)
-        return "Lazily built context."
-
-    prompt = _run_failing_fallback(tmp_path, monkeypatch, "Final answer review rejected the plan: wrong row.", build_prompt)
-    assert calls == [1] and "Lazily built context." in prompt
+    assert qa_info["fallback_source"] == "source_context" and built == [1]
+    assert prompt.startswith("An exploration of the workbook failed") and "Synthesis failed: no parts" in prompt
+    assert "Workbook context goes here." in prompt
 
 
 def test_fallback_table_context_uses_a_workbook_preview_when_the_sample_has_no_text(tmp_path: Path):

@@ -55,8 +55,6 @@ def test_table_agent_routing_config_is_loaded_and_used():
     assert settings.run_retrieval is True
     assert settings.retrieval_top_k == 8
     assert settings.retrieval_bm25_weight == 0.3
-    assert settings.qa_routing_mode == "auto"
-    assert settings.qa_common_info_enabled is True
 
 
 def test_table_agent_settings_are_json_serializable_for_runtime_reporting():
@@ -64,17 +62,13 @@ def test_table_agent_settings_are_json_serializable_for_runtime_reporting():
 
     payload = PipelineRunner._serialize_config_value(settings)
 
-    assert payload["routing"]["retrieval"]["mode"] == "auto"
-    assert json.loads(json.dumps(payload))["routing"]["qa"]["mode"] == "auto"
+    assert json.loads(json.dumps(payload))["routing"]["retrieval"]["mode"] == "auto"
 
 
 def test_table_agent_routing_switches_replace_legacy_booleans():
     off = TableAgentConfig.from_config({
         **load_config(CONFIG_PATH)["table_agent"],
-        "routing": {
-            "retrieval": {"mode": "off"},
-            "qa": {"mode": "normal", "common_info_enabled": False},
-        },
+        "routing": {"retrieval": {"mode": "off"}},
     })
     perfect = TableAgentConfig.from_config({
         **load_config(CONFIG_PATH)["table_agent"],
@@ -82,8 +76,6 @@ def test_table_agent_routing_switches_replace_legacy_booleans():
     })
 
     assert off.run_retrieval is False
-    assert off.qa_routing_mode == "normal"
-    assert off.qa_common_info_enabled is False
     assert perfect.run_retrieval is True
     assert perfect.perfect_retrieval is True
 

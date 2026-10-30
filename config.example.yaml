@@ -54,6 +54,17 @@ table_agent:
   max_image_pixels: 33554432
   image_tile_size: null
   image_tile_overlap: 256
+  # QA checks (TableAgent/stages/qa/checker.py), none by default:
+  # qa_checker: checks of each found need, in order; a later one runs only when the earlier did not confirm:
+  #   reverse (from the cells back to their meaning), independent (re-derives the need with other tools),
+  #   debate (argues against the evidence). The reasoning step rules on a refuting check.
+  # qa_checker_sees_value: the independent check sees the claimed value (else it is compared in code).
+  # qa_checker_view: the independent check's tools: grid (raw cells), image (VLM), frame (DataFrames).
+  # qa_synthesis_check: a check of how the answer was computed, before the final review.
+  qa_checker: []
+  qa_checker_sees_value: true
+  qa_checker_view: grid
+  qa_synthesis_check: false
   routing:
     retrieval:
       # off: use the supplied workbook/structure without source retrieval.
@@ -72,28 +83,12 @@ table_agent:
       audit_top_k: 10
       query_type: "auto"
       max_batches: 3
-    qa:
-      # auto lets the planner route common-info questions; normal disables that route.
-      # common_info forces the deterministic common-info route when enabled.
-      mode: "auto"
-      common_info_enabled: true
-      common_info_fallback: "normal"
   exstruct_mode: "light"
   viewport_rows: 50
   viewport_columns: 50
   shift_cells: 45
   max_retry: 3
-  qa_max_retries: 3
-  qa_instant_max_retries: 1
   qa_instant_generation_max_tokens: 2048
-  qa_max_replans: 5
-  qa_question_understanding: true
-  qa_propagate_decisions: true
-  qa_max_experience_records: 5
-  qa_log_path: null
-  qa_max_observation_chars: 2000
-  qa_max_error_chars: 2000
-  qa_max_value_repr_chars: 800
   # Shared by query-time hybrid retrieval and optional ingestion embedding export.
   retrieval_embedding_provider: "retrieval_embedding_model"
   # Ingestion only: add embeddings to exported retrieval cards when requested.

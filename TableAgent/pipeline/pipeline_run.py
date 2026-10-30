@@ -14,7 +14,7 @@ from TableAgent.utils.llm_metrics import token_usage
 from TableAgent.utils.paths import display_path
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.qa import QAInput
-from TableAgent.stages.qa.workbook_paths import original_workbook_for_sample
+from TableAgent.stages.qa.utils.workbook_paths import original_workbook_for_sample
 from TableAgent.stages.retrieval import RetrievalInput
 
 
@@ -230,7 +230,6 @@ class PipelineRunner(RuntimeComponent):
             fallback_prompt=lambda: self.prompts.answer_prompt(
                 sample, self._fallback_table_context(sample, workbook_path), structure_text
             ),
-            enable_final_answer_review=self.settings.qa_final_answer_review,
         ))
         answer_response, qa_info = qa_output.response, qa_output.metadata
         qa_runtime = self.stop_timer(qa_started)
@@ -285,7 +284,7 @@ class PipelineRunner(RuntimeComponent):
             return self._fit_context(sample.table_content)
         import openpyxl
 
-        from TableAgent.stages.qa.actions.understand_question import workbook_preview
+        from TableAgent.stages.qa.utils.workbook_view import workbook_preview
 
         try:
             workbook = openpyxl.load_workbook(workbook_path, data_only=True)

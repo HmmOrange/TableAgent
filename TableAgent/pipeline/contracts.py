@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol, TYPE_CHECKING
 from TableAgent.pipeline.sample import EvalSample
 
 if TYPE_CHECKING:
-    from TableAgent.stages.qa.contracts import QAInput, QAOutput
+    from TableAgent.stages.qa.stage import QAInput, QAOutput
     from TableAgent.stages.retrieval.contracts import RetrievalInput, RetrievalOutput
     from TableAgent.stages.structure.contracts import StructureInput, StructureOutput
 
@@ -83,7 +83,7 @@ class PipelineRuntimeContract(Protocol):
     def _qa_sample_dir(self, sample: EvalSample) -> Path:
         ...
 
-    def _run_verified_qa(self, **kwargs: Any) -> Any:
+    def _answer_question(self, **kwargs: Any) -> Any:
         ...
 
     def _run_prepared_source(self, *args: Any, **kwargs: Any) -> PipelineOutput:

@@ -3,10 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from TableAgent.stages.qa.prompts.answer import (
-    ANSWER_SYSTEM_PROMPT,
-    ANSWER_USER_PROMPT_TEMPLATE,
-)
+from TableAgent.stages.qa.prompts import DIRECT_ANSWER_PROMPT, DIRECT_ANSWER_SYSTEM_PROMPT
 from TableAgent.stages.retrieval.retrieval_prompts import (
     RERANKER_SYSTEM_PROMPT,
     RERANKER_USER_PROMPT_TEMPLATE,
@@ -18,8 +15,7 @@ from TableAgent.llm import BaseLLM
 from TableAgent.pipeline.base import BasePipeline, PipelineOutput
 from TableAgent.pipeline.contracts import PipelineStages
 from TableAgent.pipeline.progress import format_progress
-from TableAgent.stages.qa.agents.answer_agent import QAAgent
-from TableAgent.stages.qa.runner import TableQARunner
+from TableAgent.stages.qa.utils.direct_answer import DirectAnswerer
 from TableAgent.run_logging import Logger
 from TableAgent.pipeline.sample import EvalSample
 from TableAgent.stages.structure.layout.agent import LayoutAgent
@@ -30,9 +26,9 @@ from TableAgent.stages.retrieval.embeddings import (
     MockEmbeddingModel,
     OpenAICompatibleEmbeddingClient,
 )
-from TableAgent.stages.qa.pipeline import VerifiedQAPipeline
+from TableAgent.stages.qa.workbook_qa import WorkbookQA
 from TableAgent.pipeline.pipeline_run import PipelineRunner
-from TableAgent.stages.qa.source_pipeline import SourceQAPipeline
+from TableAgent.stages.qa.utils.source_pipeline import SourceQAPipeline
 from TableAgent.stages.structure.source_preparer import SourcePreparer
 from TableAgent.stages.structure.layout.workflow import TableLayoutWorkflow
 from TableAgent.stages.structure.cache import StructureCache, StructureCacheRecord
@@ -54,11 +50,10 @@ logger = Logger(__name__)
 class TableAgentPipeline(BasePipeline):
     name = "table_agent"
     prepare_samples_before_run = True
-    answer_system_prompt = ANSWER_SYSTEM_PROMPT
-    answer_user_prompt_template = ANSWER_USER_PROMPT_TEMPLATE
+    answer_system_prompt = DIRECT_ANSWER_SYSTEM_PROMPT
+    answer_user_prompt_template = DIRECT_ANSWER_PROMPT
     reranker_system_prompt = RERANKER_SYSTEM_PROMPT
     reranker_user_prompt_template = RERANKER_USER_PROMPT_TEMPLATE
-    _verified_observation_fallback_prompt = VerifiedQAPipeline._verified_observation_fallback_prompt
 
     def __init__(
         self,
@@ -77,6 +72,11 @@ class TableAgentPipeline(BasePipeline):
             raise ValueError(f"TableAgent phase '{self.settings.phase}' requires an answer LLM client")
         if self.settings.phase in {"structure", "all"} and self.layout_vlm is None:
             raise ValueError(f"TableAgent phase '{self.settings.phase}' requires a layout VLM client")
+        if (
+            "independent" in self.settings.qa_checker and self.settings.qa_checker_view == "image"
+            and self.settings.phase in {"qa", "all"} and self.layout_vlm is None
+        ):
+            raise ValueError("TableAgent qa_checker_view image requires a VLM client")
         self.prompts = PromptBuilder(self.settings, self)
         self.workbook_renderer = WorkbookRenderer(self.settings, logger)
         self.layout_agent = LayoutAgent(self.layout_vlm) if self.layout_vlm is not None else None
@@ -88,11 +88,11 @@ class TableAgentPipeline(BasePipeline):
         self.verifier = DeterministicVerifier(
             data_only=self.settings.structure_data_only,
         )
-        self.qa_agent = QAAgent(self.llm, self.answer_system_prompt) if self.llm is not None else None
+        self.qa_agent = DirectAnswerer(self.llm, self.answer_system_prompt) if self.llm is not None else None
         self.table_retriever = table_retriever
         self._structure_pipeline = StructurePipeline(self)
         self._retrieval_pipeline = RetrievalPipeline(self)
-        self._qa_pipeline = VerifiedQAPipeline(self)
+        self._workbook_qa = WorkbookQA(self)
         self._source_qa_pipeline = SourceQAPipeline(self)
         self.layout_workflow = (
             TableLayoutWorkflow(
@@ -186,7 +186,7 @@ class TableAgentPipeline(BasePipeline):
         self._progress_callback: Callable[[str], None] | None = None
         self._structure_prepared = False
         self.structure_stage = StructureStage(self._structure_pipeline._verify_samples_impl)
-        self.qa_stage = QAStage(lambda **kwargs: self._run_verified_qa(**kwargs))
+        self.qa_stage = QAStage(lambda **kwargs: self._answer_question(**kwargs))
         self.stages = PipelineStages(
             structure=self.structure_stage,
             retrieval=self.retrieval_stage,
@@ -216,8 +216,8 @@ class TableAgentPipeline(BasePipeline):
     def filter_samples(self, samples: list[EvalSample]) -> list[EvalSample]:
         return self._retrieval_pipeline.filter_samples(samples)
 
-    def _run_verified_qa(self, **kwargs: Any):
-        return self._qa_pipeline._run_verified_qa(**kwargs)
+    def _answer_question(self, **kwargs: Any):
+        return self._workbook_qa.run(**kwargs)
 
     def _run_prepared_source(self, *args: Any, **kwargs: Any) -> PipelineOutput:
         return self._source_qa_pipeline._run_prepared_source(*args, **kwargs)

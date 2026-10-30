@@ -1,40 +1,17 @@
-"""QA stage: planning, verified execution, and answer synthesis."""
+"""QA stage: answer a question by exploring the workbook (see orchestrator.py for the loop)."""
 
 from importlib import import_module
 
 _EXPORTS = {
-    "BaseAction": (".actions.base_action", "BaseAction"),
-    "BaseCodeExecutionAction": (".actions.base_action", "BaseCodeExecutionAction"),
-    "BaseCodeGenerationAction": (".actions.base_action", "BaseCodeGenerationAction"),
-    "BasePlanAction": (".actions.base_action", "BasePlanAction"),
-    "BaseReActAgent": (".agents.base_agent", "BaseReActAgent"),
-    "BaseReviewAction": (".actions.base_action", "BaseReviewAction"),
-    "AgentOutput": (".models.results", "AgentOutput"),
-    "CodeExecutionRequest": (".actions.base_action", "CodeExecutionRequest"),
-    "CodeExecutionResult": (".actions.base_action", "CodeExecutionResult"),
-    "CodeGenerationRequest": (".actions.base_action", "CodeGenerationRequest"),
-    "CodeGenerationResult": (".actions.base_action", "CodeGenerationResult"),
-    "ExecuteNotebookCodeAction": (".actions.execute_notebook", "ExecuteNotebookCodeAction"),
-    "ExperiencePool": (".experience", "ExperiencePool"),
-    "ExperienceRecord": (".experience", "ExperienceRecord"),
-    "LLMCodeGenerationAction": (".actions.llm_code_generation", "LLMCodeGenerationAction"),
-    "PlanGenerationRequest": (".actions.base_action", "PlanGenerationRequest"),
-    "PlanGenerationResult": (".actions.base_action", "PlanGenerationResult"),
-    "QAInput": (".contracts", "QAInput"),
-    "QAOutput": (".contracts", "QAOutput"),
-    "QAResult": (".models.results", "QAResult"),
+    "AnswerResult": (".orchestrator", "AnswerResult"),
+    "DirectAnswerer": (".utils.direct_answer", "DirectAnswerer"),
+    "QAInput": (".stage", "QAInput"),
+    "QAOutput": (".stage", "QAOutput"),
     "QAStage": (".stage", "QAStage"),
-    "SourceQAPipeline": (".source_pipeline", "SourceQAPipeline"),
-    "SubTask": (".models.subtask", "SubTask"),
-    "VerifiedQAPipeline": (".pipeline", "VerifiedQAPipeline"),
-    "ReviewRequest": (".actions.base_action", "ReviewRequest"),
-    "ReviewResult": (".actions.base_action", "ReviewResult"),
-    "ReviewSubtaskAction": (".actions.review", "ReviewSubtaskAction"),
-    "TableQAAgent": (".agents.react_agent", "TableQAAgent"),
-    "TableQAPlanner": (".agents.planner", "TableQAPlanner"),
-    "TableQARunner": (".runner", "TableQARunner"),
-    "TableQASynthesisAgent": (".agents.synthesis_agent", "TableQASynthesisAgent"),
-    "WriteQAPlanAction": (".actions.write_plan", "WriteQAPlanAction"),
+    "SheetTools": (".tools.sheet", "SheetTools"),
+    "SourceQAPipeline": (".utils.source_pipeline", "SourceQAPipeline"),
+    "WorkbookQA": (".workbook_qa", "WorkbookQA"),
+    "answer_question": (".orchestrator", "answer_question"),
 }
 
 

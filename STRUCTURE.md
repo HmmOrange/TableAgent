@@ -250,24 +250,25 @@ Retrieval chooses context; it does not calculate the final answer.
 
 ### `TableAgent/stages/qa/`
 
-Plans and executes question answering against verified workbook structures.
+Answers a question by exploring the workbook; structure.yaml serves as a rough map. The main flow:
 
-- `actions/` implements bounded operations such as planning, code generation,
-  notebook execution, review, and final-answer review.
-- `agents/` contains planner, ReAct, answer, and synthesis agents.
-- `environment/` owns the persistent notebook/runtime environment and QA logging.
-- `operators/` exposes deterministic workbook, table, range, filter, relation,
-  multi-tab, and routing operations to generated code.
-- `prompts/` contains QA prompt templates grouped by agent/action.
-- `runner.py` and `runner_*.py` coordinate plan execution, support code, and
-  artifact persistence.
-- `header_hints.py` prepares verified header context for QA.
-- `source_pipeline.py` converts retrieval results into QA inputs.
-- `pipeline.py` contains verified-QA coordination and fallback handling, while
-  `stage.py` and `contracts.py` define the stage boundary.
+- `stage.py` defines the stage boundary (`QAInput`, `QAOutput`, `QAStage`).
+- `workbook_qa.py` connects the stage to the pipeline and handles fallbacks.
+- `orchestrator.py` holds the Orchestrator: the loop for one question (frame, explore, synthesize, review)
+  and its reasoning calls.
+- `ledger.py` holds the ledger of evidence and the loop's rules and limits.
+- `inspector.py` holds the Inspector, which establishes one need in code.
+- `synthesizer.py` holds the Synthesizer, which composes the answer from the found needs.
+- `checker.py` holds the Checkers (settings `qa_checker*`, `qa_synthesis_check`), which test a found need
+  or the computation of the answer; the reasoning step rules on a refuting check.
+- `prompts.py` holds every prompt.
 
-See `TableAgent/stages/qa/PIPELINE.md` for the detailed planning and execution
-flow.
+`tools/` holds what the Inspector and the Checkers use in the notebook: the `sheet` object, the walk from
+a cell to its headers, labels and sections, looking at images, and the sandboxed notebook. `utils/` holds
+the plumbing: model calls, logging and artifacts, prompt views of the workbook, and the direct-answer and
+retrieved-source routes.
+
+See `TableAgent/stages/qa/README.md` for the flow and the artifacts of a run.
 
 ## Root Files
 

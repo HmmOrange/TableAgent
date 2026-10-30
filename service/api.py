@@ -24,7 +24,6 @@ class PathJobRequest(BaseModel):
     workbooks: list[str] = Field(min_length=1)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
-    qa_max_replans: int | None = Field(default=None, ge=0)
     compress_before_structure: bool | None = None
 
     @model_validator(mode="after")
@@ -40,8 +39,6 @@ class UploadJobRequest(BaseModel):
     queries: list[str] = Field(default_factory=list)
     embed: bool = False
     sheets: list[str] = Field(default_factory=list)
-    qa_max_replans: int | None = Field(default=None, ge=0)
-    qa_enable_final_review: bool | None = None
     mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     compress_before_structure: bool | None = None
@@ -120,7 +117,6 @@ def create_app(
                 workbooks=workbooks,
                 embed=request.embed,
                 sheets=request.sheets,
-                qa_max_replans=request.qa_max_replans,
                 compress_before_structure=request.compress_before_structure,
                 persist=False,
             )
@@ -173,8 +169,6 @@ def create_app(
                         query=request.queries[0],
                         workbooks=saved,
                         artifacts=request.artifacts,
-                        qa_max_replans=request.qa_max_replans,
-                        qa_enable_final_review=request.qa_enable_final_review,
                         mode=request.mode,
                     )
                 return await asyncio.to_thread(
@@ -185,7 +179,6 @@ def create_app(
                     embed=request.embed,
                     sheets=request.sheets,
                     compress_before_structure=request.compress_before_structure,
-                    qa_max_replans=request.qa_max_replans,
                     persist=False,
                 )
             except (RuntimeError, ValueError) as exc:
