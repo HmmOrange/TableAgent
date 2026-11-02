@@ -163,6 +163,18 @@ def test_headers_walk_to_the_row_label_column_header_section_and_structure(tools
     ]
 
 
+def test_headers_walk_the_layout_when_the_structure_header_rows_are_empty_in_the_column(tmp_path: Path):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["B2"], sheet["B3"], sheet["A4"], sheet["B4"] = "Title", "Growth rate", "Percent", "South", 1.3
+    structure = tmp_path / "structure.yaml"
+    structure.write_text(yaml.safe_dump({"t": {"sheet": "Sheet", "headers": [
+        {"id": "title", "label": "Title", "header_range": "A1", "data_range": "A4:A4"},
+    ]}}), encoding="utf-8")
+    found = SheetTools(workbook, load_structure([structure])).headers("B4")
+    assert found["column_headers"] == ["Growth rate", "Percent"] and found["headers_from"] == "the layout"
+
+
 def test_headers_list_parent_sections_but_not_siblings_and_bold_is_the_higher_level():
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -396,6 +408,7 @@ def test_answer_parts_are_written_plainly():
     assert part_text(True) == "Yes" and part_text(16.0) == "16" and part_text(2.5) == "2.5"
     assert part_text(["A", 3.0]) == "A, 3"
     assert part_text(10.15 + 10.15) == "20.3" and part_text(0.30000000000000004) == "0.3"
+    assert part_text(82.15370000000075) == "82.1537" and part_text(2633.66201433206) == "2633.662"
 
 
 def test_a_returned_review_reopens_exploration_once(tmp_path, workbook_files):
@@ -412,6 +425,19 @@ def test_a_returned_review_reopens_exploration_once(tmp_path, workbook_files):
     assert "The review returned the answer '35'" in llm.prompts["reason"][4]
     assert result.ledger.needs["n1"].inspections_left == 2  # revising restarts the inspection count
     assert len(result.ledger.answers) == 2  # the second answer is final without another review
+
+
+def test_a_review_that_finds_a_missing_slot_adds_it(tmp_path, workbook_files):
+    slots = [{"slot": "the 2019 value", "asked_by": "value in 2019"}, {"slot": "the section", "asked_by": "which section"}]
+    returned = {"assessment": "The section is not reported.", "verdict": "return", "problem": "no section",
+                "instruction": "report the section", "answer_slots": slots}
+    two_parts = {"thought": "Two slots.", "code": "answer_parts = [evidence_n1['value'], 'South']"}
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, returned, SYNTHESIZE], [SOUTH_EVIDENCE], [PARTS, two_parts])
+    result = _run(tmp_path, workbook_files, llm)
+
+    assert result.success and result.ledger.answer_slots == slots
+    assert "The answer slots were revised" in llm.prompts["reason"][4]
+    assert result.ledger.answers[-1]["answer"] == "35, South"
 
 
 def test_running_out_of_steps_with_an_open_need_fails(tmp_path, workbook_files, monkeypatch):
@@ -469,6 +495,16 @@ def test_parse_json_takes_code_from_python_block_and_raw_line_breaks():
 def test_parse_json_repairs_unescaped_quotes_inside_strings():
     reply = '{"thought": "the "Alpha" row, then sheet.read("B3:D9")", "done": false}'
     assert parse_json(reply) == {"thought": 'the "Alpha" row, then sheet.read("B3:D9")', "done": False}
+
+
+def test_parse_json_repairs_quoted_lists_and_bad_escapes_inside_strings():
+    reply = '{"note": "it read ["B3", "B4"] as \\\'Alpha\\\' \\T", "cells": ["B3", "B4"], "done": true}'
+    assert parse_json(reply) == {"note": "it read [\"B3\", \"B4\"] as 'Alpha' \\T", "cells": ["B3", "B4"], "done": True}
+
+
+def test_parse_json_takes_code_from_a_python_block_written_with_escaped_line_breaks():
+    reply = '{"thought": "read", "done": false}\\n```python\\nrows = sheet.read(\\"A1:B2\\")\\nprint(rows)\\n```'
+    assert parse_json(reply) == {"thought": "read", "done": False, "code": 'rows = sheet.read("A1:B2")\nprint(rows)'}
 
 
 # ----------------------------------------------------------------------------------------------------- checkers

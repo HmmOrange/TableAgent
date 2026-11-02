@@ -81,7 +81,7 @@ class Synthesizer:
 
 
 def part_text(part: Any) -> str:
-    """How one answer part is written: lists comma-joined, booleans as Yes/No, floats without binary noise or .0."""
+    """How one answer part is written: lists comma-joined, booleans as Yes/No, floats to four decimals without .0."""
     if isinstance(part, np.generic):
         part = part.item()
     if isinstance(part, np.ndarray):
@@ -91,7 +91,7 @@ def part_text(part: Any) -> str:
     if isinstance(part, (list, tuple)):
         return ", ".join(part_text(item) for item in part)
     if isinstance(part, float):
-        part = round(part, 10)
+        part = round(part, 4)
         if part.is_integer():
             return str(int(part))
     return "" if part is None else str(part)

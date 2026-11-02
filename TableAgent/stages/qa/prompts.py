@@ -21,10 +21,10 @@ structure.yaml (a rough map; it may be incomplete):
 {structure}
 
 Reason about the question before anything is read:
-1. What does it ask for, and in what form (one value, an item, a list, a comparison, a yes/no)? List the answer slots: only the parts the question asks to report, each with the exact phrase of the question that asks for it. A value needed only to compute or compare (the other side of a comparison, the operands of a difference) is a need, not a slot.
+1. What does it ask for, and in what form (one value, an item, a list, a comparison, a yes/no)? List the answer slots: one for each part the question asks to find, match, identify, report, check or infer, each with the exact phrase of the question that asks for it. Every clause that asks for something gets a slot: "find (or match) the value of X and check whether it exceeds Y" asks for X's value and for the result of the check; "infer whether ..." or "verify if ..." asks for Yes or No beside any item the question also asks for. A question asking how a value compares to another named value reports that other value too. Several items asked for together ("X and Y", "X/Y") are reported one by one unless the question asks for their total. A value used only inside a computation the question asks for (the operands of a difference, the values averaged or ranked) is a need, not a slot.
 2. Which needs must be read from the workbook? Describe each by its meaning: which entity, measure, period or condition, and unit. Never name cells; Inspectors locate them.
 3. What could mislead? The same label in several sections, a measure split into sub-columns, a total row beside detail rows, carried-down periods, differing units.
-4. State a working hypothesis: how the needs combine into the answer. State no values: the preview may be partial, and values come from inspections.
+4. State a working hypothesis: how the needs combine into the answer. State no values: the preview may be partial, and values come from inspections. Numbers are reported as the cells hold them: a scale stated in a title, header or note ("in thousands") is not multiplied in unless the question asks for the converted figure.
 
 Needs read from one row, column or block (a series over periods, several measures of one item, all items to rank or compare) form ONE need whose value is a list or a dict; split needs only when they are located independently.
 
@@ -85,11 +85,14 @@ Proposed answer: {answer}
 {method_check}
 Review the answer against the question:
 - Does it answer what was asked, in the requested form, with every slot filled and nothing the question did not ask for?
+- Read the question again clause by clause: does the answer report every item it asks for, even one the slots leave out (each of several items asked for together, the other side of a comparison it asks about, the result of a check beside the item checked)? An item the slots leave out is a missing slot.
 - Is each part supported by found evidence read where every qualifier of its need holds?
-Return the answer only when a slot is missing, a part was not asked for, a part is not supported by the evidence, the evidence was read in the wrong place, the computation does not follow from the question, or the answer does not respond to the question. Wording, units shown and number formatting are not reasons.
+Return the answer only when a slot is missing, a part was not asked for, a part is not supported by the evidence, the evidence was read in the wrong place, the computation does not follow from the question, or the answer does not respond to the question. Wording, units shown, a scale stated in a header that was not multiplied in, and number formatting are not reasons.
+
+When a slot is missing, also return "answer_slots": every slot in the order the answer reports them, the missing ones added.
 
 Return JSON:
-{{"assessment": "<your reasoning>", "verdict": "accept" or "return", "problem": "<what is wrong, empty when accepted>", "instruction": "<what to establish next, empty when accepted>"}}"""
+{{"assessment": "<your reasoning>", "verdict": "accept" or "return", "problem": "<what is wrong, empty when accepted>", "instruction": "<what to establish next, empty when accepted>", "answer_slots": [{{"slot": "<what to report>", "asked_by": "<exact phrase of the question>"}}] (only when a slot is missing)}}"""
 
 METHOD_CHECK_TEXT = """
 A Checker reviewed how the answer was computed and found it {verdict}: {problem}
@@ -209,7 +212,7 @@ INDEPENDENT_SYSTEM_PROMPT = """You are a Checker: an Inspector reported the valu
 
 How to work:
 - Locate the need yourself from its meaning{own_cells}.
-- For a single value: check that its row, column and section match every qualifier of the need, and that no other cell fits better.
+- For a single value: check that its row, column and section match every qualifier of the need, and that no other cell fits better: search every row and column whose label holds the words of the need, and when several places match, compare them all (another section, a total or an item of the same name, a neighbouring period or variant) and say in "reason" which of them the need means and why.
 - For several values or a set of rows (a list, a ranking, a count, a maximum, an average): enumerate every row that qualifies yourself: leave out totals, subtotals and other sections.
 {finish}
 
@@ -305,8 +308,9 @@ SYNTHESIZER_SYSTEM_PROMPT = """You compose the answer of a spreadsheet question 
 Imports: pandas, numpy, math, statistics, datetime, re, json, collections, itertools, functools, operator. Do not read the workbook again.
 Your code must set `answer_parts`: a list with exactly one entry per answer slot, in slot order.
 - An entry is the value for its slot as it should appear in the answer; keep its unit (days, a percent sign, a currency) when it has one.
+- Report a number as the cells hold it: a scale stated in a title, header or note ("in thousands", "in millions") is not multiplied in or appended unless the question asks for the converted figure.
 - A slot that asks for several items gets a list of them; a yes/no slot gets True or False.
-- Round a number to the precision the question states; otherwise round non-integers to two decimals.
+- Round a number to the precision the question states; otherwise keep non-integers to four decimals.
 - A difference whose direction the question does not state is reported as its magnitude.
 
 Reply with one JSON object, then your Python in one ```python block after it, and no other text:

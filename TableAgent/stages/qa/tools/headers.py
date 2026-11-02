@@ -96,15 +96,16 @@ class HeaderWalker:
         """Header cells above a cell (nearest first), the lowest header row, and where they come from.
 
         The header rows structure.yaml names are read in the cell's column, since a header may be a
-        number (a year) that looks like data. Without them, label cells are collected walking up past
-        the data, up to the next number.
+        number (a year) that looks like data. When they name none, or are empty in this column, label
+        cells are collected walking up past the data, up to the next number.
         """
         rows = [r for r in self._header_rows(ws.title) if r < row]
         if rows:
             values = [self.tools.value(r, col, ws.title) for r in sorted(rows, reverse=True)]
             headers = [text_of(value) for value in values if value not in (None, "")]
             headers = [text for index, text in enumerate(headers) if index == 0 or text != headers[index - 1]]
-            return headers, max(rows), "structure.yaml"
+            if headers:
+                return headers, max(rows), "structure.yaml"
         headers: list[str] = []
         top = 0
         for r in range(row - 1, 0, -1):
@@ -116,7 +117,7 @@ class HeaderWalker:
                     break
             elif value is not None and headers:
                 break
-        return headers, top, "the layout"
+        return headers, max(top, max(rows, default=0)), "the layout"
 
     def section_group(self, ws: Any, row: int, top: int) -> dict[str, Any]:
         """The section rows above a row (its own, then each parent) and the siblings of its own, with row spans."""

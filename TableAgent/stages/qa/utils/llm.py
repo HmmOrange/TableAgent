@@ -85,30 +85,45 @@ def ask_json(
             reply = check(parse_json(content))
         except ValueError as exc:
             llm.log.event(f"{kind}_reply_rejected", attempt=attempt, error=str(exc), content=content[:LOGGED_REPLY_CHARS])
-            prompt = f"{prompt}\n\nYour previous reply was rejected: {exc}\nReply again in the requested format."
+            prompt = f"{prompt}\n\n{_retry_note(exc, llm.calls[-1].get('token_capped', False))}"
             continue
         llm.log.event(f"{kind}_reply", **reply)
         return reply
     raise ReplyError(f"{kind} reply was invalid twice")
 
 
+def _retry_note(error: ValueError, capped: bool) -> str:
+    if capped:
+        return ("Your previous reply was cut off at the length limit. Reply again in the requested format, "
+                "keeping every text field to a few sentences.")
+    note = f"Your previous reply was rejected: {error}\nReply again in the requested format."
+    if "JSON" in str(error):
+        note += (" Inside JSON strings, quote with single quotes, never bare double quotes; put any code in a "
+                 "```python block after the object, with real line breaks.")
+    return note
+
+
 def parse_json(content: str) -> Any:
     """The JSON object in a reply: a ```json block, the whole text, or the first {...} in it.
 
-    A ```python block outside the object becomes its "code", so code needs no JSON escaping.
-    Raw line breaks inside JSON strings are accepted.
+    A ```python block outside the object becomes its "code", so code needs no JSON escaping; a block
+    written with escaped line breaks (```python\\n...) is unescaped. Raw line breaks inside JSON strings
+    are accepted.
     """
-    code = re.search(r"```python[ \t]*\n(.*?)```", content, re.DOTALL)
+    code = re.search(r"```python[ \t]*(\n|\\n)(.*?)```", content, re.DOTALL)
     if code:
         content = content[:code.start()] + content[code.end():]
     data = _json_object(content)
     if code and isinstance(data, dict):
-        data["code"] = code.group(1).strip()
+        text = code.group(2)
+        if code.group(1) == "\\n":
+            text = text.replace("\\n", "\n").replace('\\"', '"')
+        data["code"] = text.strip()
     return data
 
 
 def _json_object(content: str) -> Any:
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
+    fenced = re.search(r"```(?:json)?(?![A-Za-z])\s*(.*?)\s*```", content, re.DOTALL)
     text = fenced.group(1) if fenced else content.strip()
     try:
         return json.loads(text, strict=False)
@@ -128,22 +143,47 @@ def _json_object(content: str) -> Any:
 
 
 def _escape_inner_quotes(text: str) -> str:
-    """Escape a quote inside a string unless what follows it can only follow a closing quote."""
-    out, in_string, escaped = [], False, False
+    """Escape a quote inside a string unless what follows it can only follow a closing quote there.
+
+    In an object a string ends before ":", "}" or ", "<key>":"; in an array before "]" or ",". An invalid
+    escape keeps its backslash as text, and an escaped single quote becomes a plain one.
+    """
+    out, containers, in_string, escaped = [], [], False, False
     for index, char in enumerate(text):
         if in_string and escaped:
             escaped = False
         elif in_string and char == "\\":
-            escaped = True
-        elif char == '"':
-            if not in_string:
-                in_string = True
-            elif text[index + 1:].lstrip()[:1] in {",", "}", "]", ":", ""}:
+            following = text[index + 1:index + 2]
+            if following == "'":
+                continue
+            if following and following in '"\\/bfnrtu':
+                escaped = True
+            else:
+                out.append("\\")
+        elif in_string and char == '"':
+            if _closes_string(text[index + 1:], containers[-1] if containers else "{"):
                 in_string = False
             else:
                 out.append("\\")
+        elif char == '"':
+            in_string = True
+        elif not in_string and char in "{[":
+            containers.append(char)
+        elif not in_string and char in "}]" and containers:
+            containers.pop()
         out.append(char)
     return "".join(out)
+
+
+def _closes_string(rest: str, container: str) -> bool:
+    rest = rest.lstrip()
+    if not rest:
+        return True
+    if container == "[":
+        return rest[0] in ",]"
+    if rest[0] in ":}":
+        return True
+    return rest[0] == "," and re.match(r'\s*"[^"\n]*"\s*:', rest[1:]) is not None
 
 
 def require_dict(data: Any) -> dict[str, Any]:

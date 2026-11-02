@@ -195,6 +195,9 @@ class Orchestrator:
                 f"The review returned the answer {answer!r}.\nProblem: {review.get('problem', '')}\n"
                 f"Instruction: {review.get('instruction', '')}"
             )
+            if review.get("answer_slots"):
+                ledger.answer_slots = review["answer_slots"]
+                feedback += "\nThe answer slots were revised to add the missing ones; establish what they need."
 
     def _explore(self, feedback: str) -> bool:
         """Steps until one chooses synthesis (True) or the budget runs out (False)."""
@@ -245,6 +248,8 @@ class Orchestrator:
         except ReplyError as exc:
             review = {"verdict": "accept", "assessment": f"The review was unavailable: {exc}"}
         args = {key: review.get(key, "") for key in ("verdict", "problem", "instruction")}
+        if review.get("answer_slots"):
+            args["answer_slots"] = review["answer_slots"]
         self.ledger.steps.append(Step(len(self.ledger.decisions), "end", str(review.get("assessment") or ""), "review", args))
         self.log.say(f"review | {review['verdict']}")
         return review
@@ -328,4 +333,10 @@ def _check_end(data: Any) -> dict[str, Any]:
     data = require_dict(data)
     if data.get("verdict") not in ("accept", "return"):
         raise ValueError('"verdict" must be "accept" or "return"')
+    if data["verdict"] == "return" and data.get("answer_slots"):
+        problem = slots_problem(data["answer_slots"])
+        if problem:
+            raise ValueError(problem)
+    else:
+        data.pop("answer_slots", None)
     return data
