@@ -17,9 +17,6 @@ REASON_START_PROMPT = """Question: {question}
 Workbook preview (A1-annotated rows; it may be partial):
 {preview}
 
-structure.yaml (a rough map; it may be incomplete):
-{structure}
-
 Reason about the question before anything is read:
 1. What does it ask for, and in what form (one value, an item, a list, a comparison, a yes/no)? List the answer slots: one for each part the question asks to find, match, identify, report, check or infer, each with the exact phrase of the question that asks for it. Every clause that asks for something gets a slot: "find (or match) the value of X and check whether it exceeds Y" asks for X's value and for the result of the check; "infer whether ..." or "verify if ..." asks for Yes or No beside any item the question also asks for. A question asking how a value compares to another named value reports that other value too. Several items asked for together ("X and Y", "X/Y") are reported one by one unless the question asks for their total. A value used only inside a computation the question asks for (the operands of a difference, the values averaged or ranked) is a need, not a slot.
 2. Which needs must be read from the workbook? Describe each by its meaning: which entity, measure, period or condition, and unit. Never name cells; Inspectors locate them.
@@ -106,10 +103,6 @@ STRATEGY_TEXTS = {
         "Find each label of the need with `sheet.find(label)`, then look at the candidates with `sheet.describe(ref)` "
         "and the rows or columns around them, and pick the cell whose context matches the need."
     ),
-    "structure": (
-        "Start from structure.yaml: the data range of the header and group that match the need locate the column "
-        "and the rows; confirm with `sheet.read` and `sheet.describe` on the raw cells."
-    ),
     "window": (
         "Read the window named in the instruction with `sheet.read`, including the header rows above it and the "
         "label columns to its left, and read the value from it."
@@ -121,14 +114,12 @@ FIND_TOOL = "- `sheet.find(text, sheet=\"\")` -> [(ref, value), ...] cells conta
 READ_TOOL = "- `sheet.read(\"B3:F9\", sheet=\"\")` -> rows of values; a ref may name its sheet, e.g. \"'Data'!B3\""
 AROUND_TOOL = "- `sheet.around(\"D8\", rows=2, cols=2, sheet=\"\")` -> the filled cells around one cell, a line per row with their refs (the cell marked *)"
 FRAME_TOOL = "- `sheet.frame(sheet=\"\")` -> the used range as a DataFrame (index = Excel row numbers, columns = column letters)"
-HEADERS_TOOL = """- `sheet.headers("D8", sheet="")` -> what the cell means, found by walking up and left from it: "row_labels", "keys" (labels written once above and carried down), "column_headers" with "headers_from" (structure.yaml or the layout), "sections" (label-only rows above, its own first, then its parents, each with its row span and the structure.yaml group naming it), "siblings" (the other sections at its level), "block" (the run of rows shaped like its row, and why it starts and ends: a blank or label row, a total by formula, a differently formatted row), "structure" (structure.yaml entries holding it), and "uncertain" (why the walk may be wrong; then "vision" holds a vision model's reading of an image of the area)
+HEADERS_TOOL = """- `sheet.headers("D8", sheet="")` -> what the cell means, found by walking up and left from it: "row_labels", "keys" (labels written once above and carried down), "column_headers", "sections" (label-only rows above, its own first, then its parents, each with its row span), "siblings" (the other sections at its level), "block" (the run of rows shaped like its row, and why it starts and ends: a blank or label row, a total by formula, a differently formatted row), and "uncertain" (why the walk may be wrong; then "vision" holds a vision model's reading of an image of the area)
 - `sheet.describe("D8", sheet="")` -> the same in one line, without the vision model"""
-STRUCTURE_TOOL = """- `sheet.structure_at(row, col, sheet="")` -> structure.yaml headers and groups whose data range holds the cell
-- `sheet.structure_find(text, sheet="")` -> structure.yaml headers and groups whose label path holds the words of `text`, then those whose description does: [{"kind", "path", "sheet", "label_range", "data_range", "description", "matched"}, ...]; finds an entry the structure map left out or names differently (a range may be off by a row: confirm it on the cells)"""
 LOOK_TOOL = "- `sheet.look(\"B3:H20\", \"<what to look for>\", sheet=\"\")` -> a vision model's answer about an image of the range (at most 60 rows x 30 columns; one model call each). Use it for what the values do not show: tick marks or crosses drawn as symbols, shading, how merged headers span the columns below; read values with `sheet.read`."
 
 SHEET_TOOLS = "The `sheet` object reads the workbook (merged cells read as their visible value):\n" + "\n".join(
-    (SHEETS_TOOL, FIND_TOOL, READ_TOOL, HEADERS_TOOL, AROUND_TOOL, FRAME_TOOL, STRUCTURE_TOOL)
+    (SHEETS_TOOL, FIND_TOOL, READ_TOOL, HEADERS_TOOL, AROUND_TOOL, FRAME_TOOL)
 )
 
 NOTEBOOK_IMPORTS = """Imports: pandas, numpy, openpyxl, math, statistics, datetime, re, json, collections, itertools, functools, operator. System and file modules are not available. Variables persist between turns."""
@@ -139,7 +130,7 @@ INSPECTOR_SYSTEM_PROMPT = f"""You are an Inspector: you establish ONE need from 
 {NOTEBOOK_IMPORTS}
 
 How to work:
-- First turn: look, do not extract. Start from structure.yaml when it names the need; otherwise find the labels of the need. Print the candidates with `sheet.describe`.
+- First turn: look, do not extract. Find the labels of the need. Print the candidates with `sheet.describe`.
 - Extract only once you have seen where the value is. A label that occurs in several places belongs to different sections: choose by the context, not by the first match.
 - For a need over a set of rows (all items to rank, count, sum or take the maximum of), check with `sheet.headers` which block and sections the rows belong to and which sibling sections exist, and keep only the rows the need means; leave out total rows.
 - Keep output small: print only relevant cells, never whole tables.
@@ -152,7 +143,6 @@ Reply with one JSON object, then this turn's Python in one ```python block after
 ```"""
 
 INSPECTOR_SYSTEM_PROMPT_WITH_LOOK = INSPECTOR_SYSTEM_PROMPT.replace(SHEET_TOOLS, f"{SHEET_TOOLS}\n{LOOK_TOOL}")
-
 INSPECTOR_PROMPT = """Question: {question}
 Working hypothesis: {hypothesis}
 Need to establish ({need_id}): {need}
@@ -160,9 +150,6 @@ Strategy ({strategy}): {strategy_text}
 Instruction: {instruction}
 {earlier}
 Sheets: {sheets}
-
-structure.yaml (a rough map; confirm against the cells):
-{structure}
 
 Evidence contract: set `{variable}` to a dict {{"value": ..., "cells": ["D8", ...], "where": "...", "note": "..."}}
 - "value": the need exactly as described, read from the cells; when the need is several values, all of them as a list or dict, not a result computed from them (the answer is composed later).
@@ -191,7 +178,7 @@ What the runner found from the cells:
 {facts}
 
 Check:
-1. Do the cells mean what the need describes? Compare their row labels, column headers, sections, structure.yaml entries and descriptions with every qualifier of the need (entity, group, section, measure, period, unit).
+1. Do the cells mean what the need describes? Compare their row labels, column headers, and sections with every qualifier of the need (entity, group, section, measure, period, unit).
 2. Do the cells hold the reported values?
 3. For a set of rows: are rows that the need means left out, or are rows it does not mean (totals, other sections) included?
 Refute only for a concrete reason the facts show, naming the cells; otherwise confirm.
@@ -226,7 +213,7 @@ INDEPENDENT_BLIND_FINISH = """- When you have the value, set `found = {"value": 
 FORMATS_TOOL = "- `sheet.formats(\"A3:D20\", sheet=\"\")` -> the filled cells of the range, a line each, with their format (bold, fill, indent) and formula: bold or filled label rows often mark sections, a formula like =SUM(...) marks a total"
 
 VIEW_TOOLS = {
-    "grid": "The `sheet` object reads raw cells only; structure.yaml is not available:\n" + "\n".join(
+    "grid": "The `sheet` object reads raw cells only:\n" + "\n".join(
         (SHEETS_TOOL, FIND_TOOL, READ_TOOL, AROUND_TOOL, FRAME_TOOL, FORMATS_TOOL)
     ),
     "image": "The `sheet` object finds cells and looks at images of the sheet; cell values are not read directly:\n" + "\n".join(
@@ -334,7 +321,7 @@ Answer form rules:
 # ------------------------------------------------------------------------------ fallback
 
 DIRECT_ANSWER_SYSTEM_PROMPT = (
-    "You are a table question answering agent. Use the table content and verified structure YAML to answer "
+    "You are a table question answering agent. Use the table content to answer "
     "concisely. Output only the final answer, without explanation, steps, or introductory or concluding remarks. "
     "Never attribute a value to a neighboring or similar header, and never report a value read in one section "
     "under another section's label."
@@ -342,9 +329,6 @@ DIRECT_ANSWER_SYSTEM_PROMPT = (
 
 DIRECT_ANSWER_PROMPT = """\
 Question: {question}
-
-Verified structure.yaml:
-{structure_text}
 
 Table content:
 {table_context}

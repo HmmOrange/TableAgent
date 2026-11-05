@@ -117,7 +117,6 @@ class FakeIndexedPipeline:
 
     def _answer_question(self, **kwargs):
         type(self).calls.append(kwargs)
-        assert Path(kwargs["structure_path"]).is_file()
         return (
             LLMResponse(content="indexed answer", prompt_tokens=3, completion_tokens=2),
             {"success": True, "fallback_used": False, "replan_count": 0},
@@ -568,18 +567,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     qa_calls = []
 
     def answer_question_stub(_pipeline, **kwargs):
-        qa_calls.append(
-            {
-                **kwargs,
-                "structure_text": kwargs["structure_path"].read_text(
-                    encoding="utf-8"
-                ),
-                "related_structure_texts": [
-                    path.read_text(encoding="utf-8")
-                    for path in kwargs["related_structure_paths"]
-                ],
-            }
-        )
+        qa_calls.append(kwargs)
         return (
             LLMResponse(content="Sales answer", prompt_tokens=3, completion_tokens=2),
             {"success": True, "fallback_used": False, "replan_count": 0},
@@ -671,13 +659,6 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     answer = result["answers"][0]
     assert len(qa_calls) == 1
     assert qa_calls[0]["workbook_path"].name == "sales.xlsx"
-    assert qa_calls[0]["structure_text"] == (
-        "table1:\n  sheet: Sheet\n  headers: []\n"
-    )
-    assert len(qa_calls[0]["related_structure_paths"]) == 1
-    assert qa_calls[0]["related_structure_texts"] == [
-        "table1:\n  sheet: Archive\n  headers: []\n"
-    ]
     assert answer["workbook"] == "sales.xlsx"
     assert answer["workbooks"] == ["sales.xlsx"]
     assert answer["sheets"] == ["Sheet", "Archive"]
@@ -689,7 +670,7 @@ def test_real_indexed_qa_hybrid_routes_only_the_matching_workbook(tmp_path: Path
     assert sum(bool(row["selected"]) for row in answer["retrieval"]["audit"]) == 1
 
 
-def test_indexed_qa_falls_back_when_selected_artifact_has_no_structure(tmp_path: Path):
+def test_indexed_qa_explores_a_selected_artifact_without_structure(tmp_path: Path):
     source = _workbook(tmp_path / "book.xlsx")
     config = load_config("config.example.yaml")
     config["service"]["root_dir"] = str(tmp_path / "service")
@@ -720,8 +701,7 @@ def test_indexed_qa_falls_back_when_selected_artifact_has_no_structure(tmp_path:
     assert answer["answer"]
     assert answer["qa"]["success"] is False
     assert answer["qa"]["fallback_used"] is True
-    assert answer["qa"]["fallback_source"] == "missing_structure"
-    assert "Missing structure.yaml" in answer["qa"]["error"]
+    assert answer["qa"]["fallback_source"] == "source_context"
 
 
 def test_instant_indexed_retrieval_rejects_unrelated_candidates(tmp_path: Path):

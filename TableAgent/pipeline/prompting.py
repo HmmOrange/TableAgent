@@ -8,10 +8,9 @@ class PromptBuilder:
         self.settings = settings
         self.templates = templates
 
-    def answer_prompt(self, sample: EvalSample, table_context: str, structure_text: str) -> str:
+    def answer_prompt(self, sample: EvalSample, table_context: str) -> str:
         prompt = self.templates.answer_user_prompt_template.format(
             question=sample.question,
-            structure_text=structure_text,
             table_context=table_context,
         )
         sample_path = str(sample.sample_path or "").lower()

@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import replace
-from pathlib import Path, PureWindowsPath
-from typing import Any
+from pathlib import Path
 
 import openpyxl
-import yaml
 
 from TableAgent.llm import LLMResponse
 from TableAgent.pipeline.base import PipelineOutput
@@ -56,25 +54,11 @@ class SourceQAPipeline(RuntimeComponent):
                     )
                 original_workbook = candidate.workbook_path
             candidate = replace(candidate, workbook_path=original_workbook)
-        image_prompt = self.prompts.answer_prompt(
-            sample, "[Table image provided]", candidate.structure_text
-        )
+        image_prompt = self.prompts.answer_prompt(sample, "[Table image provided]")
         fallback_prompt = self.prompts.answer_prompt(
             sample,
             self._fit_context(candidate.sheet_text),
-            candidate.structure_text,
         )
-        structure_path = candidate.directory / "structure.yaml"
-        if candidate.table_id or is_metadata_retrieval:
-            filename = (
-                "retrieved_metadata.yaml"
-                if is_metadata_retrieval
-                else "retrieved_structure.yaml"
-            )
-            structure_path = self._qa_sample_dir(sample) / filename
-            structure_path.parent.mkdir(parents=True, exist_ok=True)
-            structure_path.write_text(candidate.structure_text, encoding="utf-8")
-        related_structure_paths = self._related_structure_paths(candidate)
         self._progress(
             "qa",
             sample=sample.sample_id,
@@ -106,13 +90,11 @@ class SourceQAPipeline(RuntimeComponent):
         else:
             qa_output = self.stages.qa.run(QAInput(
                 question=sample.question,
-                structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=self._qa_sample_dir(sample),
                 fallback_prompt=image_prompt,
                 fallback_image_path=candidate.image_path,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=tuple(related_structure_paths),
                 excluded_sheet_names=tuple(
                     self._perfect_retrieval_excluded_sheets(
                         candidate.workbook_path
@@ -181,7 +163,6 @@ class SourceQAPipeline(RuntimeComponent):
                 "qa_runtime": stage_runtimes["qa"],
                 "stage_runtimes": stage_runtimes,
 
-                "structure_path": display_path(structure_path),
                 "thinking_trace_path": display_path(
                     candidate.directory / "thinking_trace.txt"
                 )
@@ -216,39 +197,6 @@ class SourceQAPipeline(RuntimeComponent):
             },
         )
 
-    def _related_structure_paths(self, candidate: SourceCandidate) -> list[Path]:
-        source_root = candidate.directory.parent
-        workbook_path = candidate.workbook_path.resolve()
-        paths = []
-        if not source_root.is_dir():
-            return paths
-        for source_dir in sorted(source_root.iterdir()):
-            metadata_path = source_dir / "metadata.json"
-            structure_path = source_dir / "structure.yaml"
-            if not metadata_path.is_file() or not structure_path.is_file():
-                continue
-            try:
-                metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-            except (OSError, yaml.YAMLError):
-                continue
-            candidate_workbook_text = str(metadata.get("workbook_path", ""))
-            candidate_workbook = Path(candidate_workbook_text)
-            same_path = candidate_workbook.resolve() == workbook_path
-            same_name = safe_name(
-                PureWindowsPath(candidate_workbook_text).name
-            ) == safe_name(workbook_path.name)
-            if candidate_workbook_text and (same_path or same_name):
-                sheet_name = str(metadata.get("sheet_name", ""))
-                if (
-                    self.settings.perfect_retrieval
-                    and self.source_retriever.is_perfect_retrieval_excluded(
-                        workbook_path, sheet_name
-                    )
-                ):
-                    continue
-                paths.append(structure_path)
-        return paths
-
     def _perfect_retrieval_excluded_sheets(
         self, workbook_path: Path
     ) -> list[str]:
@@ -273,10 +221,8 @@ class SourceQAPipeline(RuntimeComponent):
             return table_content
         return table_content[: self.settings.max_context_chars] + "\n...TRUNCATED..."
 
-    def _answer_prompt(
-        self, sample: EvalSample, table_context: str, structure_text: str
-    ) -> str:
-        return self.prompts.answer_prompt(sample, table_context, structure_text)
+    def _answer_prompt(self, sample: EvalSample, table_context: str) -> str:
+        return self.prompts.answer_prompt(sample, table_context)
 
     @staticmethod
     def _sample_relative_dir(sample: EvalSample) -> Path:

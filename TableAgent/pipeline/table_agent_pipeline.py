@@ -234,47 +234,26 @@ class TableAgentPipeline(BasePipeline):
     def _fit_context(self, table_content: str) -> str:
         return self._source_qa_pipeline._fit_context(table_content)
 
-    def _answer_prompt(
-        self, sample: EvalSample, table_context: str, structure_text: str
-    ) -> str:
-        return self._source_qa_pipeline._answer_prompt(
-            sample, table_context, structure_text
-        )
+    def _answer_prompt(self, sample: EvalSample, table_context: str) -> str:
+        return self._source_qa_pipeline._answer_prompt(sample, table_context)
 
     def _qa_sample_dir(self, sample: EvalSample) -> Path:
         return self._source_qa_pipeline._qa_sample_dir(sample)
 
     def prepare_samples(self, samples: list[EvalSample], logger: Any | None = None) -> None:
         if self.settings.phase == "qa":
-            missing = []
-            for sample in samples:
-                if (
-                    self.settings.should_retrieve(sample)
-                    and has_workbook_sources(sample)
-                    and (
-                        self.source_retriever.load_perfect_candidates(sample)
-                        if self.settings.perfect_retrieval
-                        else self.source_retriever.load_candidates(sample)
-                    )
-                ):
-                    continue
-                record = self.structure_cache.load(sample)
-                if record is None or not record.valid:
-                    missing.append(sample.sample_id)
-                    self._progress(
-                        "prepare_error",
-                        sample=sample.sample_id,
-                        workbook=Path(str(sample.table_path or sample.table_id or sample.sample_id)).name,
-                        sheet="<missing>",
-                    )
-                    continue
-                self._progress(
-                    "structure_done",
-                    sample=sample.sample_id,
-                    workbook=record.workbook_path.name,
-                    sheet=record.sheet_name,
-                    status="cached",
+            # Direct QA reads the sample's own workbook; only retrieval needs prepared sources.
+            missing = [
+                sample.sample_id
+                for sample in samples
+                if self.settings.should_retrieve(sample)
+                and has_workbook_sources(sample)
+                and not (
+                    self.source_retriever.load_perfect_candidates(sample)
+                    if self.settings.perfect_retrieval
+                    else self.source_retriever.load_candidates(sample)
                 )
+            ]
             if missing:
                 raise RuntimeError(
                     "Missing or stale TableAgent structure caches for: "

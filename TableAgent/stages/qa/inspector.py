@@ -32,14 +32,13 @@ class Turn:
 
 class Inspector:
     def __init__(
-        self, llm: CountingLLM, notebook: Notebook, tools: SheetTools, structure: str,
+        self, llm: CountingLLM, notebook: Notebook, tools: SheetTools,
         system_prompt: str = INSPECTOR_SYSTEM_PROMPT,
     ):
         self.llm = llm
         self.system_prompt = system_prompt
         self.notebook = notebook
         self.tools = tools
-        self.structure = structure
 
     def inspect(
         self, question: str, ledger: Ledger, need: Need, strategy: str, instruction: str, step: int,
@@ -110,7 +109,6 @@ class Inspector:
             instruction=instruction or "(none)",
             earlier=("Earlier attempts for this need:\n" + "\n".join(earlier) + "\n") if earlier else "",
             sheets="; ".join(self.tools.sheets()),
-            structure=self.structure,
             variable=need.variable,
             transcript=transcript(turns),
             turn=turn,

@@ -13,6 +13,7 @@ from TableAgent.pipeline.sample import has_workbook_sources
 from TableAgent.utils.llm_metrics import token_usage
 from TableAgent.utils.paths import display_path
 from TableAgent.pipeline.sample import EvalSample
+from TableAgent.rendering.converter import sample_to_xlsx
 from TableAgent.stages.qa import QAInput
 from TableAgent.stages.qa.utils.workbook_paths import original_workbook_for_sample
 from TableAgent.stages.retrieval import RetrievalInput
@@ -164,21 +165,20 @@ class PipelineRunner(RuntimeComponent):
                 output.metadata = metadata
                 output.latency = stage_runtimes["total"]
             return output
+        if self.settings.phase != "all":
+            return self._run_workbook_qa(sample)
         structure_runtime = 0.0
-        if self.settings.phase == "all":
-            record = self._verified_samples.get(sample.sample_id)
-            if record is None:
-                structure_started = self.start_timer()
-                record = self.structure_cache.prepare(sample, force=force_structure)
-                structure_runtime = self.stop_timer(structure_started)
-                self._verified_samples[sample.sample_id] = record
-            elif getattr(record, "cache_hit", False) is False:
-                # Record was freshly built earlier in this process.
-                structure_runtime = float(
-                    getattr(record, "structure_runtime", 0.0) or 0.0
-                )
-        else:
-            record = self.structure_cache.load(sample)
+        record = self._verified_samples.get(sample.sample_id)
+        if record is None:
+            structure_started = self.start_timer()
+            record = self.structure_cache.prepare(sample, force=force_structure)
+            structure_runtime = self.stop_timer(structure_started)
+            self._verified_samples[sample.sample_id] = record
+        elif getattr(record, "cache_hit", False) is False:
+            # Record was freshly built earlier in this process.
+            structure_runtime = float(
+                getattr(record, "structure_runtime", 0.0) or 0.0
+            )
         if record is None or not record.valid:
             raise RuntimeError(
                 f"Missing or stale structure cache for sample {sample.sample_id!r}; "
@@ -222,19 +222,7 @@ class PipelineRunner(RuntimeComponent):
             raise RuntimeError(
                 f"Cannot run QA for {sample.sample_id!r}: original workbook could not be resolved"
             )
-        qa_output = self.stages.qa.run(QAInput(
-            question=sample.question,
-            structure_path=record.structure_path,
-            workbook_path=workbook_path,
-            qa_artifact_dir=self._qa_sample_dir(sample),
-            fallback_prompt=lambda: self.prompts.answer_prompt(
-                sample, self._fallback_table_context(sample, workbook_path), structure_text
-            ),
-        ))
-        answer_response, qa_info = qa_output.response, qa_output.metadata
-        qa_runtime = self.stop_timer(qa_started)
-        if isinstance(qa_info, dict):
-            qa_runtime = float(qa_info.get("execution_time") or qa_runtime or 0.0)
+        answer_response, qa_info, qa_runtime = self._answer_from_workbook(sample, workbook_path, qa_started)
         stage_runtimes = {
             "structure": float(structure_runtime or 0.0),
             "retrieval": 0.0,
@@ -277,6 +265,53 @@ class PipelineRunner(RuntimeComponent):
                 "stage_runtimes": stage_runtimes,
             },
         )
+
+    def _run_workbook_qa(self, sample: EvalSample) -> PipelineOutput:
+        """Answer from the sample's own workbook; no structure is read or required."""
+        qa_started = self.start_timer()
+        workbook_path = self._sample_workbook(sample)
+        answer_response, qa_info, qa_runtime = self._answer_from_workbook(sample, workbook_path, qa_started)
+        stage_runtimes = {"structure": 0.0, "retrieval": 0.0, "qa": qa_runtime, "total": qa_runtime}
+        return PipelineOutput(
+            sample_id=sample.sample_id,
+            structured_table="",
+            predicted_answer=answer_response.content,
+            latency=stage_runtimes["total"],
+            token_usage=token_usage([answer_response]),
+            metadata={
+                "workbook_path": str(workbook_path.resolve()),
+                "qa": qa_info,
+                "structure_runtime": stage_runtimes["structure"],
+                "understanding_runtime": stage_runtimes["structure"],
+                "retrieval_runtime": stage_runtimes["retrieval"],
+                "qa_runtime": stage_runtimes["qa"],
+                "stage_runtimes": stage_runtimes,
+            },
+        )
+
+    def _sample_workbook(self, sample: EvalSample) -> Path:
+        """The original workbook of the sample; a sample with only table text is converted to one."""
+        sources = [Path(value.strip()) for value in str(sample.table_path or "").split(";") if value.strip()]
+        if sources and sources[0].is_file() and sources[0].suffix.lower() == ".xlsx":
+            return original_workbook_for_sample(sample, sources[0]) or sources[0]
+        converted = self._qa_sample_dir(sample) / "source.xlsx"
+        converted.parent.mkdir(parents=True, exist_ok=True)
+        sample_to_xlsx(sample, converted)
+        return converted
+
+    def _answer_from_workbook(self, sample: EvalSample, workbook_path: Path, qa_started: float) -> tuple[Any, Any, float]:
+        qa_output = self.stages.qa.run(QAInput(
+            question=sample.question,
+            workbook_path=workbook_path,
+            qa_artifact_dir=self._qa_sample_dir(sample),
+            fallback_prompt=lambda: self.prompts.answer_prompt(
+                sample, self._fallback_table_context(sample, workbook_path)
+            ),
+        ))
+        qa_runtime = self.stop_timer(qa_started)
+        if isinstance(qa_output.metadata, dict):
+            qa_runtime = float(qa_output.metadata.get("execution_time") or qa_runtime or 0.0)
+        return qa_output.response, qa_output.metadata, qa_runtime
 
     def _fallback_table_context(self, sample: EvalSample, workbook_path: Path) -> str:
         """Table text for the fallback prompt; workbook samples carry no text, so preview the workbook."""

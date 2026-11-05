@@ -1,6 +1,6 @@
 """A single model call that answers from a prompt (and an image when the model takes one).
 
-Used when the workbook cannot be explored: no usable structure.yaml, or the exploration failed.
+Used when the exploration of the workbook failed.
 """
 
 from __future__ import annotations

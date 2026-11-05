@@ -80,7 +80,7 @@ class SuccessfulQALLM(FakeLLM):
             elif "Proposed answer:" in prompt:
                 reply = {"assessment": "Fits.", "verdict": "accept"}
             elif "Open needs:" in prompt:
-                reply = {"assessment": "Open.", "action": "inspect", "need_id": "n1", "strategy": "structure"}
+                reply = {"assessment": "Open.", "action": "inspect", "need_id": "n1", "strategy": "window"}
             else:
                 reply = {"assessment": "Found.", "action": "synthesize"}
             return LLMResponse(content=json.dumps(reply), prompt_tokens=5, completion_tokens=1)
@@ -579,25 +579,19 @@ def test_prepared_source_qa_uses_retrieved_table_structure(tmp_path: Path, monke
     captured = {}
 
     def fake_answer_question(**kwargs):
-        captured["structure_path"] = kwargs["structure_path"]
         captured["qa_artifact_dir"] = kwargs["qa_artifact_dir"]
         return LLMResponse(content="100"), {"success": True}
 
     monkeypatch.setattr(pipeline, "_answer_question", fake_answer_question)
 
     output = pipeline._run_prepared_source(sample, candidate, [], pipeline.start_timer())
-    selected_path = captured["structure_path"]
     qa_artifact_dir = captured["qa_artifact_dir"]
     relative_qa_dir = qa_artifact_dir.relative_to(tmp_path / "artifacts")
 
-    assert selected_path.name == "retrieved_structure.yaml"
-    assert selected_path.parent == qa_artifact_dir
     assert relative_qa_dir.parts[0] == "qa"
     assert relative_qa_dir.parts[1].startswith("siflex_table-level")
     assert relative_qa_dir.parts[2].startswith("source_")
     assert len(relative_qa_dir.parts) == 3
-    assert selected_path.read_text(encoding="utf-8") == selected_structure
-    assert output.metadata["structure_path"] == str(selected_path).replace("\\", "/")
     assert output.metadata["retrieval_info"]["table_id"] == "table2"
     assert output.metadata["verification"]["status"] == "not_good"
     assert "table1:" not in output.structured_table
@@ -692,7 +686,7 @@ def test_cached_qa_maps_artifact_workbook_through_compression_manifest(
     assert original_workbook_for_sample(sample, artifact) == original
 
 
-def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
+def test_table_agent_qa_phase_reads_no_structure_cache(tmp_path: Path):
     sample = EvalSample(
         index=0,
         sample_id="cache/1",
@@ -702,31 +696,51 @@ def test_table_agent_qa_phase_reuses_structure_cache(tmp_path: Path):
         answer=["100"],
     )
     cache_dir = tmp_path / "structure-cache"
-    all_pipeline = TableAgentPipeline(
-        llm_client=FakeLLM(),
-        layout_vlm_client=FakeLayoutVLM(),
-        config={"artifact_dir": str(tmp_path / "all"), "structure_cache_dir": str(cache_dir), "phase": "all"},
-    )
-    first = all_pipeline.run(sample)
-
-    qa_pipeline = TableAgentPipeline(
+    pipeline = TableAgentPipeline(
         llm_client=FakeLLM(),
         layout_vlm_client=None,
         config={"artifact_dir": str(tmp_path / "qa"), "structure_cache_dir": str(cache_dir), "phase": "qa"},
     )
-    second = qa_pipeline.run(sample)
+    pipeline.prepare_samples([sample])
+    output = pipeline.run(sample)
 
-    assert second.metadata["cache_hit"] is True
-    assert second.metadata["cache_key"] == first.metadata["cache_key"]
-    assert second.predicted_answer == "100"
-    qa_run_dir = Path(second.metadata["qa"]["artifacts"]["run_dir"])
+    assert output.predicted_answer == "100"
+    assert "structure_path" not in output.metadata and not cache_dir.exists()
+    qa_run_dir = Path(output.metadata["qa"]["artifacts"]["run_dir"])
     relative_qa_run = qa_run_dir.relative_to(tmp_path / "qa")
     assert relative_qa_run.parts[0] == "qa"
     assert relative_qa_run.parts[1].startswith("cache_1")
     assert relative_qa_run.parts[2].startswith("table-1_")
     assert len(relative_qa_run.parts) == 4
-    structure_path = Path(first.metadata["structure_path"])
-    assert structure_path.parent.name.startswith("table-1_")
+
+
+def test_table_agent_qa_phase_reads_the_original_of_a_compressed_workbook(tmp_path: Path, monkeypatch):
+    import openpyxl
+
+    original = tmp_path / "original.xlsx"
+    compressed = tmp_path / "compressed.xlsx"
+    openpyxl.Workbook().save(original)
+    openpyxl.Workbook().save(compressed)
+    sample = EvalSample(
+        0, "book/1", "book", "", "What is B?", ["2"],
+        table_path=str(compressed),
+        raw={"selected_table_id": "book", "original_workbook_paths": {str(compressed.resolve()): str(original)}},
+    )
+    pipeline = TableAgentPipeline(
+        llm_client=FakeLLM(),
+        layout_vlm_client=None,
+        config={"artifact_dir": str(tmp_path / "qa"), "phase": "qa"},
+    )
+    captured = {}
+
+    def fake_answer_question(**kwargs):
+        captured.update(kwargs)
+        return LLMResponse(content="2"), {"success": True}
+
+    monkeypatch.setattr(pipeline, "_answer_question", fake_answer_question)
+
+    assert pipeline.run(sample).predicted_answer == "2"
+    assert captured["workbook_path"] == original
 
 
 def test_table_agent_all_phase_regenerates_existing_source_structure_on_each_run(
@@ -831,17 +845,6 @@ def test_table_agent_all_phase_does_not_regenerate_twice_after_prepare(
     assert prepare_calls[0][1] == {"regenerate_invalid": True, "force": True}
 
 
-def test_table_agent_qa_phase_fails_on_missing_cache(tmp_path: Path):
-    sample = EvalSample(0, "missing/1", "table-1", "A | B\n1 | 2", "What is B?", ["2"])
-    pipeline = TableAgentPipeline(
-        llm_client=FakeLLM(),
-        layout_vlm_client=None,
-        config={"artifact_dir": str(tmp_path), "structure_cache_dir": str(tmp_path / "missing"), "phase": "qa"},
-    )
-    with pytest.raises(RuntimeError, match="Missing or stale structure cache"):
-        pipeline.run(sample)
-
-
 def test_table_agent_structure_phase_does_not_require_answer_llm(tmp_path: Path):
     sample = EvalSample(0, "verify/1", "table-1", "Year | Revenue\n2024 | 100", "Unused", ["100"])
     pipeline = TableAgentPipeline(
@@ -922,30 +925,6 @@ def test_source_preparer_force_regenerates_valid_structure(tmp_path: Path):
 
     pipeline.source_preparer.prepare([sample], force=True)
     assert len(layout_vlm.calls) > initial_call_count
-
-
-def test_qa_falls_back_before_exploring_when_structure_is_missing(tmp_path: Path):
-    llm = FakeLLM()
-    pipeline = TableAgentPipeline(
-        llm_client=llm,
-        layout_vlm_client=None,
-        config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"},
-    )
-
-    response, qa_info = pipeline._answer_question(
-        question="What is the value?",
-        structure_path=tmp_path / "missing" / "structure.yaml",
-        workbook_path=tmp_path / "book.xlsx",
-        qa_artifact_dir=tmp_path / "qa",
-        fallback_prompt="Use the available indexed context.",
-    )
-
-    assert response.content == "100"
-    assert qa_info["success"] is False
-    assert qa_info["fallback_used"] is True
-    assert qa_info["fallback_source"] == "missing_structure"
-    assert "Missing structure.yaml" in qa_info["error"]
-    assert llm.calls[-1][0] == "Use the available indexed context."
 
 
 def legacy_table_agent_siflex_retrieval(tmp_path: Path):
@@ -1196,9 +1175,9 @@ def test_siflex_answer_prompt_formatting(tmp_path: Path):
         answer=["Ans"],
         sample_path="data/HiTab/split.json:cases[0]",
     )
-    prompt = pipeline._answer_prompt(non_siflex_sample, "Content", "headers: []")
+    prompt = pipeline._answer_prompt(non_siflex_sample, "Content")
     assert "FORMAT INSTRUCTIONS" not in prompt
-    assert "Verified structure.yaml" in prompt
+    assert "structure" not in prompt.lower()
 
     siflex_table_sample = EvalSample(
         index=0,
@@ -1210,7 +1189,7 @@ def test_siflex_answer_prompt_formatting(tmp_path: Path):
         sample_path="data/SiFlex/compiled/golden_cases.json:cases[0]",
         raw={"answer_type": "table"},
     )
-    table_prompt = pipeline._answer_prompt(siflex_table_sample, "Content", "headers: []")
+    table_prompt = pipeline._answer_prompt(siflex_table_sample, "Content")
     assert "FORMAT INSTRUCTIONS" in table_prompt
     assert "CRITICAL EXPECTED FORMAT: TABLE" in table_prompt
     assert "Format your final answer as a markdown table" in table_prompt
@@ -1225,7 +1204,7 @@ def test_siflex_answer_prompt_formatting(tmp_path: Path):
         sample_path="data/SiFlex/compiled/golden_cases.json:cases[1]",
         raw={"answer_type": "list"},
     )
-    list_prompt = pipeline._answer_prompt(siflex_list_sample, "Content", "headers: []")
+    list_prompt = pipeline._answer_prompt(siflex_list_sample, "Content")
     assert "FORMAT INSTRUCTIONS" in list_prompt
     assert "CRITICAL EXPECTED FORMAT: LIST" in list_prompt
     assert "Format your final answer as a bulleted list" in list_prompt
@@ -1240,7 +1219,7 @@ def test_siflex_answer_prompt_formatting(tmp_path: Path):
         sample_path="data/SiFlex/compiled/golden_cases.json:cases[2]",
         raw={"answer_type": "form"},
     )
-    form_prompt = pipeline._answer_prompt(siflex_form_sample, "Content", "headers: []")
+    form_prompt = pipeline._answer_prompt(siflex_form_sample, "Content")
     assert "FORMAT INSTRUCTIONS" in form_prompt
     assert "CRITICAL EXPECTED FORMAT: FORM/DOCUMENT" in form_prompt
     assert "Organize your final answer in a clear document structure" in form_prompt
@@ -2095,8 +2074,6 @@ def _failed_exploration(tmp_path: Path, monkeypatch, evidence=None):
     failed = AnswerResult("What is the value?", None, False, "Synthesis failed: no parts", 1.0,
                           {"prompt": 3, "completion": 1}, [], ledger)
     monkeypatch.setattr(workbook_qa, "answer_question", lambda *args, **kwargs: failed)
-    structure_path = tmp_path / "structure.yaml"
-    structure_path.write_text(yaml.safe_dump({"table1": {"id": "table1", "name": "T", "sheet": "Sheet1", "headers": []}}), encoding="utf-8")
     llm = FakeLLM()
     pipeline = TableAgentPipeline(llm_client=llm, layout_vlm_client=None, config={"artifact_dir": str(tmp_path / "artifacts"), "phase": "qa"})
     built = []
@@ -2107,7 +2084,6 @@ def _failed_exploration(tmp_path: Path, monkeypatch, evidence=None):
 
     response, qa_info = pipeline._answer_question(
         question="What is the value?",
-        structure_path=structure_path,
         workbook_path=tmp_path / "book.xlsx",
         qa_artifact_dir=tmp_path / "qa",
         fallback_prompt=context,

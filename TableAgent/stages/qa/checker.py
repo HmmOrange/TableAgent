@@ -5,7 +5,7 @@ Checks run in the configured order, and a later one runs only when the earlier o
   sections, reads the cells, lists rows of the same section left out and cells shared with other needs;
   one model call compares this with the need.
 - independent: re-derives the need in its own notebook with other tools than the Inspector's (view `grid`:
-  raw cells and their formats and formulas, without structure.yaml; `image`: images of the sheet; `frame`:
+  raw cells and their formats and formulas; `image`: images of the sheet; `frame`:
   DataFrames only); `grid` and `frame` start from the workbook preview the first reasoning step saw. Seeing the
   claimed value (`sees_value`), it gives the verdict itself; blind, it reports its own value and the
   runner compares the two.
@@ -54,7 +54,6 @@ PREVIEW_VIEWS = ("grid", "frame")  # the image view reads no values, so it gets 
 MAX_TURNS = 4  # of a check in a notebook; the last turn gives the verdict
 MAX_CHECKED_CELLS = 5000  # cells read back; a set of rows can be long
 MAX_DESCRIBED_CELLS = 12
-MAX_DESCRIPTIONS = 6  # structure.yaml descriptions of the entries holding the cells
 MAX_LISTED = 10
 MAX_OBJECTIONS = 3
 CLAIM_KEYS = ("value", "cells", "where", "note")
@@ -260,8 +259,8 @@ def check_method(llm: CountingLLM, ledger: Ledger, answer: dict[str, Any]) -> di
 # ------------------------------------------------------------------------------------------- reverse facts
 
 def reverse_facts(tools: SheetTools, ledger: Ledger, evidence: Evidence) -> list[str]:
-    """What the runner finds from the evidence cells, as lines: meaning, structure.yaml descriptions, values,
-    rows left out, shared cells."""
+    """What the runner finds from the evidence cells, as lines: meaning, values, rows left out,
+    shared cells."""
     default_sheet = tools.workbook.sheetnames[0]
     cells, problems = expand(evidence.cells, default_sheet)
     facts = [f"cell ref problem: {problem}" for problem in problems]
@@ -270,15 +269,6 @@ def reverse_facts(tools: SheetTools, ledger: Ledger, evidence: Evidence) -> list
     described = cells[:MAX_DESCRIBED_CELLS]
     facts.append(f"meaning of {'each cell' if len(described) == len(cells) else f'the first {len(described)} of {len(cells)} cells'}:")
     facts += [f"  {headers_line(tools.headers(cell_to_a1(row, col), sheet, look=False))}" for sheet, row, col in described]
-    descriptions = {
-        f"{entry.kind} {' > '.join(entry.path)}": entry.description
-        for sheet, row, col in described
-        for entry in tools.structure_entries_at(row, col, sheet)
-        if entry.description
-    }
-    if descriptions:
-        facts.append("structure.yaml describes the entries holding these cells:")
-        facts += [f"  {name}: {text}" for name, text in list(descriptions.items())[:MAX_DESCRIPTIONS]]
     facts += _value_facts(tools, evidence.value, cells)
     facts += _left_out_facts(tools, cells)
     for need in ledger.found_needs():

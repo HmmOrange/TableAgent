@@ -1,15 +1,13 @@
 """What a cell means, found by walking from it up to its column headers and left to its row labels.
 
 The walk reads the layout in code (see `HeaderWalker.headers`):
-- column headers: the header rows structure.yaml names, when it names some above the cell; otherwise the
-  label cells above the cell's data, walking up.
+- column headers: the label cells above the cell's data, walking up.
 - row labels: the label cells left of the cell, and keys written once above and carried down (a location
   in column A, then empty or merged cells below it).
 - sections: label-only rows above the cell, nearest first, then each parent (a label further left, less
-  indented, or bold over plain), each marked when structure.yaml names it as a group.
+  indented, or bold over plain).
 - block: the run of rows with data shaped like the cell's row, and why it starts and ends.
-- uncertain: why the walk may be wrong (no header, no label, a block that starts only at a format change
-  where structure.yaml says nothing); `SheetTools.headers` then asks a vision model about an image.
+- uncertain: why the walk may be wrong (no header, no label); `SheetTools.headers` then asks a vision model about an image.
 
 A sheet's layout is read once. Data columns are mostly filled and mostly numbers; key columns are the
 label columns left of them. A block ends at a row with no data (a section label or a blank row), a total
@@ -42,7 +40,6 @@ SECTION_MAX_CELLS = 2  # a section label row holds at most this many filled cell
 MAX_SIBLINGS = 20
 AGGREGATE = re.compile(r"^=\s*(SUM|SUBTOTAL|AVERAGE|COUNTA?|MIN|MAX)\s*\(", re.IGNORECASE)
 RANGE = re.compile(r"\$?([A-Z]{1,3})\$?(\d+)\s*:\s*\$?([A-Z]{1,3})\$?(\d+)")
-FORMAT_ONLY = ("formatted differently", "changes the kind")  # block starts that only a format marks
 
 
 class HeaderWalker:
@@ -57,7 +54,7 @@ class HeaderWalker:
 
     def headers(self, ws: Any, row: int, col: int) -> dict[str, Any]:
         """What the walk finds for one cell (see the module docstring)."""
-        column_headers, top, source = self.headers_above(ws, row, col)
+        column_headers, top = self.headers_above(ws, row, col)
         row_labels = [
             text_of(value)
             for value in (self.tools.value(row, c, ws.title) for c in range(col - 1, 0, -1))
@@ -69,43 +66,30 @@ class HeaderWalker:
             key for key in self.keys(ws, row, col, top, found_block) if key["from"] != f"{key['column']}{row}"
         ]
         group = self.section_group(ws, row, top)
-        structure = self.tools.structure_at(row, col, ws.title)
         uncertain = []
         if not column_headers:
             uncertain.append("no column header found above the cell")
         if not row_labels and not found_keys:
             uncertain.append("no row label found left of the cell")
-        if found_block and not structure and any(mark in found_block["starts"] for mark in FORMAT_ONLY):
-            uncertain.append(f"structure.yaml does not cover the cell and its block starts only at a format change ({found_block['starts']})")
-        return {
+        found = {
             "cell": cell_to_a1(row, col),
             "sheet": ws.title,
             "value": self.tools.value(row, col, ws.title),
             "row_labels": list(reversed(row_labels)),
             "keys": found_keys,
             "column_headers": list(reversed(column_headers)),
-            "headers_from": source,
             "sections": group["sections"],
             "siblings": group["siblings"],
             "block": {key: found_block[key] for key in ("rows", "starts", "ends")} if found_block else None,
-            "structure": structure,
             "uncertain": uncertain,
         }
+        return found
 
-    def headers_above(self, ws: Any, row: int, col: int) -> tuple[list[str], int, str]:
-        """Header cells above a cell (nearest first), the lowest header row, and where they come from.
+    def headers_above(self, ws: Any, row: int, col: int) -> tuple[list[str], int]:
+        """Header cells above a cell (nearest first) and the lowest header row.
 
-        The header rows structure.yaml names are read in the cell's column, since a header may be a
-        number (a year) that looks like data. When they name none, or are empty in this column, label
-        cells are collected walking up past the data, up to the next number.
+        Label cells are collected walking up past the data, up to the next number.
         """
-        rows = [r for r in self._header_rows(ws.title) if r < row]
-        if rows:
-            values = [self.tools.value(r, col, ws.title) for r in sorted(rows, reverse=True)]
-            headers = [text_of(value) for value in values if value not in (None, "")]
-            headers = [text for index, text in enumerate(headers) if index == 0 or text != headers[index - 1]]
-            if headers:
-                return headers, max(rows), "structure.yaml"
         headers: list[str] = []
         top = 0
         for r in range(row - 1, 0, -1):
@@ -117,7 +101,7 @@ class HeaderWalker:
                     break
             elif value is not None and headers:
                 break
-        return headers, max(top, max(rows, default=0)), "the layout"
+        return headers, top
 
     def section_group(self, ws: Any, row: int, top: int) -> dict[str, Any]:
         """The section rows above a row (its own, then each parent) and the siblings of its own, with row spans."""
@@ -129,8 +113,7 @@ class HeaderWalker:
 
         def shown(section: dict[str, Any]) -> dict[str, Any]:
             found = {"label": section["label"], "row": section["row"], "rows": span(section["row"], section["level"])}
-            named = self.tools.structure_at(section["row"], section["col"], ws.title, label=True)
-            return {**found, "structure": named} if named else found
+            return found
 
         above = [section for section in sections if section["row"] < row]
         if not above:
@@ -192,16 +175,6 @@ class HeaderWalker:
             self._formula_workbook = openpyxl.load_workbook(self._formula_path)
         return self._formula_workbook[title] if self._formula_workbook is not None else None
 
-    def _header_rows(self, sheet_title: str) -> set[int]:
-        """Rows holding the labels of structure.yaml headers on a sheet."""
-        return {
-            r
-            for table in self.tools.structure
-            for entry in table.entries
-            if entry.kind == "header" and entry.label_range is not None and plain(entry.sheet) == plain(sheet_title)
-            for r in range(entry.label_range.start_row, entry.label_range.end_row + 1)
-        }
-
 
 def headers_line(found: dict[str, Any]) -> str:
     """One line for a walk, e.g. `D8 = 35 | row: Alpha | column: 2019 | section: South (row 7)`."""
@@ -213,10 +186,7 @@ def headers_line(found: dict[str, Any]) -> str:
     if found["column_headers"]:
         parts.append("column: " + " > ".join(found["column_headers"]))
     for section in found["sections"]:
-        named = "".join(f", {entry}" for entry in section.get("structure", []))
-        parts.append(f"section: {section['label']} (row {section['row']}{named})")
-    for entry in found["structure"]:
-        parts.append(f"structure {entry}")
+        parts.append(f"section: {section['label']} (row {section['row']})")
     if found["uncertain"]:
         parts.append("unsure: " + "; ".join(found["uncertain"]))
     return " | ".join(parts)

@@ -1,4 +1,4 @@
-"""Text views of a workbook for prompts: an A1-annotated preview and the structure.yaml map."""
+"""Text views of a workbook for prompts: an A1-annotated preview."""
 
 from __future__ import annotations
 
@@ -6,13 +6,10 @@ import re
 import unicodedata
 from typing import Any
 
-from TableAgent.stages.qa.tools.sheet import StructureTable
-from TableAgent.utils.excel_utils import range_to_a1
 
 MAX_PREVIEW_CHARS = 40000
 MAX_PREVIEW_COLUMNS = 100
 MAX_VALUE_CHARS = 1000
-MAX_MAP_ENTRIES = 120
 TAIL_BUDGET_DIVISOR = 4  # a quarter of each sheet's budget is kept for its last rows
 MATCH_BUDGET_DIVISOR = 4  # with question matches, a quarter goes to matching rows from the middle
 QUESTION_STOPWORDS = frozenset(
@@ -23,26 +20,6 @@ QUESTION_STOPWORDS = frozenset(
     "lowest answer year years rate rates".split()
 )
 LEADING_INDENT = re.compile(r"^[\s\u00a0\u2007\u3000·]+")
-
-
-def structure_map(tables: list[StructureTable]) -> str:
-    """structure.yaml as indented lines: each header and group with its label and data ranges."""
-    if not tables:
-        return "(no structure.yaml)"
-    lines: list[str] = []
-    for table in tables:
-        lines.append(f"Table '{table.name}' on sheet '{table.sheet}': {table.description}".rstrip(": "))
-        for entry in table.entries[:MAX_MAP_ENTRIES]:
-            where = ", ".join(
-                f"{name} {range_to_a1(cells)}"
-                for name, cells in (("label", entry.label_range), ("data", entry.data_range))
-                if cells is not None
-            )
-            indent = "  " * len(entry.path)
-            lines.append(f"{indent}- {entry.kind} {entry.path[-1]!r}" + (f" ({where})" if where else ""))
-        if len(table.entries) > MAX_MAP_ENTRIES:
-            lines.append(f"  ... {len(table.entries) - MAX_MAP_ENTRIES} more entries")
-    return "\n".join(lines)
 
 
 def workbook_preview(

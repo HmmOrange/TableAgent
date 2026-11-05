@@ -18,7 +18,7 @@ MAX_HYPOTHESIS_REVISIONS = 1
 MAX_RETURNS = 1  # times the answer review may send the loop back
 MAX_LLM_CALLS = 80
 
-STRATEGIES = ("search_sheet", "structure", "window")
+STRATEGIES = ("search_sheet", "window")
 ACTIONS = {
     "inspect": '"need_id", "strategy", "instruction"',
     "add_need": '"need": {"id", "description"}',

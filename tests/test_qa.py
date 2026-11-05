@@ -10,13 +10,14 @@ from types import SimpleNamespace
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 import pytest
-import yaml
 
 from TableAgent.stages.qa import orchestrator as orchestrator_module
 from TableAgent.stages.qa.checker import reverse_facts, same_values
 from TableAgent.stages.qa.orchestrator import answer_question
 from TableAgent.stages.qa.ledger import Evidence, Need, Ledger
 from TableAgent.stages.qa.prompts import (
+    DEBATE_SYSTEM_PROMPT,
+    REVERSE_PROMPT,
     INSPECTOR_SYSTEM_PROMPT,
     INSPECTOR_SYSTEM_PROMPT_WITH_LOOK,
     REASONER_SYSTEM_PROMPT,
@@ -25,12 +26,12 @@ from TableAgent.stages.qa.prompts import (
 from TableAgent.stages.qa.synthesizer import part_text
 from TableAgent.stages.qa.tools.headers import read_layout
 from TableAgent.stages.qa.tools.notebook import Notebook
-from TableAgent.stages.qa.tools.sheet import SheetTools, load_structure
+from TableAgent.stages.qa.tools.sheet import SheetTools
 from TableAgent.stages.qa.utils.llm import parse_json
 
 
 @pytest.fixture
-def workbook_files(tmp_path: Path) -> tuple[Path, Path]:
+def workbook_files(tmp_path: Path) -> Path:
     """Two sections (North, South) under one header row; the label "Alpha" occurs in both."""
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -47,31 +48,12 @@ def workbook_files(tmp_path: Path) -> tuple[Path, Path]:
     sheet["A7"] = "South"
     workbook_path = tmp_path / "staff.xlsx"
     workbook.save(workbook_path)
-    structure_path = tmp_path / "structure.yaml"
-    structure_path.write_text(yaml.safe_dump({
-        "staff": {
-            "id": "staff",
-            "name": "Staff by region",
-            "sheet": "Data",
-            "headers": [
-                {"id": "region", "label": "Region", "header_range": "B3", "data_range": "B5:B9", "sub_headers": []},
-                {"id": "y2018", "label": "2018", "header_range": "C3", "data_range": "C5:C9", "sub_headers": []},
-                {"id": "y2019", "label": "2019", "header_range": "D3", "data_range": "D5:D9", "sub_headers": [],
-                 "description": "Staff at the end of 2019"},
-            ],
-            "groups": [
-                {"id": "north", "label": "North", "group_range": "A4", "data_range": "B5:D6"},
-                {"id": "south", "label": "South", "group_range": "A7", "data_range": "B8:D9", "axis": "region"},
-            ],
-        }
-    }), encoding="utf-8")
-    return workbook_path, structure_path
+    return workbook_path
 
 
 @pytest.fixture
-def tools(workbook_files: tuple[Path, Path]) -> SheetTools:
-    workbook_path, structure_path = workbook_files
-    return SheetTools(openpyxl.load_workbook(workbook_path, data_only=True), load_structure([structure_path]))
+def tools(workbook_files: Path) -> SheetTools:
+    return SheetTools(openpyxl.load_workbook(workbook_files, data_only=True))
 
 
 class ScriptedLLM:
@@ -128,11 +110,10 @@ CONFIRMED = {"verdict": "confirmed", "reason": "D8 is South's 2019 value", "cell
 
 
 def _run(
-    tmp_path: Path, workbook_files: tuple[Path, Path], llm: ScriptedLLM,
+    tmp_path: Path, workbook_files: Path, llm: ScriptedLLM,
     question: str = "What is Alpha's value in 2019 in the South?", **settings,
 ):
-    workbook_path, structure_path = workbook_files
-    return answer_question(llm, question, workbook_path, [structure_path], tmp_path / "runs", **settings)
+    return answer_question(llm, question, workbook_files, tmp_path / "runs", **settings)
 
 
 def _ruled(ruling: str, action: dict) -> dict:
@@ -149,30 +130,17 @@ def test_reads_resolve_merged_cells_and_find_matches_whole_words(tools: SheetToo
     assert tools.frame().loc[8, "D"] == 35
 
 
-def test_headers_walk_to_the_row_label_column_header_section_and_structure(tools: SheetTools):
+def test_headers_walk_to_the_row_label_column_header_and_section(tools: SheetTools):
     found = tools.headers("D8")
     assert found["row_labels"] == ["Alpha"]
-    assert found["column_headers"] == ["2019"] and found["headers_from"] == "structure.yaml"
-    assert found["sections"] == [{"label": "South", "row": 7, "rows": "8-9", "structure": ["group: South"]}]
-    assert found["siblings"] == [{"label": "North", "row": 4, "rows": "5-6", "structure": ["group: North"]}]
-    assert "group: South" in found["structure"] and "header: 2019" in found["structure"]
+    assert found["column_headers"] == ["Staff by region"]
+    assert found["sections"] == [{"label": "South", "row": 7, "rows": "8-9"}]
+    assert found["siblings"] == [{"label": "North", "row": 4, "rows": "5-6"}]
     assert found["uncertain"] == []
-    assert tools.describe("D5").startswith("D5 = 12 | row: Alpha | column: 2019 | section: North (row 4, group: North)")
+    assert tools.describe("D5").startswith("D5 = 12 | row: Alpha | column: Staff by region | section: North (row 4)")
     assert tools.around("D8", rows=1, cols=1).splitlines() == [
         "row 7: (empty)", "row 8: C8=30 | *D8=35", "row 9: C9=40 | D9=45",
     ]
-
-
-def test_headers_walk_the_layout_when_the_structure_header_rows_are_empty_in_the_column(tmp_path: Path):
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet["A1"], sheet["B2"], sheet["B3"], sheet["A4"], sheet["B4"] = "Title", "Growth rate", "Percent", "South", 1.3
-    structure = tmp_path / "structure.yaml"
-    structure.write_text(yaml.safe_dump({"t": {"sheet": "Sheet", "headers": [
-        {"id": "title", "label": "Title", "header_range": "A1", "data_range": "A4:A4"},
-    ]}}), encoding="utf-8")
-    found = SheetTools(workbook, load_structure([structure])).headers("B4")
-    assert found["column_headers"] == ["Growth rate", "Percent"] and found["headers_from"] == "the layout"
 
 
 def test_headers_list_parent_sections_but_not_siblings_and_bold_is_the_higher_level():
@@ -222,15 +190,6 @@ def test_headers_carry_merged_keys_down_and_ignore_striping(tmp_path: Path):
     assert {"header": "Location", "value": "North", "from": "A2", "rows": "2-4", "next": "South"}.items() <= found["keys"][0].items()
     assert "key: Location = North (from A2)" in tools.describe("C3")
     assert read_layout(openpyxl.load_workbook(path).active, 1, openpyxl.load_workbook(path).active).totals == {7: (2, 6)}
-
-
-def test_structure_find_matches_labels_first_then_descriptions(tools: SheetTools):
-    assert tools.structure_find("south") == [{
-        "kind": "group", "path": "South", "sheet": "Data", "label_range": "A7", "data_range": "B8:D9",
-        "description": "", "axis": "region", "matched": "label",
-    }]
-    assert [(item["path"], item["matched"]) for item in tools.structure_find("end of")] == [("2019", "description")]
-    assert tools.structure_find("sou") == [] and tools.structure_find("south", sheet="Other") == []
 
 
 def test_striping_in_part_of_a_sheet_does_not_split_blocks_but_a_bold_total_does():
@@ -290,9 +249,8 @@ def test_look_is_unavailable_without_a_vision_model(tools: SheetTools):
 def test_reverse_facts_give_the_meaning_of_the_cells_and_their_values(tools: SheetTools):
     ledger = Ledger("q")
     facts = reverse_facts(tools, ledger, Evidence("n1", 1, 1, "search_sheet", "", True, 35, ["D8"]))
-    assert facts[1].strip().startswith("D8 = 35 | row: Alpha | column: 2019 | section: South (row 7, group: South)")
+    assert facts[1].strip().startswith("D8 = 35 | row: Alpha | column: Staff by region | section: South (row 7)")
     assert "the cells hold the reported values" in facts
-    assert "  header 2019: Staff at the end of 2019" in facts
 
     facts = reverse_facts(tools, ledger, Evidence("n1", 1, 1, "search_sheet", "", True, [12, 99], ["D5", "D8"]))
     assert "values differ: D8 holds '35', reported '99'" in facts
@@ -515,7 +473,7 @@ def test_a_refuting_check_must_be_ruled_on_before_synthesis_then_shows_in_one_li
     )
     result = _run(tmp_path, workbook_files, llm, checks=("reverse",))
 
-    assert "D8 = 35 | row: Alpha | column: 2019 | section: South" in llm.prompts["check"][0]
+    assert "D8 = 35 | row: Alpha | column: Staff by region | section: South" in llm.prompts["check"][0]
     step = llm.prompts["reason"][2]
     assert "check reverse: REFUTED - the North row fits the need (cells: D5)" in step and "RULE ON IT" in step
     assert "Checks to rule on: n1." in step
@@ -570,7 +528,7 @@ def test_a_blind_independent_check_reports_its_own_value_and_the_runner_compares
 
     check = result.ledger.evidence[0].checks[0]
     assert check["verdict"] == "refuted" and check["reason"] == "the Checker read 12 from D5 (row 5)"
-    assert "`claim`" not in llm.check_systems[0] and "structure.yaml is not available" in llm.check_systems[0]
+    assert "`claim`" not in llm.check_systems[0] and "reads raw cells only" in llm.check_systems[0]
     assert "Inspector's evidence" not in llm.prompts["check"][0]
     assert "Workbook preview" in llm.prompts["check"][0] and "Alpha" in llm.prompts["check"][0]
 
@@ -597,3 +555,17 @@ def test_the_method_check_reaches_the_final_review(tmp_path, workbook_files):
     assert "answer_parts = [evidence_n1['value']]" in llm.prompts["check"][0]
     assert "found it flawed: the question asks for a list, the code sums" in llm.prompts["reason"][-1]
     assert "**Method check:** flawed" in Path(result.artifacts["trace_md"]).read_text(encoding="utf-8")
+
+
+def test_prompts_name_no_structure():
+    assert "structure" not in INSPECTOR_SYSTEM_PROMPT
+    assert "structure" not in INSPECTOR_SYSTEM_PROMPT_WITH_LOOK
+    assert "structure" not in DEBATE_SYSTEM_PROMPT
+    assert "structure.yaml" not in REVERSE_PROMPT
+
+
+def test_ledger_rejects_the_structure_strategy():
+    ledger = Ledger("q")
+    ledger.needs["n1"] = Need("n1", "a need")
+    assert "Unknown strategy" in ledger.refusal("inspect", {"need_id": "n1", "strategy": "structure"})
+    assert ledger.refusal("inspect", {"need_id": "n1", "strategy": "window"}) == ""

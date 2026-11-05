@@ -468,23 +468,13 @@ class TableAgentService:
             total_completion_tokens = 0
 
             for group_index, (workbook_name, candidates) in enumerate(grouped.items(), start=1):
-                structures: list[tuple[str, Path]] = []
-                seen_sheets: set[str] = set()
-                group_dir = source_dir / f"group-{group_index}"
-                for candidate in candidates:
-                    sheet_name = str(
-                        candidate.get("sheet") or candidate.get("sheet_name") or ""
-                    ).strip()
-                    structure_text = str(candidate.get("structure_yaml") or "").strip()
-                    if not structure_text or not sheet_name or sheet_name in seen_sheets:
-                        continue
-                    seen_sheets.add(sheet_name)
-                    structure_path = group_dir / f"{len(structures) + 1:03d}-{safe_name(sheet_name)}.yaml"
-                    structure_path.parent.mkdir(parents=True, exist_ok=True)
-                    structure_path.write_text(structure_text + "\n", encoding="utf-8")
-                    structures.append((sheet_name, structure_path))
-
-                if not structures:
+                sheets = list(dict.fromkeys(
+                    sheet_name
+                    for candidate in candidates
+                    if (sheet_name := str(candidate.get("sheet") or candidate.get("sheet_name") or "").strip())
+                    and str(candidate.get("structure_yaml") or "").strip()
+                ))
+                if not sheets:
                     continue
 
                 cards = "\n\n".join(
@@ -500,12 +490,10 @@ class TableAgentService:
                 )
                 answer_response, qa_info = pipeline._answer_question(
                     question=normalized_query,
-                    structure_path=structures[0][1],
                     workbook_path=Path(by_name[workbook_name]["path"]),
                     qa_artifact_dir=output_dir / "qa" / f"group-{group_index}",
                     fallback_prompt=fallback_prompt,
                     fallback_text_prompt=fallback_prompt,
-                    related_structure_paths=[path for _, path in structures[1:]],
                 )
                 total_prompt_tokens += int(getattr(answer_response, "prompt_tokens", 0) or 0)
                 total_completion_tokens += int(getattr(answer_response, "completion_tokens", 0) or 0)
@@ -514,7 +502,7 @@ class TableAgentService:
                 group_answers.append(
                     {
                         "workbook": workbook_name,
-                        "sheets": [sheet for sheet, _ in structures],
+                        "sheets": sheets,
                         "answer": answer_response.content,
                         "qa": public_qa_info,
                         "candidates": [
@@ -858,53 +846,13 @@ class TableAgentService:
                 ).strip()
                 == selected_workbook
             ]
-            primary_structure = str(
-                selected_artifact.get("structure_yaml") or ""
-            ).strip()
-            if not primary_structure:
-                primary_structure = next(
-                    (
-                        str(artifact.get("structure_yaml") or "").strip()
-                        for artifact in selected_workbook_artifacts
-                        if str(
-                            artifact.get("sheet")
-                            or artifact.get("sheet_name")
-                            or ""
-                        ).strip()
-                        == candidate.sheet_name
-                        and str(artifact.get("structure_yaml") or "").strip()
-                    ),
-                    "",
-                )
-
-            structure_path = source_dir / f"001-{safe_name(candidate.sheet_name)}.yaml"
-            if primary_structure:
-                structure_path.parent.mkdir(parents=True, exist_ok=True)
-                structure_path.write_text(primary_structure + "\n", encoding="utf-8")
-
-            related_structure_paths: list[Path] = []
-            related_sheet_names: list[str] = []
-            seen_related_sheets = {candidate.sheet_name}
-            for artifact in selected_workbook_artifacts:
-                sheet_name = str(
-                    artifact.get("sheet") or artifact.get("sheet_name") or ""
-                ).strip()
-                structure_text = str(artifact.get("structure_yaml") or "").strip()
-                if (
-                    not sheet_name
-                    or not structure_text
-                    or sheet_name in seen_related_sheets
-                ):
-                    continue
-                seen_related_sheets.add(sheet_name)
-                related_path = source_dir / (
-                    f"{len(related_structure_paths) + 2:03d}-{safe_name(sheet_name)}.yaml"
-                )
-                related_path.parent.mkdir(parents=True, exist_ok=True)
-                related_path.write_text(structure_text + "\n", encoding="utf-8")
-                related_structure_paths.append(related_path)
-                related_sheet_names.append(sheet_name)
-
+            related_sheet_names = list(dict.fromkeys(
+                sheet_name
+                for artifact in selected_workbook_artifacts
+                if (sheet_name := str(artifact.get("sheet") or artifact.get("sheet_name") or "").strip())
+                and sheet_name != candidate.sheet_name
+                and str(artifact.get("structure_yaml") or "").strip()
+            ))
             selected_card = str(selected_artifact.get("retrieval_card") or "").strip()
             fallback_prompt = (
                 "Answer the spreadsheet question using only the indexed, verified "
@@ -914,12 +862,10 @@ class TableAgentService:
             )
             qa_output = pipeline.qa_stage.run(QAInput(
                 question=normalized_query,
-                structure_path=structure_path,
                 workbook_path=candidate.workbook_path,
                 qa_artifact_dir=output_dir / "qa",
                 fallback_prompt=fallback_prompt,
                 fallback_text_prompt=fallback_prompt,
-                related_structure_paths=tuple(related_structure_paths),
             ))
             answer_response, qa_info = qa_output.response, qa_output.metadata
             public_qa_info = dict(qa_info)

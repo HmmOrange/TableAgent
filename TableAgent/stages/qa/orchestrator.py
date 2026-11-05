@@ -51,10 +51,10 @@ from TableAgent.stages.qa.prompts import (
 from TableAgent.stages.qa.synthesizer import SynthesisError, Synthesizer
 from TableAgent.stages.qa.tools.look import Vision
 from TableAgent.stages.qa.tools.notebook import Notebook
-from TableAgent.stages.qa.tools.sheet import SheetTools, load_structure
+from TableAgent.stages.qa.tools.sheet import SheetTools
 from TableAgent.stages.qa.utils.llm import CountingLLM, ReplyError, ask_json, require_dict
 from TableAgent.stages.qa.utils.trace import RunLog, run_dir_name, write_artifacts
-from TableAgent.stages.qa.utils.workbook_view import structure_map, workbook_preview
+from TableAgent.stages.qa.utils.workbook_view import workbook_preview
 
 DECISION_KEYS = ("assessment", "rulings", "action", "reason")
 
@@ -76,7 +76,6 @@ def answer_question(
     llm_client: Any,
     question: str,
     workbook_path: Path,
-    structure_paths: list[Path],
     artifact_dir: Path,
     excluded_sheet_names: set[str] | None = None,
     progress: Callable[[str], None] | None = None,
@@ -101,7 +100,7 @@ def answer_question(
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
     try:
         run = Orchestrator(
-            question, llm, workbook, Path(workbook_path), structure_paths, excluded_sheet_names,
+            question, llm, workbook, Path(workbook_path), excluded_sheet_names,
             vision, checks, sees_value, view, synthesis_check,
         )
         error = run.answer()
@@ -134,7 +133,6 @@ class Orchestrator:
         llm: CountingLLM,
         workbook: Any,
         workbook_path: Path,
-        structure_paths: list[Path],
         excluded_sheet_names: set[str] | None,
         vision: Vision | None,
         checks: tuple[str, ...],
@@ -146,14 +144,12 @@ class Orchestrator:
         self.llm = llm
         self.log = llm.log
         self.ledger = Ledger(question)
-        structure = load_structure(structure_paths)
-        tools = SheetTools(workbook, structure, look=vision.look if vision else None, formula_path=workbook_path)
+        tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
         self.notebook = Notebook({"sheet": tools, "pd": pd, "np": np})
-        self.structure = structure_map(structure)
         self.preview = workbook_preview(workbook, workbook_path.name, excluded_sheet_names, question=question)
         self.reasoner = Reasoner(llm)
         self.inspector = Inspector(
-            llm, self.notebook, tools, self.structure, INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision else INSPECTOR_SYSTEM_PROMPT,
+            llm, self.notebook, tools, INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision is not None else INSPECTOR_SYSTEM_PROMPT,
         )
         self.checker = Checker(llm, tools, checks, sees_value, view, self.preview) if checks else None
         self.synthesis_check = synthesis_check
@@ -163,7 +159,7 @@ class Orchestrator:
         """Run the loop; returns an error message, or None once an answer is set."""
         ledger = self.ledger
         try:
-            ledger.start(self.reasoner.reason_start(self.question, self.preview, self.structure))
+            ledger.start(self.reasoner.reason_start(self.question, self.preview))
         except ReplyError as exc:
             return f"Framing the question failed: {exc}"
         self.log.say(f"framed | {len(ledger.needs)} need(s), {len(ledger.answer_slots)} answer slot(s)")
@@ -261,10 +257,12 @@ class Reasoner:
     def __init__(self, llm: CountingLLM):
         self.llm = llm
 
-    def reason_start(self, question: str, preview: str, structure: str) -> dict[str, Any]:
+    def reason_start(self, question: str, preview: str) -> dict[str, Any]:
         """Before anything is read: what the question asks, the answer slots, the needs to read, a hypothesis."""
         prompt = REASON_START_PROMPT.format(
-            question=question, preview=preview, structure=structure, answer_form_rules=ANSWER_FORM_RULES,
+            question=question,
+            preview=preview,
+            answer_form_rules=ANSWER_FORM_RULES,
         )
         return ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, prompt, _check_start)
 

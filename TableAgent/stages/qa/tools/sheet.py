@@ -1,104 +1,26 @@
 """The `sheet` object of the notebook: reads, searches and describes workbook cells.
 
-Reads resolve merged cells to the value a reader sees. structure.yaml is loaded as a rough map:
-it names headers and groups with their cell ranges, and may be incomplete or off by a row.
+Reads resolve merged cells to the value a reader sees.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
-import yaml
 from openpyxl.utils import get_column_letter
 
-from TableAgent.domain.ranges import CellRange
 from TableAgent.stages.qa.prompts import HEADERS_LOOK_QUESTION
 from TableAgent.stages.qa.tools.headers import HeaderWalker, cell_format, format_text, headers_line, plain, text_of
-from TableAgent.utils.excel_utils import cell_to_a1, parse_a1_range, range_to_a1
+from TableAgent.utils.excel_utils import cell_to_a1, parse_a1_range
 
 MAX_HEADER_LOOKS = 3  # images `headers` asks a vision model about, per question
 HEADER_LOOK_ROWS = 40  # the image runs from up to this many rows above the cell ...
 HEADER_LOOK_COLUMNS = 20  # ... and this many columns to its left, the cell included
 MAX_FORMAT_CELLS = 300  # filled cells `formats` lists
-
-
-@dataclass
-class StructureEntry:
-    """A header or group of structure.yaml: its label path, where its label and data sit, and what it holds."""
-
-    kind: str  # "header" or "group"
-    path: list[str]
-    sheet: str
-    label_range: CellRange | None
-    data_range: CellRange | None
-    description: str = ""
-    axis: str = ""  # of a group: the dimension it groups along, e.g. "region"
-
-
-@dataclass
-class StructureTable:
-    name: str
-    sheet: str
-    description: str
-    entries: list[StructureEntry] = field(default_factory=list)
-
-
-def load_structure(paths: list[Path]) -> list[StructureTable]:
-    """Tables of every readable structure.yaml; an unreadable file contributes nothing."""
-    tables: list[StructureTable] = []
-    for path in paths:
-        try:
-            payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for key, data in payload.items():
-            if key == "relations" or not isinstance(data, dict):
-                continue
-            sheet = str(data.get("sheet") or data.get("name") or key)
-            table = StructureTable(str(data.get("name") or key), sheet, str(data.get("description") or ""))
-            for header in data.get("headers") or []:
-                _add_header(table, header, [], sheet)
-            for group in data.get("groups") or []:
-                if isinstance(group, dict):
-                    table.entries.append(StructureEntry(
-                        "group",
-                        [str(group.get("label") or group.get("id") or "")],
-                        sheet,
-                        _range(group.get("group_range") or group.get("range"), sheet),
-                        _range(group.get("data_range"), sheet),
-                        str(group.get("description") or ""),
-                        str(group.get("axis") or ""),
-                    ))
-            tables.append(table)
-    return tables
-
-
-def _add_header(table: StructureTable, header: Any, parents: list[str], sheet: str) -> None:
-    if not isinstance(header, dict):
-        return
-    path = [*parents, str(header.get("label") or header.get("id") or "")]
-    table.entries.append(StructureEntry(
-        "header", path, sheet, _range(header.get("header_range"), sheet), _range(header.get("data_range"), sheet),
-        str(header.get("description") or ""),
-    ))
-    for sub in header.get("sub_headers") or []:
-        _add_header(table, sub, path, sheet)
-
-
-def _range(value: Any, sheet: str) -> CellRange | None:
-    if not value:
-        return None
-    try:
-        return parse_a1_range(str(value), sheet)
-    except ValueError:
-        return None
 
 
 class SheetTools:
@@ -107,12 +29,10 @@ class SheetTools:
     def __init__(
         self,
         workbook: Any,
-        structure: list[StructureTable] | None = None,
         look: Callable[[str, str, str], str] | None = None,
         formula_path: Path | None = None,
     ):
         self.workbook = workbook
-        self.structure = structure or []
         self._look = look  # (ref, question, sheet) -> the vision model's answer; None without a vision model
         self._walker = HeaderWalker(self, formula_path)
         self._header_looks = 0
@@ -173,7 +93,7 @@ class SheetTools:
         return pd.DataFrame(rows, columns=columns, index=range(1, ws.max_row + 1))
 
     def headers(self, ref: str, sheet: str = "", look: bool = True) -> dict[str, Any]:
-        """What one cell means: its row labels, column headers, sections, block and structure.yaml entries.
+        """What one cell means: its row labels, column headers, sections and block.
 
         Found by walking the layout in code (tools/headers.py). When the walk is unsure and a vision model is
         available, `vision` adds its answer about an image of the area above and left of the cell.
@@ -237,51 +157,6 @@ class SheetTools:
         if self._look is None:
             raise ValueError("sheet.look is not available in this run.")
         return self._look(ref, question, self.worksheet(sheet).title)
-
-    def structure_at(self, row: int, col: int, sheet: str = "", label: bool = False) -> list[str]:
-        """structure.yaml headers and groups whose data range (or label range) holds a cell, as `header: A > B`."""
-        return [f"{entry.kind}: " + " > ".join(entry.path) for entry in self.structure_entries_at(row, col, sheet, label)]
-
-    def structure_entries_at(self, row: int, col: int, sheet: str = "", label: bool = False) -> list[StructureEntry]:
-        """The structure.yaml entries whose data range (or label range) holds a cell."""
-        ws_title = self.worksheet(sheet).title
-        found = []
-        for table in self.structure:
-            for entry in table.entries:
-                cells = entry.label_range if label else entry.data_range
-                if cells is None or plain(entry.sheet) != plain(ws_title):
-                    continue
-                if cells.start_row <= row <= cells.end_row and cells.start_col <= col <= cells.end_col:
-                    found.append(entry)
-        return found
-
-    def structure_find(self, text: str, sheet: str = "") -> list[dict[str, Any]]:
-        """structure.yaml headers and groups whose label path, or else description, holds `text` as whole words.
-
-        Entries matched by label come first; each gives its path, label and data ranges, and description.
-        """
-        query = _words(text)
-        found: dict[str, list[dict[str, Any]]] = {"label": [], "description": []}
-        for table in self.structure:
-            for entry in table.entries:
-                if not query or (sheet and plain(entry.sheet) != plain(sheet)):
-                    continue
-                matched = (
-                    "label" if f" {query} " in f" {_words(' '.join(entry.path))} "
-                    else "description" if f" {query} " in f" {_words(entry.description)} " else ""
-                )
-                if matched:
-                    found[matched].append({
-                        "kind": entry.kind,
-                        "path": " > ".join(entry.path),
-                        "sheet": entry.sheet,
-                        "label_range": range_to_a1(entry.label_range) if entry.label_range else None,
-                        "data_range": range_to_a1(entry.data_range) if entry.data_range else None,
-                        "description": entry.description,
-                        **({"axis": entry.axis} if entry.axis else {}),
-                        "matched": matched,
-                    })
-        return found["label"] + found["description"]
 
     def _merged_map(self, ws: Any) -> dict[tuple[int, int], tuple[int, int]]:
         if ws.title not in self._merged:
