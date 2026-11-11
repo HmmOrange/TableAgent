@@ -1,23 +1,36 @@
 """One inspection: the Inspector establishes one need by exploring the workbook in code over several turns.
 
 A turn is one model reply (thought, code, done) and one notebook cell. Errors are observations for
-the next turn. `done` ends the inspection once the evidence variable is set as the contract asks.
+the next turn. `done` ends the inspection once the evidence variable is set as the contract asks. When the
+turns are used up without evidence, one report turn sets it from what the turns printed. An attempt that
+found nothing hands its last thoughts to the next attempt. The notebook holds the formats in use in the
+variables `legends` and `formats` (tools/formats.py).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from TableAgent.stages.qa.ledger import MAX_LLM_CALLS, Evidence, Ledger, Need, evidence_lines
-from TableAgent.stages.qa.prompts import INSPECTOR_PROMPT, INSPECTOR_SYSTEM_PROMPT, STRATEGY_TEXTS
+from TableAgent.stages.qa.prompts import (
+    FORMATS_VARIABLE_TEXT,
+    INSPECTOR_LEGEND_TEXT,
+    INSPECTOR_PROMPT,
+    INSPECTOR_SYSTEM_PROMPT,
+    STRATEGY_TEXTS,
+)
+from TableAgent.stages.qa.tools.formats import format_marks, legend_fills, legend_notes, legends
 from TableAgent.stages.qa.tools.notebook import Notebook
 from TableAgent.stages.qa.tools.sheet import SheetTools
 from TableAgent.stages.qa.utils.llm import CountingLLM, ReplyError, ask_json, require_dict
+from TableAgent.utils.excel_utils import parse_a1_range
 
-MAX_TURNS = 5
+MAX_TURNS = 12
+REPORT_TURNS = 1  # turns after the last one that only report what was already printed
 OUTPUT_CHARS = 3000  # of one turn's printed output, in the transcript
-TRANSCRIPT_CHARS = 12000  # beyond this the oldest outputs are left out first
+TRANSCRIPT_CHARS = 24000  # beyond this the oldest outputs are left out first
 
 
 @dataclass
@@ -39,6 +52,12 @@ class Inspector:
         self.system_prompt = system_prompt
         self.notebook = notebook
         self.tools = tools
+        found = legends(tools.workbook.worksheets)
+        self.formats = INSPECTOR_LEGEND_TEXT.format(legends=legend_notes(found)) if found else ""  # added to the instruction
+        if found:
+            notebook.namespace["legends"] = legend_fills(found)
+        notebook.namespace["formats"] = format_marks(tools.workbook.worksheets)
+        self.formats += FORMATS_VARIABLE_TEXT
 
     def inspect(
         self, question: str, ledger: Ledger, need: Need, strategy: str, instruction: str, step: int,
@@ -49,7 +68,7 @@ class Inspector:
         # A value left by an earlier attempt must not pass for this attempt's evidence.
         self.notebook.namespace.pop(need.variable, None)
         turns: list[Turn] = []
-        for number in range(1, MAX_TURNS + 1):
+        for number in range(1, MAX_TURNS + REPORT_TURNS + 1):
             if self.llm.used >= MAX_LLM_CALLS:
                 break
             prompt = self._prompt(question, ledger, need, strategy, instruction, turns, number)
@@ -93,12 +112,37 @@ class Inspector:
         evidence.cells = [str(cell) for cell in (cells if isinstance(cells, list) else [cells])]
         evidence.where = str(reported.get("where") or "")
         evidence.note = str(reported.get("note") or "")
+        self._as_shown(evidence)
         return evidence
+
+    def _as_shown(self, evidence: Evidence) -> None:
+        """A number read from one cell becomes the number as the cell's format shows it."""
+        value = evidence.value
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or len(evidence.cells) != 1:
+            return
+        try:
+            cells = parse_a1_range(evidence.cells[0], "")
+            ws = self.tools.worksheet(cells.sheet)
+        except ValueError:
+            return
+        if (cells.start_row, cells.start_col) != (cells.end_row, cells.end_col):
+            return
+        raw = self.tools.value(cells.start_row, cells.start_col, ws.title)
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool) or abs(raw - value) > 1e-9:
+            return
+        fmt = ws.cell(cells.start_row, cells.start_col).number_format
+        shown = shown_number(raw, fmt)
+        if shown is not None and shown != raw:
+            evidence.value = shown
+            evidence.note = (evidence.note + f" Shown as {shown} by the cell's number format {fmt} (stored {raw}).").strip()
 
     def _prompt(
         self, question: str, ledger: Ledger, need: Need, strategy: str, instruction: str, turns: list[Turn], turn: int,
     ) -> str:
-        earlier = [line for item in ledger.evidence if item.need_id == need.id for line in evidence_lines(item)]
+        earlier = [
+            line for item in ledger.evidence if item.need_id == need.id
+            for line in evidence_lines(item) + _seen_lines(item)
+        ]
         return INSPECTOR_PROMPT.format(
             question=question,
             hypothesis=ledger.hypothesis,
@@ -106,18 +150,53 @@ class Inspector:
             need=need.description,
             strategy=strategy,
             strategy_text=STRATEGY_TEXTS[strategy],
-            instruction=instruction or "(none)",
+            instruction=(instruction or "(none)") + self.formats,
             earlier=("Earlier attempts for this need:\n" + "\n".join(earlier) + "\n") if earlier else "",
-            sheets="; ".join(self.tools.sheets()),
+            sheets="; ".join(self.tools.sheets()) + " (listed here: do not call sheet.sheets())",
             variable=need.variable,
             transcript=transcript(turns),
             turn=turn,
             max_turns=MAX_TURNS,
-            last=(
-                f" This is the last turn: set `{need.variable}` from what you have found (value None, with why in note,"
-                " if nothing fits) and set done to true."
-            ) if turn == MAX_TURNS else "",
+            last=_last_text(need.variable, turn),
         )
+
+
+def _last_text(variable: str, turn: int) -> str:
+    """What the turn line adds: the pace, the last turn's order to report, or the report turn's."""
+    if turn > MAX_TURNS:
+        return (
+            f" The turns are used up and `{variable}` is not set. Report turn: look nothing up; set `{variable}` from what"
+            " the turns above printed (value None, with why in note, if they do not show it) and set done to true."
+        )
+    if turn == MAX_TURNS:
+        return (
+            f" This is the last turn: set `{variable}` from what you have found (value None, with why in note,"
+            " if nothing fits) and set done to true."
+        )
+    return (
+        f" Most needs take 3 to 6 turns: as soon as you have seen where the value is, set `{variable}` and set done"
+        " to true. Establish this need only; the other needs are inspected separately."
+    )
+
+
+def _seen_lines(item: Evidence) -> list[str]:
+    """What an attempt that found nothing had worked out by its end: its last thoughts, for the next attempt."""
+    if item.found:
+        return []
+    thoughts = [turn["thought"] for turn in item.turns if turn.get("thought")][-2:]
+    return [f"  it ended thinking: {clip(' '.join(thought.split()), 500)}" for thought in thoughts]
+
+
+def shown_number(value: float, fmt: str) -> float | None:
+    """The number a fixed-decimal number format shows, or None for General and text formats."""
+    section = re.sub(r'"[^"]*"|\\.|_.|\*.', "", fmt.split(";")[0])
+    if not re.search(r"[0#]", section):
+        return None
+    decimals = re.search(r"\.([0#]+)", section)
+    places = len(decimals.group(1).replace("#", "")) if decimals else 0
+    if "%" in section:
+        return round(value, places + 2)
+    return round(value, places) if places else round(value)
 
 
 def _check_turn(data: Any) -> dict[str, Any]:

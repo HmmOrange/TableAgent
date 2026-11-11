@@ -10,19 +10,25 @@ are model calls made by `Reasoner`; each reads the ledger, never an Inspector's 
 A **need** is one fact to read from the workbook, described by its meaning (entity, measure, period,
 condition, unit), never by a cell; its value may be one value or a list or dict when it covers a set of rows.
 
-1. **reason_start**. Reads the question, an A1 preview of the workbook. It writes
-   the answer slots, each tied to the phrase of the question that asks for it, the needs to read, and a
-   hypothesis of how the needs combine, with no values.
+1. **reason_start**. Reads the question and an A1 preview of the workbook (a merged cell written once, with
+   its range). It writes the answer slots, each tied to the phrase of the question that asks for it, the
+   needs to read, and a hypothesis of how the needs combine, with no values. The plan is written twice,
+   independently, and a third call settles where the two differ. A plan with more than 3 needs is sent back
+   once to merge the needs read from one row, column or block. The preview shows no formats: when the workbook
+   has fill-colour legends, one line names them, and a need may be described by a format ("the cells filled
+   green in the Price column"); which cells carry it is for the inspection to find.
 2. **reason_step** ("is there enough information?"), after each inspection. It rules on every check that
    refuted a need (`keep` the evidence, or `reject` it and reopen the need), then chooses one action:
    `inspect` a need, `add_need`, `revise_need`, `drop_need`, `revise_hypothesis` (once), or `synthesize`.
    Code enforces the rules: no synthesis while a need is open or a refuting check is not ruled on, at most
    3 inspections per need since its last revision, a revised need is inspected before it is revised again,
-   and the last need cannot be dropped.
-3. **Inspect** (`inspector.py`). An Inspector establishes one need in up to 5 turns of code (in a block after its JSON reply) in a shared, sandboxed notebook, using the `sheet` tools
+   and the last need cannot be dropped. An action refused twice in a row for the same reason is called out.
+3. **Inspect** (`inspector.py`). An Inspector establishes one need in up to 12 turns of code (in a block after its JSON reply) in a shared, sandboxed notebook, using the `sheet` tools
    (`tools/sheet.py`). It looks first and extracts after,
    then sets `evidence_<need>` = {value, cells, where, note}. Errors are observations for the next turn;
-   the last turn asks for the evidence.
+   the last turn asks for the evidence, and when the turns are used up without it, one report turn sets it
+   from what was printed. An attempt that found nothing hands its last thoughts to the next attempt. A number
+   read from one cell is reported as the cell's number format shows it.
 4. **Check** (`checker.py`, settings below). Checkers test the evidence of a found need. A refuting check
    is shown in full to the next reasoning step, which judges it; once ruled on, it shows in one line.
 5. **Synthesize** (`synthesizer.py`). Code sets `answer_parts`, one entry per slot. The runner checks the
@@ -35,11 +41,20 @@ Limits per question are in `ledger.py`: 20 steps, 80 model calls, 1 hypothesis r
 ## Tools (`tools/`)
 
 `sheet` offers `sheets`, `find`, `read`, `frame`, `around` (the cells around one cell),
-`headers` and `describe`, and `look` when a vision model is configured.
+`headers` and `describe`, `formats` and `cells`, and `look` when a vision model is configured.
+
+Formats reach the model through code, not through the preview (`tools/formats.py`). `sheet.cells(range)`
+returns a DataFrame with one row per filled cell (a merged cell once): value, merged range, bold, italic,
+fill and font colour with a colour name ("red"), indent, formula; `sheet.cells("C:C")` takes a whole column,
+so cells are selected by format in code. The notebook also holds two variables found over every cell:
+`legends` ({label: fill} for each fill-colour legend set apart from the data) and `formats` (every fill,
+font colour, bold and italic in use, with how many cells carry it and in which columns). `sheet.formats`
+lists the same per cell as text.
 
 `sheet.headers(cell)` (`tools/headers.py`) walks from a cell up to its column headers and left to its row
-labels: the label cells above the data; keys written once
-and carried down; label-only section rows above, each parent found by position, indent or bold; the block
+labels: the label cells above the data (a row of numbers typed plain above formatted data is a header row
+too); keys written once and carried down (a column of numbers written once per group of rows is a key
+column); label-only section rows above, each parent found by position, indent or bold; the block
 of rows shaped like the cell's row and why it starts and ends (a blank or label row, a total by formula, a
 rare format, a change of the kind of data). When the walk is unsure (no header, no label), it asks the vision model about an image of the area, at most 3 times per question.
 
@@ -51,9 +66,10 @@ rare format, a change of the kind of data). When the walk is unsure (no header, 
     the cells, lists the filled cells of the same sections that were left out and the cells shared with
     other needs; one model call compares this with the need.
   - `independent`: re-derives the need in its own notebook with other tools. `qa_checker_view` picks them:
-    `grid` (raw cells with `sheet.formats` for their bold, fill, indent and formulas),
+    `grid` (raw cells with `sheet.formats` for their format and formulas),
     `image` (images through the vision model) or `frame` (DataFrames only); `grid` and `frame` also get the
-    workbook preview the first reasoning step saw. With `qa_checker_sees_value` (default true) it sees the claim and gives the verdict; blind, it
+    workbook preview the first reasoning step saw, on the first turn only. The check's notebook holds `cells`
+    (as `sheet.cells`), `legends` and `formats`. With `qa_checker_sees_value` (default true) it sees the claim and gives the verdict; blind, it
     reports its own value and the runner compares the two.
   - `debate`: argues against the evidence in its own notebook; each objection must name the cells that show it.
 - `qa_synthesis_check`: before reason_end, a Checker reviews how the synthesis code computed the answer

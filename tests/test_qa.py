@@ -13,6 +13,7 @@ import pytest
 
 from TableAgent.stages.qa import orchestrator as orchestrator_module
 from TableAgent.stages.qa.checker import reverse_facts, same_values
+from TableAgent.stages.qa.inspector import shown_number
 from TableAgent.stages.qa.orchestrator import answer_question
 from TableAgent.stages.qa.ledger import Evidence, Need, Ledger
 from TableAgent.stages.qa.prompts import (
@@ -24,6 +25,7 @@ from TableAgent.stages.qa.prompts import (
     SYNTHESIZER_SYSTEM_PROMPT,
 )
 from TableAgent.stages.qa.synthesizer import part_text
+from TableAgent.stages.qa.tools.formats import format_marks, legend_notes, legends
 from TableAgent.stages.qa.tools.headers import read_layout
 from TableAgent.stages.qa.tools.notebook import Notebook
 from TableAgent.stages.qa.tools.sheet import SheetTools
@@ -61,11 +63,13 @@ class ScriptedLLM:
 
     def __init__(
         self, reason: list[dict], inspect: list[dict] = (), synthesize: list[dict] = (), check: list[dict] = (),
-        look: list[str] = (),
+        look: list[str] = (), start: list[dict] = (),
     ):
+        # `reason` opens with the starting plan. reason_start asks for the plan again (a second plan, then the
+        # reconciled one): `start` scripts those replies; without it the same plan comes back.
         self.scripts = {
             "reason": list(reason), "inspect": list(inspect), "synthesize": list(synthesize), "check": list(check),
-            "look": list(look),
+            "look": list(look), "start": list(start),
         }
         self.prompts: dict[str, list[str]] = {role: [] for role in self.scripts}
         self.check_systems: list[str] = []
@@ -78,8 +82,15 @@ class ScriptedLLM:
         role = "check" if system_prompt.startswith("You are a Checker") else roles[system_prompt]
         if role == "check":
             self.check_systems.append(system_prompt)
+        if role == "reason" and self.prompts["reason"] and "Reason about the question before anything is read" in prompt:
+            role = "start"  # the starting plan asked for again
         self.prompts[role].append(prompt)
-        return SimpleNamespace(content=json.dumps(self.scripts[role].pop(0)), prompt_tokens=10, completion_tokens=5)
+        if role == "start" and not self.scripts["start"]:
+            return SimpleNamespace(content=json.dumps(self.plan), prompt_tokens=10, completion_tokens=5)
+        reply = self.scripts[role].pop(0)
+        if role == "reason" and len(self.prompts["reason"]) == 1:
+            self.plan = reply
+        return SimpleNamespace(content=json.dumps(reply), prompt_tokens=10, completion_tokens=5)
 
     def generate_with_image(self, prompt: str, image_path: Path, system_prompt: str | None = None):
         assert Path(image_path).exists()
@@ -128,6 +139,26 @@ def test_reads_resolve_merged_cells_and_find_matches_whole_words(tools: SheetToo
     assert [ref for ref, _ in tools.find("alpha")] == ["B5", "B8"]
     assert tools.find("alp") == []
     assert tools.frame().loc[8, "D"] == 35
+
+
+def test_find_falls_back_to_plurals_split_headers_and_near_labels():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["A2"], sheet["B1"], sheet["C1"] = "Output per", "worker", "Unadjusted indexes", "Lower threshold (km)"
+    tools = SheetTools(workbook)
+    assert tools.find("output per worker") == [("A1", "Output per worker")]
+    assert tools.find("unadjusted index") == [("B1", "Unadjusted indexes")]
+    assert tools.find("lower threshold distance") == [("C1", "Lower threshold (km)")]
+    assert tools.find("upper distance") == []
+
+
+def test_reads_give_text_without_its_outer_spaces():
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"], workbook.active["A2"], workbook.active["A3"] = "CA ", "  ", " New  York"
+    tools = SheetTools(workbook)
+    assert tools.read("A1:A3") == [["CA"], [None], ["New  York"]]
+    column = tools.frame()["A"]
+    assert column[1] == "CA" and column.isna()[2] and column[3] == "New  York"
 
 
 def test_headers_walk_to_the_row_label_column_header_and_section(tools: SheetTools):
@@ -225,18 +256,157 @@ def test_an_unsure_walk_asks_the_vision_model_about_the_area_a_few_times():
     assert len(asked) == 3  # at most three images per question
 
 
+def test_the_vision_area_skips_empty_cells_and_never_cuts_a_merged_cell():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "A title over the table"
+    sheet.merge_cells("A1:F1")
+    sheet["B3"] = 7
+    asked = []
+    tools = SheetTools(workbook, look=lambda ref, question, sheet: asked.append(ref) or "a title row above")
+    assert "vision" not in tools.headers("B4")  # empty: nothing to ask about
+    assert tools.headers("B3")["vision"] == "a title row above" and asked == ["A1:F3"]
+
+
 def test_formats_list_the_format_and_formula_of_filled_cells(tmp_path: Path):
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet["A1"], sheet["B1"], sheet["A2"], sheet["B2"], sheet["A3"], sheet["B3"] = "Item", None, "x", 4, "Total", "=SUM(B2:B2)"
     sheet["A3"].font = Font(bold=True)
+    sheet["A2"].font = Font(italic=True, color="FFFF0000")
+    sheet["B2"].fill = PatternFill("solid", fgColor="FFFFFF00")
     path = tmp_path / "f.xlsx"
     workbook.save(path)
     tools = SheetTools(openpyxl.load_workbook(path), formula_path=path)
     assert tools.formats("A1:B3").splitlines() == [
-        "A1 = Item | plain", "A2 = x | plain", "B2 = 4 | plain", "A3 = Total | bold", "B3 = =SUM(B2:B2) | plain | =SUM(B2:B2)",
+        "A1 = Item | plain", "A2 = x | italic, font FFFF0000", "B2 = 4 | fill FFFFFF00", "A3 = Total | bold", "B3 = =SUM(B2:B2) | plain | =SUM(B2:B2)",
     ]
 
+
+def test_headers_report_replicate_header_spans_and_colour_legends():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["B1"], sheet["D1"] = "Dose", "Replicates", "Single"
+    sheet.merge_cells("B1:C1")
+    for row, values in enumerate([(1, 4, 5, 6), (2, 7, 8, 9)], start=2):
+        for col, value in enumerate(values, start=1):
+            sheet.cell(row, col, value)
+    sheet["F2"] = "Treated"
+    for ref in ("F2", "B2", "C3"):
+        sheet[ref].fill = PatternFill("solid", fgColor="FFFF0000")
+    tools = SheetTools(workbook)
+    assert tools.headers("C2", look=False)["spans"] == ["Replicates: B1:C1 (2 columns)"]
+    assert tools.headers("D2", look=False)["spans"] == []
+    assert tools.headers("C3", look=False)["legend"] == "Treated (F2, fill FFFF0000)"
+    assert "legend" not in tools.headers("D3", look=False)
+
+
+def _legend_workbook() -> openpyxl.Workbook:
+    """Two prices filled red, a legend label "On sale" with the same fill set apart from the table, a merged title."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Prices"
+    sheet["A1"] = "Price list"
+    sheet.merge_cells("A1:B1")
+    for row, (item, price) in enumerate([("Item", "Price"), ("pen", 2), ("ink", 9), ("pad", 4)], start=2):
+        sheet.cell(row, 1, item)
+        sheet.cell(row, 2, price)
+    sheet["A6"], sheet["B6"] = "Total", "=SUM(B3:B5)"
+    sheet["A6"].font = Font(bold=True)
+    sheet["D2"] = "On sale"
+    for ref in ("D2", "B3", "B5"):
+        sheet[ref].fill = PatternFill("solid", fgColor="FFFF0000")
+    return workbook
+
+
+def test_cells_gives_one_row_per_filled_cell_with_its_format_for_selecting_in_code(tmp_path: Path):
+    path = tmp_path / "prices.xlsx"
+    _legend_workbook().save(path)
+    tools = SheetTools(openpyxl.load_workbook(path), formula_path=path)
+
+    cells = tools.cells("A1:B6")
+    assert list(cells.columns) == ["ref", "row", "column", "value", "range", "bold", "italic", "fill", "fill_colour", "font", "font_colour", "indent", "formula"]
+    assert cells[cells.ref == "A1"]["range"].tolist() == ["A1:B1"] and "B1" not in cells.ref.tolist()  # a merged cell once
+    assert cells[cells.fill_colour == "red"].ref.tolist() == ["B3", "B5"]
+    assert cells[cells.bold].ref.tolist() == ["A6"] and cells[cells.ref == "B6"].formula.tolist() == ["=SUM(B3:B5)"]
+    assert tools.cells("B:B").ref.tolist() == ["A1", "B2", "B3", "B4", "B5", "B6"]  # a whole column; the merged title reaches into it
+
+
+def test_legends_and_format_marks_are_found_in_code_over_every_cell():
+    workbook = _legend_workbook()
+    found = legends(workbook.worksheets)
+    assert found == [{"sheet": "Prices", "label": "On sale", "cell": "D2", "fill": "FFFF0000", "columns": {"B": 2}}]
+    assert legend_notes(found) == "- sheet 'Prices': \"On sale\" (D2) has fill FFFF0000; number cells with this fill, by column: B (2)"
+    marks = {(mark["kind"], mark["value"]): mark for mark in format_marks(workbook.worksheets)}
+    red = marks["fill", "FFFF0000"]
+    assert (red["colour"], red["numbers"], red["labels"], red["columns"], red["legend"]) == ("red", 2, 1, ["D", "B"], "On sale (D2)")
+    assert marks["bold", True]["labels"] == 1
+
+    workbook.active["C2"] = "note"  # a filled label inside a row of the table is a shaded cell, not a legend set apart
+    assert legends(workbook.worksheets) == []
+
+
+def test_formats_reach_the_model_through_code_not_through_the_preview(tmp_path):
+    path = tmp_path / "prices.xlsx"
+    _legend_workbook().save(path)
+    start = {**START, "needs": [{"id": "n1", "description": "the prices filled with the On sale colour"}]}
+    select = {
+        "thought": "Select by fill.",
+        "code": "found = sheet.cells('B:B'); on_sale = found[found.fill == legends['On sale']]\n"
+                "print([mark['colour'] for mark in formats if mark['kind'] == 'fill'])\n"
+                "evidence_n1 = {'value': on_sale.value.tolist(), 'cells': on_sale.ref.tolist(), 'where': 'Price | On sale', 'note': ''}",
+        "done": False,
+    }
+    done = {"thought": "Set.", "code": "", "done": True}
+    probe = {"thought": "Select too.", "code": "print(cells('B:B')[lambda found: found.fill == legends['On sale']].ref.tolist(), len(formats))", "done": False}
+    llm = ScriptedLLM([start, INSPECT_N1, SYNTHESIZE, ACCEPT], [select, done], [PARTS], [probe, {**CONFIRMED, "done": True}])
+    result = _run(tmp_path, path, llm, question="Which prices are on sale?", checks=("independent",), view="frame")
+
+    assert "Fill-colour legends, found in code over every cell (the preview shows no colours)" in llm.prompts["reason"][0]
+    assert '"On sale" (D2) has fill FFFF0000; number cells with this fill, by column: B (2)' in llm.prompts["reason"][0]
+    assert "The notebook variable `legends` holds them" in llm.prompts["inspect"][0] and "The variable `formats` lists" in llm.prompts["inspect"][0]
+    assert "['red']" in llm.prompts["inspect"][1]
+    assert result.ledger.evidence[0].value == [2, 4] and result.ledger.evidence[0].cells == ["B3", "B5"]
+    assert "['B3', 'B5'] 2" in llm.prompts["check"][1]
+
+
+def test_without_legends_the_starting_prompt_names_none(tmp_path, workbook_files):
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [SOUTH_EVIDENCE], [PARTS])
+    _run(tmp_path, workbook_files, llm)
+    assert "Fill-colour legends" not in llm.prompts["reason"][0] and "`legends`" not in llm.prompts["inspect"][0]
+    assert "| A1:D1:Staff by region | E1: |" not in llm.prompts["reason"][0]
+    assert "| A1:D1:Staff by region |" in llm.prompts["reason"][0]  # the preview writes a merged cell once, with its range
+
+
+def test_a_row_of_plain_numbers_above_formatted_data_is_a_header_row():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["B1"], sheet["C1"] = "Item", 1, 2
+    for row, values in enumerate([("x", 10.5, 11.5), ("y", 20.5, 21.5)], start=2):
+        for col, value in enumerate(values, start=1):
+            sheet.cell(row, col, value)
+            if col > 1:
+                sheet.cell(row, col).number_format = "0.0"
+    tools = SheetTools(workbook)
+    assert tools.headers("C3", look=False)["column_headers"] == ["2"]
+
+    sheet["B2"].number_format = sheet["C2"].number_format = "General"  # data typed like the numbers above: no header row
+    assert SheetTools(workbook).headers("C3", look=False)["column_headers"] == []
+
+
+def test_numbers_written_once_per_group_of_rows_are_keys_not_data():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["B1"], sheet["C1"] = "Code", "Item", "Count"
+    row = 2
+    for code in (101, 102, 103):
+        for index, item in enumerate(("a", "b", "c")):
+            sheet.cell(row, 1, code if index == 0 else None)
+            sheet.cell(row, 2, item)
+            sheet.cell(row, 3, row * 10)
+            row += 1
+    layout = read_layout(sheet, 1)
+    assert layout.data_columns == [3] and layout.key_columns == [1, 2]
 
 def test_look_is_unavailable_without_a_vision_model(tools: SheetTools):
     with pytest.raises(ValueError, match="not available"):
@@ -331,7 +501,39 @@ def test_synthesis_is_refused_while_a_need_is_open(tmp_path, workbook_files):
 
     assert result.success
     assert "Cannot synthesize while needs are open: n1" in llm.prompts["reason"][2]
+    assert "refused the step before" not in llm.prompts["reason"][2]
     assert result.ledger.decisions[0].accepted is False
+
+
+def test_an_action_refused_twice_for_the_same_reason_is_called_out(tmp_path, workbook_files):
+    llm = ScriptedLLM([START, SYNTHESIZE, SYNTHESIZE, INSPECT_N1, SYNTHESIZE, ACCEPT], [SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm)
+
+    assert result.success
+    assert "The same action was refused the step before for the same reason" in llm.prompts["reason"][3]
+
+
+def test_the_starting_plan_is_written_twice_and_reconciled(tmp_path, workbook_files):
+    other = {**START, "hypothesis": "The answer is the North value.", "needs": [{"id": "n1", "description": "the 2019 value of Alpha in the North section"}]}
+    llm = ScriptedLLM([other, INSPECT_N1, SYNTHESIZE, ACCEPT], [SOUTH_EVIDENCE], [PARTS], start=[START, START])
+    result = _run(tmp_path, workbook_files, llm)
+
+    first, second, reconciling = llm.prompts["reason"][0], *llm.prompts["start"]
+    assert first == second  # the two plans are written independently, from the same prompt
+    assert "Plan A:\nhypothesis: The answer is the North value." in reconciling
+    assert "Plan B:\nhypothesis: The answer is the 2019 value of the item in its section." in reconciling
+    assert "  - n1: the 2019 value of Alpha in the South section" in reconciling
+    assert result.ledger.needs["n1"].description == "the 2019 value of Alpha in the South section"  # the reconciled plan stands
+    assert result.answer == "35"
+
+
+def test_a_starting_plan_with_many_needs_is_sent_back_once_to_merge_them(tmp_path, workbook_files):
+    split = {**START, "needs": [{"id": f"n{i}", "description": f"the {year} value of Alpha in the South"} for i, year in enumerate(range(2016, 2020), 1)]}
+    llm = ScriptedLLM([split, INSPECT_N1, SYNTHESIZE, ACCEPT], [SOUTH_EVIDENCE], [PARTS], start=[split, split, START])
+    result = _run(tmp_path, workbook_files, llm)
+
+    assert "Your previous reply listed 4 needs" in llm.prompts["start"][2]
+    assert list(result.ledger.needs) == ["n1"] and result.answer == "35"
 
 
 def test_an_error_turn_is_an_observation_and_done_needs_the_evidence(tmp_path, workbook_files):
@@ -346,11 +548,41 @@ def test_an_error_turn_is_an_observation_and_done_needs_the_evidence(tmp_path, w
 
 
 def test_the_last_inspection_turn_asks_for_the_evidence(tmp_path, workbook_files):
-    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [LOOK] * 4 + [SOUTH_EVIDENCE], [PARTS])
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [LOOK] * 11 + [SOUTH_EVIDENCE], [PARTS])
     result = _run(tmp_path, workbook_files, llm)
 
-    assert "This is the last turn" in llm.prompts["inspect"][4] and "last turn" not in llm.prompts["inspect"][3]
+    assert "This is the last turn" in llm.prompts["inspect"][11] and "last turn" not in llm.prompts["inspect"][10]
+    assert "Most needs take 3 to 6 turns" in llm.prompts["inspect"][0]
     assert result.answer == "35"
+
+
+def test_turns_used_up_get_one_report_turn_and_a_failed_attempt_hands_on_its_thoughts(tmp_path, workbook_files):
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [LOOK] * 12 + [SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm)
+    assert "Report turn: look nothing up" in llm.prompts["inspect"][12]  # the 13th turn only reports
+    assert result.ledger.evidence[0].found and result.answer == "35"
+
+    llm = ScriptedLLM([START, INSPECT_N1, INSPECT_N1, SYNTHESIZE, ACCEPT], [LOOK] * 13 + [SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm)
+    assert not result.ledger.evidence[0].found and result.ledger.evidence[1].found
+    assert "it ended thinking: Find the label." in llm.prompts["inspect"][13]  # the second attempt's first turn
+
+
+def test_a_number_read_from_one_cell_is_reported_as_its_format_shows_it(tmp_path):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"], sheet["B1"], sheet["A2"], sheet["B2"] = "Item", "Share", "x", 35.44
+    sheet["B2"].number_format = "0.0"
+    path = tmp_path / "shown.xlsx"
+    workbook.save(path)
+    start = {**START, "needs": [{"id": "n1", "description": "the share of x"}]}
+    evidence = {"thought": "Read it.", "code": "evidence_n1 = {'value': sheet.read('B2')[0][0], 'cells': ['B2'], 'where': 'x | Share', 'note': ''}", "done": True}
+    llm = ScriptedLLM([start, INSPECT_N1, SYNTHESIZE, ACCEPT], [evidence], [PARTS])
+    result = _run(tmp_path, path, llm, question="What is the share of x?")
+
+    assert result.ledger.evidence[0].value == 35.4
+    assert "Shown as 35.4 by the cell's number format 0.0 (stored 35.44)" in result.ledger.evidence[0].note
+    assert shown_number(0.1234, "0.0%") == 0.123 and shown_number(1234.5, "#,##0") == 1234 and shown_number(3.14159, "General") is None
 
 
 def test_synthesis_retries_until_there_is_one_part_per_slot(tmp_path, workbook_files):
@@ -542,6 +774,7 @@ def test_an_independent_check_sees_only_its_view_and_its_last_turn_gives_the_ver
     result = _run(tmp_path, workbook_files, llm, checks=("independent",))
 
     assert "False 35 A7 = South | plain\nB8 = Alpha | plain" in llm.prompts["check"][1]
+    assert "Workbook preview" in llm.prompts["check"][0] and "Workbook preview" not in llm.prompts["check"][1]  # first turn only
     assert "This is the last turn" in llm.prompts["check"][3]
     assert result.ledger.evidence[0].checks[0]["verdict"] == "confirmed"
     assert "check independent: confirmed - D8 is South's 2019 value" in llm.prompts["reason"][2]
@@ -569,3 +802,11 @@ def test_ledger_rejects_the_structure_strategy():
     ledger.needs["n1"] = Need("n1", "a need")
     assert "Unknown strategy" in ledger.refusal("inspect", {"need_id": "n1", "strategy": "structure"})
     assert ledger.refusal("inspect", {"need_id": "n1", "strategy": "window"}) == ""
+
+
+def test_evidence_with_date_keys_is_written_as_json():
+    from datetime import date
+
+    from TableAgent.stages.qa.checker import _json
+
+    assert json.loads(_json({date(2024, 1, 31): [1, {date(2024, 2, 29): 2}]})) == {"2024-01-31": [1, {"2024-02-29": 2}]}

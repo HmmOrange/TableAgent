@@ -302,8 +302,9 @@ def test_table_agent_counts_successful_qa_runner_tokens(tmp_path: Path):
     assert output.predicted_answer == "100"
     assert output.metadata["qa"]["success"] is True
     assert output.metadata["qa"]["fallback_used"] is False
-    assert output.metadata["qa"]["token_usage"] == {"prompt": 33, "completion": 9}
-    assert output.metadata["qa"]["llm_call_count"] == 6
+    # reason_start makes three calls: the plan twice, then the reconciled one.
+    assert output.metadata["qa"]["token_usage"] == {"prompt": 43, "completion": 11}
+    assert output.metadata["qa"]["llm_call_count"] == 8
 
 
 def test_table_agent_can_disable_source_retrieval(tmp_path: Path, monkeypatch):

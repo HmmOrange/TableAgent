@@ -14,14 +14,15 @@ You never read cells or compute the answer yourself. Reply with exactly one JSON
 
 REASON_START_PROMPT = """Question: {question}
 
-Workbook preview (A1-annotated rows; it may be partial):
+Workbook preview (A1-annotated rows; a merged cell is written once with its whole range, so `B3:P3:Label` is one cell spanning columns B to P; it may be partial):
 {preview}
-
+{legends}
 Reason about the question before anything is read:
 1. What does it ask for, and in what form (one value, an item, a list, a comparison, a yes/no)? List the answer slots: one for each part the question asks to find, match, identify, report, check or infer, each with the exact phrase of the question that asks for it. Every clause that asks for something gets a slot: "find (or match) the value of X and check whether it exceeds Y" asks for X's value and for the result of the check; "infer whether ..." or "verify if ..." asks for Yes or No beside any item the question also asks for. A question asking how a value compares to another named value reports that other value too. Several items asked for together ("X and Y", "X/Y") are reported one by one unless the question asks for their total. A value used only inside a computation the question asks for (the operands of a difference, the values averaged or ranked) is a need, not a slot.
 2. Which needs must be read from the workbook? Describe each by its meaning: which entity, measure, period or condition, and unit. Never name cells; Inspectors locate them.
 3. What could mislead? The same label in several sections, a measure split into sub-columns, a total row beside detail rows, carried-down periods, differing units.
-4. State a working hypothesis: how the needs combine into the answer. State no values: the preview may be partial, and values come from inspections. Numbers are reported as the cells hold them: a scale stated in a title, header or note ("in thousands") is not multiplied in unless the question asks for the converted figure.
+4. State a working hypothesis: how the needs combine into the answer. State no values: the preview may be partial, and values come from inspections. Numbers are reported as the cells hold them: a scale stated in a title, header or note ("in thousands") is not multiplied in and the answer stays in the table's scale. "How many" or "the number of" asks for the figure as the table holds it; convert only when the question itself names the other scale.
+The preview shows no formats (fill and font colours, bold, italic, indentation). When the question refers to a format, or to something that only a format can mark, describe the need by that format ("the cells filled green in the Price column"): you need not know which cells they are, Inspectors select cells by format in code.
 
 Needs read from one row, column or block (a series over periods, several measures of one item, all items to rank or compare) form ONE need whose value is a list or a dict; split needs only when they are located independently.
 
@@ -84,7 +85,7 @@ Review the answer against the question:
 - Does it answer what was asked, in the requested form, with every slot filled and nothing the question did not ask for?
 - Read the question again clause by clause: does the answer report every item it asks for, even one the slots leave out (each of several items asked for together, the other side of a comparison it asks about, the result of a check beside the item checked)? An item the slots leave out is a missing slot.
 - Is each part supported by found evidence read where every qualifier of its need holds?
-Return the answer only when a slot is missing, a part was not asked for, a part is not supported by the evidence, the evidence was read in the wrong place, the computation does not follow from the question, or the answer does not respond to the question. Wording, units shown, a scale stated in a header that was not multiplied in, and number formatting are not reasons.
+Return the answer only when a slot is missing, a part was not asked for, a part is not supported by the evidence, the evidence was read in the wrong place, the computation does not follow from the question, or the answer does not respond to the question. Return it also when a number was multiplied by a scale stated in a title, header or note ("in thousands") although the question names no other scale: the answer keeps the figure as the table holds it. Wording, units shown, a scale stated in a header that was not multiplied in, and number formatting are not reasons.
 
 When a slot is missing, also return "answer_slots": every slot in the order the answer reports them, the missing ones added.
 
@@ -94,6 +95,28 @@ Return JSON:
 METHOD_CHECK_TEXT = """
 A Checker reviewed how the answer was computed and found it {verdict}: {problem}
 Weigh this on the question and the evidence; it is a reason to return the answer only when they support it.
+"""
+
+RECONCILE_NOTE = """Two plans were written independently for this question.
+Plan A:
+{first}
+Plan B:
+{second}
+Compare them: do they differ in the rows or level they take, the column or measure, the periods, how the needs combine, or the answer slots? For each difference, decide from the question's words and the preview which is right, and say so in "analysis". Then reply with the final plan in the JSON form above; it may be A, B or parts of both."""
+
+GROUP_NOTE = (
+    "Your previous reply listed {count} needs. Values that sit along one row, column or block (one measure over several "
+    "periods, items or groups, or several measures of one item) are ONE need whose value is a list or a dict. Merge such "
+    "needs and reply again; keep needs apart only when they are located independently."
+)
+
+REFUSED_AGAIN = " The same action was refused the step before for the same reason: do not send it again, choose another action from the list."
+
+# The formats in use are found in code (tools/formats.py); the prompts point to them.
+LEGEND_TEXT = """
+Fill-colour legends, found in code over every cell (the preview shows no colours):
+{legends}
+A legend label is not a row label: the cells of its category are the number cells with its fill, wherever they are, and a number cell without that fill is not in the category. When the question names a legend's category, the need is the cells with that fill in the column or block the question names (a list of them), not the cell beside the legend label.
 """
 
 # ---------------------------------------------------------------------------- inspection
@@ -110,16 +133,18 @@ STRATEGY_TEXTS = {
 }
 
 SHEETS_TOOL = "- `sheet.sheets()` -> sheet names with their sizes"
-FIND_TOOL = "- `sheet.find(text, sheet=\"\")` -> [(ref, value), ...] cells containing the text as whole words (case and spacing ignored)"
+FIND_TOOL = "- `sheet.find(text, sheet=\"\")` -> [(ref, value), ...] cells containing the text as whole words (case and spacing ignored); when none does, the labels that do with plural endings ignored or a header split over rows joined, else the labels holding most of its words: check them with `sheet.describe`"
 READ_TOOL = "- `sheet.read(\"B3:F9\", sheet=\"\")` -> rows of values; a ref may name its sheet, e.g. \"'Data'!B3\""
 AROUND_TOOL = "- `sheet.around(\"D8\", rows=2, cols=2, sheet=\"\")` -> the filled cells around one cell, a line per row with their refs (the cell marked *)"
 FRAME_TOOL = "- `sheet.frame(sheet=\"\")` -> the used range as a DataFrame (index = Excel row numbers, columns = column letters)"
-HEADERS_TOOL = """- `sheet.headers("D8", sheet="")` -> what the cell means, found by walking up and left from it: "row_labels", "keys" (labels written once above and carried down), "column_headers", "sections" (label-only rows above, its own first, then its parents, each with its row span), "siblings" (the other sections at its level), "block" (the run of rows shaped like its row, and why it starts and ends: a blank or label row, a total by formula, a differently formatted row), and "uncertain" (why the walk may be wrong; then "vision" holds a vision model's reading of an image of the area)
+HEADERS_TOOL = """- `sheet.headers("D8", sheet="")` -> what the cell means, found by walking up and left from it: "row_labels", "keys" (labels written once above and carried down), "column_headers", "spans" (the header right above the data merged across several columns that have no header of their own: they all share its label), "sections" (label-only rows above, its own first, then its parents, each with its row span), "siblings" (the other sections at its level), "block" (the run of rows shaped like its row, and why it starts and ends: a blank or label row, a total by formula, a differently formatted row), "legend" (when present: the label whose cell has the same fill as this one, so cells with that colour belong to it), and "uncertain" (why the walk may be wrong; then "vision" holds a vision model's reading of an image of the area)
 - `sheet.describe("D8", sheet="")` -> the same in one line, without the vision model"""
 LOOK_TOOL = "- `sheet.look(\"B3:H20\", \"<what to look for>\", sheet=\"\")` -> a vision model's answer about an image of the range (at most 60 rows x 30 columns; one model call each). Use it for what the values do not show: tick marks or crosses drawn as symbols, shading, how merged headers span the columns below; read values with `sheet.read`."
 
-SHEET_TOOLS = "The `sheet` object reads the workbook (merged cells read as their visible value):\n" + "\n".join(
-    (SHEETS_TOOL, FIND_TOOL, READ_TOOL, HEADERS_TOOL, AROUND_TOOL, FRAME_TOOL)
+FORMATS_TOOL = "- `sheet.formats(\"A3:D20\", sheet=\"\")` -> the filled cells of the range, a line each, with their format (bold, italic, fill colour, font colour, indent) and formula: bold or filled label rows often mark sections, a formula like =SUM(...) marks a total, and a colour can itself be data (cells marked by their fill)"
+CELLS_TOOL = "- `sheet.cells(\"C4:C400\", sheet=\"\")` -> a DataFrame with one row per filled cell of the range, a merged cell once: ref, row, column, value, range (of a merged cell), bold, italic, fill, fill_colour, font, font_colour, indent, formula (fill and font hold the colour value, the _colour columns its name such as \"green\" when it is an RGB value); `sheet.cells(\"C:C\")` takes a whole column. Select cells by their format in code with it (a fill, font colour, bold or indent that marks a category or a level)"
+SHEET_TOOLS = "The `sheet` object reads the workbook (cells read as their visible value: a merged cell as its range's value, text without outer spaces):\n" + "\n".join(
+    (SHEETS_TOOL, FIND_TOOL, READ_TOOL, HEADERS_TOOL, AROUND_TOOL, FRAME_TOOL, FORMATS_TOOL, CELLS_TOOL)
 )
 
 NOTEBOOK_IMPORTS = """Imports: pandas, numpy, openpyxl, math, statistics, datetime, re, json, collections, itertools, functools, operator. System and file modules are not available. Variables persist between turns."""
@@ -133,6 +158,9 @@ How to work:
 - First turn: look, do not extract. Find the labels of the need. Print the candidates with `sheet.describe`.
 - Extract only once you have seen where the value is. A label that occurs in several places belongs to different sections: choose by the context, not by the first match.
 - For a need over a set of rows (all items to rank, count, sum or take the maximum of), check with `sheet.headers` which block and sections the rows belong to and which sibling sections exist, and keep only the rows the need means; leave out total rows.
+- When the question names a colour, shading, bold or italic, or cells are marked rather than labelled, read their format with `sheet.formats` and select by it. A label filled with the same colour as data cells is a legend (`sheet.headers` reports it as "legend"): the cells with that fill belong to it, wherever they are.
+- When selecting rows by a text value, compare ignoring case, and print the distinct values that matched.
+- For the highest, lowest, first or last of something, print the few rows nearest to it. When several rows tie, or a lookup matches several rows, report all of them, not only the first.
 - Keep output small: print only relevant cells, never whole tables.
 - When the value is found, or cannot be found, set the evidence variable in code and set "done" to true in the same reply.
 
@@ -159,6 +187,13 @@ Evidence contract: set `{variable}` to a dict {{"value": ..., "cells": ["D8", ..
 - When the need cannot be found, set "value" to None, "cells" to [] and say why in "note".
 
 {transcript}Turn {turn} of {max_turns}.{last}"""
+
+INSPECTOR_LEGEND_TEXT = """
+Fill-colour legends, found in code over every cell of the workbook:
+{legends}
+The notebook variable `legends` holds them as {{label: fill}}. The cells of a legend's category are the cells with its fill, anywhere in the column, not the cell in the row of the legend label: select them in code over the whole column, e.g. `found = sheet.cells("C:C"); found[found.fill == legends["<label>"]]`, and compare how many you get with the count above."""
+
+FORMATS_VARIABLE_TEXT = "\nThe variable `formats` lists the fills, font colours, bold and italic in use in the workbook, found in code: a list of {sheet, kind, value, colour, numbers, labels, columns, legend} (colour: the colour's name when known; numbers / labels: how many cells carry it; legend: a label set apart that names it)."
 
 # ---------------------------------------------------------------------------------- checks
 
@@ -209,8 +244,6 @@ INDEPENDENT_CLAIM = "`claim` holds the Inspector's evidence (value, cells, where
 INDEPENDENT_SEES_FINISH = """- Refute only with concrete counter-evidence: the cells and values that show the claim is wrong. When your re-derivation agrees, confirm.
 When you have enough, set "done" to true and add "verdict" ("confirmed" or "refuted"), "reason" and "cells" (the cells that show it); the code block may then be left out. The last turn is for the verdict only."""
 INDEPENDENT_BLIND_FINISH = """- When you have the value, set `found = {"value": ..., "cells": [...]}` in code (the need as described: one value, or all values as a list or dict) and set "done" to true in the same reply, with "reason" saying where you read it. When the need cannot be found, set `found = {"value": None, "cells": []}`."""
-
-FORMATS_TOOL = "- `sheet.formats(\"A3:D20\", sheet=\"\")` -> the filled cells of the range, a line each, with their format (bold, fill, indent) and formula: bold or filled label rows often mark sections, a formula like =SUM(...) marks a total"
 
 VIEW_TOOLS = {
     "grid": "The `sheet` object reads raw cells only:\n" + "\n".join(
@@ -276,15 +309,23 @@ Report a flaw only for a concrete mismatch with the question.
 Return JSON:
 {{"verdict": "sound" or "flawed", "problem": "<the mismatch, empty when sound>"}}"""
 
+CHECKER_CELLS_TEXT = """
+`cells("C4:C400", sheet="")` (or `cells("C:C")` for a whole column) returns a DataFrame with one row per filled cell of a range, a merged cell once: ref, row, column, value, range (of a merged cell), bold, italic, fill, fill_colour, font, font_colour, indent, formula.
+"""
+
+CHECKER_LEGEND_TEXT = """
+The variable `legends` holds the fill-colour legends found in code over the whole workbook, as {{label: fill}}: {names}. A need that names a legend's category means the cells with that fill, not the row of the legend label.
+"""
+
 # ------------------------------------------------------------------------------- vision
 
-VISION_SYSTEM_PROMPT = "You look at an image of a spreadsheet range, rendered with its row numbers and column letters, and answer the question about it precisely, naming cells by their coordinates."
+VISION_SYSTEM_PROMPT = "You look at an image of a spreadsheet range, rendered with its row numbers and column letters, and answer the question about it precisely and briefly, in a few lines naming cells by their coordinates; do not transcribe the image. A merged cell cut by the edge of the range shows only its part inside the range."
 
 VISION_PROMPT = """The image shows the range {area} of sheet "{sheet}".
 {question}"""
 
 HEADERS_LOOK_QUESTION = (
-    "Cell {cell} is the bottom-right cell of the image. Which column headers stand above it, which row label "
+    "Look at cell {cell}. Which column headers stand above it, which row label "
     "stands left of it in its row, and under which section, group or title rows does its row fall? Use formatting "
     "(bold, fill, indent, merged spans, blank rows) to tell levels apart. Name each label with its cell."
 )
@@ -295,7 +336,7 @@ SYNTHESIZER_SYSTEM_PROMPT = """You compose the answer of a spreadsheet question 
 Imports: pandas, numpy, math, statistics, datetime, re, json, collections, itertools, functools, operator. Do not read the workbook again.
 Your code must set `answer_parts`: a list with exactly one entry per answer slot, in slot order.
 - An entry is the value for its slot as it should appear in the answer; keep its unit (days, a percent sign, a currency) when it has one.
-- Report a number as the cells hold it: a scale stated in a title, header or note ("in thousands", "in millions") is not multiplied in or appended unless the question asks for the converted figure.
+- Report a number as the cells hold it: a scale stated in a title, header or note ("in thousands", "in millions") is not multiplied in or appended and the answer stays in the table's scale. "How many" or "the number of" asks for the figure as the table holds it; convert only when the question itself names the other scale.
 - A slot that asks for several items gets a list of them; a yes/no slot gets True or False.
 - Round a number to the precision the question states; otherwise keep non-integers to four decimals.
 - A difference whose direction the question does not state is reported as its magnitude.

@@ -167,6 +167,7 @@ def _render_xlsx_range_with_libreoffice(
                 sheet.sheet_state = "visible" if sheet is worksheet else "hidden"
             if cell_range:
                 worksheet.print_area = cell_range
+                _clip_merges(worksheet, cell_range)
             worksheet.print_options.headings = bool(show_coordinates)
             worksheet.print_options.gridLines = True
             worksheet.page_margins.left = 0
@@ -291,6 +292,32 @@ def _ensure_visible_dimensions(worksheet: Any, row_dimension_cls: Any, column_di
             worksheet.column_dimensions[column_letter] = column_dimension_cls(worksheet, index=column_letter)
 
 
+def _clip_merges(worksheet: Any, cell_range: str) -> None:
+    """Shrink each merged cell cut by the range edge to its part inside, keeping its text and style, wrapped."""
+    from copy import copy
+
+    from openpyxl.utils.cell import range_boundaries
+
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    for merged in list(worksheet.merged_cells.ranges):
+        if merged.max_row < min_row or merged.min_row > max_row or merged.max_col < min_col or merged.min_col > max_col:
+            continue
+        if merged.min_row >= min_row and merged.max_row <= max_row and merged.min_col >= min_col and merged.max_col <= max_col:
+            continue
+        source = worksheet.cell(merged.min_row, merged.min_col)
+        value, style = source.value, copy(source._style)
+        worksheet.unmerge_cells(merged.coord)
+        top, left = max(merged.min_row, min_row), max(merged.min_col, min_col)
+        bottom, right = min(merged.max_row, max_row), min(merged.max_col, max_col)
+        target = worksheet.cell(top, left)
+        target.value, target._style = value, style
+        alignment = copy(target.alignment)
+        alignment.wrap_text = True
+        target.alignment = alignment
+        if (top, left) != (bottom, right):
+            worksheet.merge_cells(start_row=top, start_column=left, end_row=bottom, end_column=right)
+
+
 def _expand_dimensions_to_fit(
     worksheet: Any,
     cell_range: str | None = None,
@@ -342,11 +369,13 @@ def _expand_dimensions_to_fit(
                 float(worksheet.column_dimensions[get_column_letter(column)].width or 13)
                 for column in range(merged_range.min_col, merged_range.max_col + 1)
             )
-            required_widths[merged_range.min_col] = max(
-                required_widths.get(merged_range.min_col, 0),
-                float(worksheet.column_dimensions[get_column_letter(merged_range.min_col)].width or 13)
-                + max(0, required - current),
-            )
+            # The extra width is shared by the merged columns, so they stay balanced.
+            extra = max(0, required - current) / (merged_range.max_col - merged_range.min_col + 1)
+            for column in range(merged_range.min_col, merged_range.max_col + 1):
+                required_widths[column] = max(
+                    required_widths.get(column, 0),
+                    float(worksheet.column_dimensions[get_column_letter(column)].width or 13) + extra,
+                )
 
     for column, required in required_widths.items():
         letter = get_column_letter(column)

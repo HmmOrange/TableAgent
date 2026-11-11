@@ -6,7 +6,8 @@ Checks run in the configured order, and a later one runs only when the earlier o
   one model call compares this with the need.
 - independent: re-derives the need in its own notebook with other tools than the Inspector's (view `grid`:
   raw cells and their formats and formulas; `image`: images of the sheet; `frame`:
-  DataFrames only); `grid` and `frame` start from the workbook preview the first reasoning step saw. Seeing the
+  DataFrames only); `grid` and `frame` start from the workbook preview the first reasoning step saw, and
+  the notebook holds the formats in use (`cells`, `legends`, `formats`). Seeing the
   claimed value (`sees_value`), it gives the verdict itself; blind, it reports its own value and the
   runner compares the two.
 - debate: argues against the evidence in its own notebook; each objection names the cells that show it.
@@ -29,8 +30,11 @@ from TableAgent.stages.qa.inspector import OUTPUT_CHARS, Turn, clip, transcript
 from TableAgent.stages.qa.ledger import MAX_LLM_CALLS, Evidence, Ledger, Need
 from TableAgent.stages.qa.prompts import (
     CHECK_WORK_RULES,
+    CHECKER_CELLS_TEXT,
+    CHECKER_LEGEND_TEXT,
     DEBATE_PROMPT,
     DEBATE_SYSTEM_PROMPT,
+    FORMATS_VARIABLE_TEXT,
     INDEPENDENT_BLIND_FINISH,
     INDEPENDENT_CLAIM,
     INDEPENDENT_PROMPT,
@@ -43,6 +47,7 @@ from TableAgent.stages.qa.prompts import (
     REVERSE_SYSTEM_PROMPT,
     VIEW_TOOLS,
 )
+from TableAgent.stages.qa.tools.formats import format_marks, legend_fills, legend_names, legends
 from TableAgent.stages.qa.tools.headers import headers_line, text_of
 from TableAgent.stages.qa.tools.notebook import CellRun, Notebook
 from TableAgent.stages.qa.tools.sheet import SheetTools
@@ -133,11 +138,21 @@ class Checker:
             work_rules=CHECK_WORK_RULES,
         )
         claim_text = f"\nThe Inspector's evidence (also in `claim`):\n{_json(claim)}\n" if self.sees_value else ""
+        # The formats in use reach the check through code, as they reach the Inspector.
+        namespace["cells"] = self.tools.cells
+        namespace["formats"] = format_marks(self.tools.workbook.worksheets)
+        claim_text += CHECKER_CELLS_TEXT + FORMATS_VARIABLE_TEXT + "\n"
+        found = legends(self.tools.workbook.worksheets)
+        if found:
+            namespace["legends"] = legend_fills(found)
+            claim_text += CHECKER_LEGEND_TEXT.format(names=legend_names(found))
         preview = f"\nWorkbook preview (A1-annotated rows; it may be partial):\n{self.preview}\n" if self.view in PREVIEW_VIEWS else ""
 
         def prompt(turns: list[Turn], number: int, last: str) -> str:
             return INDEPENDENT_PROMPT.format(
-                question=question, need_id=need.id, need=need.description, preview=preview, claim=claim_text,
+                question=question, need_id=need.id, need=need.description,
+                preview="" if turns else preview,  # the preview is long: only the first turn carries it
+                claim=claim_text,
                 transcript=transcript(turns, "This check so far"), turn=number, max_turns=MAX_TURNS, last=last,
             )
 
@@ -475,7 +490,16 @@ def _unsure(by: str, turns: list[dict[str, Any]], reason: str = "The check ended
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(_string_keys(value), ensure_ascii=False, default=str)
+
+
+def _string_keys(value: Any) -> Any:
+    """`value` with every dict key made a string: JSON keys cannot be dates or other objects."""
+    if isinstance(value, dict):
+        return {str(key): _string_keys(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_string_keys(item) for item in value]
+    return value
 
 
 def _clip(text: str, limit: int) -> str:

@@ -264,7 +264,8 @@ Answers a question by exploring the workbook; structure.yaml serves as a rough m
 - `prompts.py` holds every prompt.
 
 `tools/` holds what the Inspector and the Checkers use in the notebook: the `sheet` object, the walk from
-a cell to its headers, labels and sections, looking at images, and the sandboxed notebook. `utils/` holds
+a cell to its headers, labels and sections, the formats in use (legends, fills, bold), looking at images,
+and the sandboxed notebook. `utils/` holds
 the plumbing: model calls, logging and artifacts, prompt views of the workbook, and the direct-answer and
 retrieved-source routes.
 

@@ -2,7 +2,7 @@
 
 Its three abstract reasoning steps are made by `Reasoner`:
 1. reason_start: before anything is read, what the question asks (the answer slots), which needs must be read
-   from the workbook, and a hypothesis of how they combine.
+   from the workbook, and a hypothesis of how they combine. The plan is written twice and reconciled.
 2. reason_step, after each inspection: is there enough information? It rules on every check that refuted a
    need (keep the evidence or reject it), then chooses one action, usually an inspection of one need by an
    Inspector (inspector.py). When every need is found, the Synthesizer (synthesizer.py) computes one part
@@ -41,14 +41,19 @@ from TableAgent.stages.qa.prompts import (
     ANSWER_FORM_RULES,
     INSPECTOR_SYSTEM_PROMPT,
     INSPECTOR_SYSTEM_PROMPT_WITH_LOOK,
+    GROUP_NOTE,
+    LEGEND_TEXT,
     METHOD_CHECK_TEXT,
     REASON_END_PROMPT,
     REASON_START_PROMPT,
     REASON_STEP_PROMPT,
     REASONER_SYSTEM_PROMPT,
+    RECONCILE_NOTE,
+    REFUSED_AGAIN,
     RULINGS_TEXT,
 )
 from TableAgent.stages.qa.synthesizer import SynthesisError, Synthesizer
+from TableAgent.stages.qa.tools.formats import legend_notes, legends
 from TableAgent.stages.qa.tools.look import Vision
 from TableAgent.stages.qa.tools.notebook import Notebook
 from TableAgent.stages.qa.tools.sheet import SheetTools
@@ -56,6 +61,7 @@ from TableAgent.stages.qa.utils.llm import CountingLLM, ReplyError, ask_json, re
 from TableAgent.stages.qa.utils.trace import RunLog, run_dir_name, write_artifacts
 from TableAgent.stages.qa.utils.workbook_view import workbook_preview
 
+MAX_SPLIT_NEEDS = 3  # more starting needs than this are sent back once to be merged
 DECISION_KEYS = ("assessment", "rulings", "action", "reason")
 
 
@@ -147,6 +153,9 @@ class Orchestrator:
         tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
         self.notebook = Notebook({"sheet": tools, "pd": pd, "np": np})
         self.preview = workbook_preview(workbook, workbook_path.name, excluded_sheet_names, question=question)
+        excluded = excluded_sheet_names or set()
+        found = legends([ws for ws in workbook.worksheets if ws.title.strip().casefold() not in excluded])
+        self.legends = LEGEND_TEXT.format(legends=legend_notes(found)) if found else ""  # for reason_start: the preview shows no colours
         self.reasoner = Reasoner(llm)
         self.inspector = Inspector(
             llm, self.notebook, tools, INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision is not None else INSPECTOR_SYSTEM_PROMPT,
@@ -159,7 +168,7 @@ class Orchestrator:
         """Run the loop; returns an error message, or None once an answer is set."""
         ledger = self.ledger
         try:
-            ledger.start(self.reasoner.reason_start(self.question, self.preview))
+            ledger.start(self.reasoner.reason_start(self.question, self.preview, self.legends))
         except ReplyError as exc:
             return f"Framing the question failed: {exc}"
         self.log.say(f"framed | {len(ledger.needs)} need(s), {len(ledger.answer_slots)} answer slot(s)")
@@ -217,7 +226,8 @@ class Orchestrator:
             self.log.event("step", index=index, action=step.action, args=args, refusal=refusal)
             self.log.say(f"step {index}/{MAX_STEPS} | {step.action}" + (f" refused: {refusal}" if refusal else ""))
             if refusal:
-                feedback = f"Your previous action ({step.action}) was refused: {refusal}"
+                again = len(ledger.steps) > 1 and (ledger.steps[-2].action, ledger.steps[-2].refusal) == (step.action, refusal)
+                feedback = f"Your previous action ({step.action}) was refused: {refusal}" + (REFUSED_AGAIN if again else "")
                 continue
             feedback = ""
             if action == "synthesize":
@@ -257,14 +267,29 @@ class Reasoner:
     def __init__(self, llm: CountingLLM):
         self.llm = llm
 
-    def reason_start(self, question: str, preview: str) -> dict[str, Any]:
-        """Before anything is read: what the question asks, the answer slots, the needs to read, a hypothesis."""
+    def reason_start(self, question: str, preview: str, legends: str = "") -> dict[str, Any]:
+        """Before anything is read: what the question asks, the answer slots, the needs to read, a hypothesis.
+
+        The plan is written twice, independently, and a third call settles where the two differ; a plan with more
+        than MAX_SPLIT_NEEDS needs is sent back once to merge those read from one row, column or block.
+        """
         prompt = REASON_START_PROMPT.format(
             question=question,
             preview=preview,
+            legends=legends,
             answer_form_rules=ANSWER_FORM_RULES,
         )
-        return ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, prompt, _check_start)
+        reply = ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, prompt, _check_start)
+        try:
+            second = ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, prompt, _check_start)
+            note = RECONCILE_NOTE.format(first=_plan_text(reply), second=_plan_text(second))
+            reply = ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, f"{prompt}\n\n{note}", _check_start)
+        except ReplyError:
+            pass  # the first plan stands
+        if len(reply["needs"]) > MAX_SPLIT_NEEDS:
+            note = GROUP_NOTE.format(count=len(reply["needs"]))
+            reply = ask_json(self.llm, "reason_start", REASONER_SYSTEM_PROMPT, f"{prompt}\n\n{note}", _check_start)
+        return reply
 
     def reason_step(self, ledger: Ledger, step: int, feedback: str) -> dict[str, Any]:
         """After each inspection: judge the evidence and choose the next action."""
@@ -305,6 +330,13 @@ class Reasoner:
             method_check=METHOD_CHECK_TEXT.format(**method_check) if method_check else "",
         )
         return ask_json(self.llm, "reason_end", REASONER_SYSTEM_PROMPT, prompt, _check_end)
+
+
+def _plan_text(plan: dict[str, Any]) -> str:
+    """A starting plan as the reconciling prompt shows it."""
+    slots = "; ".join(str(slot["slot"]) for slot in plan["answer_slots"])
+    needs = "\n".join(f"  - {need['id']}: {need['description']}" for need in plan["needs"])
+    return f"hypothesis: {plan['hypothesis']}\nanswer slots: {slots}\nneeds:\n{needs}"
 
 
 def _check_start(data: Any) -> dict[str, Any]:

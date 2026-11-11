@@ -6,6 +6,8 @@ import re
 import unicodedata
 from typing import Any
 
+from openpyxl.utils import get_column_letter
+
 
 MAX_PREVIEW_CHARS = 40000
 MAX_PREVIEW_COLUMNS = 100
@@ -31,6 +33,7 @@ def workbook_preview(
 ) -> str:
     """Render sheets as A1-annotated rows, splitting the char budget evenly per sheet.
 
+    A merged cell is written once, with its whole range (`B3:P3:Label`).
     A sheet too long for its budget keeps its first and last rows; when a question is given,
     rows from the omitted middle that mention its terms are kept as well.
     """
@@ -74,8 +77,11 @@ def _preview_rows(sheet: Any, budget: int, terms: tuple[list[str], set[str]]) ->
     lines: list[str] = []
     texts: list[str] = []
     labels: list[bool] = []
+    spans, covered = _merged_spans(sheet)
     for row in sheet.iter_rows(max_col=min(sheet.max_column, MAX_PREVIEW_COLUMNS)):
-        lines.append("| " + " | ".join(f"{cell.coordinate}:{_cell_text(cell)}" for cell in row) + " |")
+        lines.append("| " + " | ".join(
+            f"{spans.get(cell.coordinate, cell.coordinate)}:{_cell_text(cell)}" for cell in row if cell.coordinate not in covered
+        ) + " |")
         values = [cell.value for cell in row if cell.value not in (None, "")]
         texts.append(" ".join(str(value) for value in values))
         labels.append(len(values) == 1 and isinstance(values[0], str))
@@ -142,6 +148,21 @@ def _preview_rows(sheet: Any, budget: int, terms: tuple[list[str], set[str]]) ->
     if previous < len(lines) - 1:
         rows.append(f"[rows {previous + 2}-{len(lines)} omitted]")
     return rows, matched
+
+
+def _merged_spans(sheet: Any) -> tuple[dict[str, str], set[str]]:
+    """Each merged cell's top-left coordinate mapped to its range, and the coordinates the merges cover."""
+    spans: dict[str, str] = {}
+    covered: set[str] = set()
+    for merged in sheet.merged_cells.ranges:
+        spans[merged.start_cell.coordinate] = merged.coord
+        covered.update(
+            f"{get_column_letter(col)}{row}"
+            for row in range(merged.min_row, merged.max_row + 1)
+            for col in range(merged.min_col, merged.max_col + 1)
+            if (row, col) != (merged.min_row, merged.min_col)
+        )
+    return spans, covered
 
 
 def _match_scores(texts: list[str], terms: tuple[list[str], set[str]]) -> list[int]:

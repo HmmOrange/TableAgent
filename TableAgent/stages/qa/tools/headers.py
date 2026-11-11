@@ -1,16 +1,20 @@
 """What a cell means, found by walking from it up to its column headers and left to its row labels.
 
 The walk reads the layout in code (see `HeaderWalker.headers`):
-- column headers: the label cells above the cell's data, walking up.
+- column headers: the label cells above the cell's data, walking up; a row of numbers typed plain above
+  formatted data is a header row too; when the header right above the data is merged across several
+  columns, its span is reported ("spans"): those columns all share the label.
 - row labels: the label cells left of the cell, and keys written once above and carried down (a location
   in column A, then empty or merged cells below it).
 - sections: label-only rows above the cell, nearest first, then each parent (a label further left, less
   indented, or bold over plain).
 - block: the run of rows with data shaped like the cell's row, and why it starts and ends.
+- legend: a label cell, not bold, that alone among labels has the cell's (non-white) fill while numbers have it too:
+  cells marked with that colour belong to that label.
 - uncertain: why the walk may be wrong (no header, no label); `SheetTools.headers` then asks a vision model about an image.
 
 A sheet's layout is read once. Data columns are mostly filled and mostly numbers; key columns are the
-label columns left of them. A block ends at a row with no data (a section label or a blank row), a total
+label columns left of them, and a column of numbers written once per group of rows is a key column too. A block ends at a row with no data (a section label or a blank row), a total
 computed by an aggregate formula, a row whose label cell is formatted differently, or a row whose data
 columns mostly change kind. An empty cell inside the data never ends a block. A format marks structure
 only when it is rare next to the other, and a fill is ignored where rows alternate two fills (striped for
@@ -19,6 +23,7 @@ reading): only bold and indent then count.
 
 from __future__ import annotations
 
+import colorsys
 import datetime
 import re
 from dataclasses import dataclass, field
@@ -38,6 +43,12 @@ ROW_LABELS = 3  # label cells left of a cell that the walk keeps
 HEADER_LEVELS = 4  # label cells above a cell that the walk keeps
 SECTION_MAX_CELLS = 2  # a section label row holds at most this many filled cells (a merged range counts once)
 MAX_SIBLINGS = 20
+PLAIN_FORMAT = "General"
+NUMBER_HEADER_LOOKDOWN = 10  # rows below a number searched for the next number of its column
+KEY_FILLED_SHARE = 0.7  # a key column written once per group is filled in under this share of the body
+MIN_LEGEND_CELLS = 1  # numbers sharing a label's fill for that label to be a legend
+COLOUR_HUES = ((15, "red"), (45, "orange"), (70, "yellow"), (170, "green"), (200, "cyan"), (260, "blue"), (300, "purple"), (345, "pink"), (361, "red"))
+WHITE_FILLS = {"theme 0", "FFFFFFFF", "00FFFFFF"}  # a white fill paints the background, it marks nothing
 AGGREGATE = re.compile(r"^=\s*(SUM|SUBTOTAL|AVERAGE|COUNTA?|MIN|MAX)\s*\(", re.IGNORECASE)
 RANGE = re.compile(r"\$?([A-Z]{1,3})\$?(\d+)\s*:\s*\$?([A-Z]{1,3})\$?(\d+)")
 
@@ -51,10 +62,12 @@ class HeaderWalker:
         self._formula_workbook: Any = None
         self._sections: dict[str, list[dict[str, Any]]] = {}
         self._layouts: dict[tuple[str, int], Layout] = {}
+        self._legends: dict[str, dict[str, str]] = {}
+        self._number_rows: dict[tuple[str, int], bool] = {}
 
     def headers(self, ws: Any, row: int, col: int) -> dict[str, Any]:
         """What the walk finds for one cell (see the module docstring)."""
-        column_headers, top = self.headers_above(ws, row, col)
+        column_headers, top, header_rows = self.headers_above(ws, row, col)
         row_labels = [
             text_of(value)
             for value in (self.tools.value(row, c, ws.title) for c in range(col - 1, 0, -1))
@@ -78,30 +91,90 @@ class HeaderWalker:
             "row_labels": list(reversed(row_labels)),
             "keys": found_keys,
             "column_headers": list(reversed(column_headers)),
+            "spans": self.header_spans(ws, header_rows, col),
             "sections": group["sections"],
             "siblings": group["siblings"],
             "block": {key: found_block[key] for key in ("rows", "starts", "ends")} if found_block else None,
             "uncertain": uncertain,
         }
+        legend = self.legends(ws).get(cell_format(ws.cell(row, col))[1])
+        if legend:
+            found["legend"] = legend
         return found
 
-    def headers_above(self, ws: Any, row: int, col: int) -> tuple[list[str], int]:
-        """Header cells above a cell (nearest first) and the lowest header row.
+    def headers_above(self, ws: Any, row: int, col: int) -> tuple[list[str], int, list[int]]:
+        """Header cells above a cell (nearest first), the top header row, and the rows of the headers.
 
-        Label cells are collected walking up past the data, up to the next number.
+        Label cells, and numbers of a header row (`number_header`), are collected walking up past the data, up to
+        the next number.
         """
         headers: list[str] = []
-        top = 0
+        rows: list[int] = []
         for r in range(row - 1, 0, -1):
             value = self.tools.value(r, col, ws.title)
-            if is_label(value):
+            if is_label(value) or self.number_header(ws, r, value):
                 headers.append(text_of(value))
-                top = r
+                rows.append(r)
                 if len(headers) == HEADER_LEVELS:
                     break
             elif value is not None and headers:
                 break
-        return headers, top
+        return headers, (rows[-1] if rows else 0), rows
+
+    def number_header(self, ws: Any, row: int, value: Any) -> bool:
+        """A number in a header row: the row's numbers (at least two) are the first numbers of their columns, each written plain
+        (General) while the next number below it is formatted: headers are typed as labels, data is formatted."""
+        if _kind(value) != "n" or hasattr(value, "year"):
+            return False
+        key = (ws.title, row)
+        if key not in self._number_rows:
+            pairs = []
+            for c in range(1, min(ws.max_column, SCAN_COLUMNS) + 1):
+                if _kind(v := ws.cell(row, c).value) != "n" or hasattr(v, "year"):
+                    continue
+                below = next((ws.cell(r, c) for r in range(row + 1, min(ws.max_row, row + NUMBER_HEADER_LOOKDOWN) + 1)
+                              if _kind(ws.cell(r, c).value) == "n"), None)
+                if any(_kind(ws.cell(r, c).value) == "n" for r in range(1, row)):
+                    pairs.append(False)  # a number above it: the row is in the body, not the header band
+                elif below is not None:
+                    pairs.append(ws.cell(row, c).number_format == PLAIN_FORMAT != below.number_format)
+            self._number_rows[key] = len(pairs) >= 2 and all(pairs)
+        return self._number_rows[key]
+
+    def header_spans(self, ws: Any, rows: list[int], col: int) -> list[str]:
+        """The nearest header when it is merged across several columns, e.g. `Sales: B3:F3 (5 columns)`."""
+        merged = self.span_range(ws, rows, col)
+        if merged is None:
+            return []
+        return [f"{text_of(self.tools.value(rows[0], col, ws.title))}: {merged.coord} ({merged.max_col - merged.min_col + 1} columns)"]
+
+    def span_range(self, ws: Any, rows: list[int], col: int) -> Any:
+        """The merged range of the header right above the data, when its columns all share that header.
+
+        Only the header right above the data counts, only beside other headers in its row, and only when no row
+        above tells its columns apart: they then all share its label (replicates, a group read as one).
+        """
+        if not rows:
+            return None
+        r = rows[0]
+        merged = next((m for m in ws.merged_cells.ranges if m.min_row <= r <= m.max_row and m.min_col <= col <= m.max_col), None)
+        if merged is None or merged.max_col == merged.min_col:
+            return None
+        if not any(cell.value is not None for cell in ws[r] if not merged.min_col <= cell.column <= merged.max_col):
+            return None  # a section or title row merged across the table, not the header of a column group
+        for other in range(1, r):
+            values = {text_of(ws.cell(other, c).value) for c in range(merged.min_col, merged.max_col + 1) if ws.cell(other, c).value is not None}
+            if len(values) > 1:
+                return None  # another header row tells these columns apart
+        return merged
+
+    def legends(self, ws: Any) -> dict[str, str]:
+        """Fill → its legend, e.g. `Transformed Luminal (J4, fill FFFF0000)` (see `legend_cells`)."""
+        if ws.title not in self._legends:
+            self._legends[ws.title] = {
+                fill: f"{text_of(cell.value)} ({cell.coordinate}, fill {fill})" for fill, cell in legend_cells(ws).items()
+            }
+        return self._legends[ws.title]
 
     def section_group(self, ws: Any, row: int, top: int) -> dict[str, Any]:
         """The section rows above a row (its own, then each parent) and the siblings of its own, with row spans."""
@@ -185,6 +258,10 @@ def headers_line(found: dict[str, Any]) -> str:
         parts.append(f"key: {key['header']} = {text_of(key['value'])} (from {key['from']})")
     if found["column_headers"]:
         parts.append("column: " + " > ".join(found["column_headers"]))
+    for span in found.get("spans", []):
+        parts.append(f"header spans {span}")
+    if found.get("legend"):
+        parts.append(f"legend: {found['legend']}")
     for section in found["sections"]:
         parts.append(f"section: {section['label']} (row {section['row']})")
     if found["uncertain"]:
@@ -260,6 +337,8 @@ def read_layout(ws: Any, top: int, formula_ws: Any = None) -> Layout:
     for c in range(1, width + 1):
         filled = [row[c - 1] for row in body if _kind(row[c - 1]) != "."]
         numbers = [value for value in filled if _kind(value) == "n"]
+        if _carried_key(ws, top, c, len(body)):
+            continue  # a key written once per group of rows, in its own number format: not data
         if body and filled and len(numbers) >= DATA_NUMBER_SHARE * len(filled) and len(filled) >= DATA_FILLED_SHARE * len(body):
             data_columns.append(c)
     first_data = data_columns[0] if data_columns else width + 1
@@ -268,6 +347,38 @@ def read_layout(ws: Any, top: int, formula_ws: Any = None) -> Layout:
     if formula_ws is not None:
         layout.totals = _aggregate_rows(formula_ws, width)
     return layout
+
+
+def legend_cells(ws: Any) -> dict[str, Any]:
+    """Fill → the cell of its legend: the one plain label with that fill when numbers have it too (white fills excluded)."""
+    labels: dict[str, list[Any]] = {}
+    numbers: dict[str, int] = {}
+    for line in ws.iter_rows():
+        for cell in line:
+            fill = cell_format(cell)[1] if cell.value is not None else None
+            if fill is None or fill in WHITE_FILLS:
+                continue
+            if is_label(cell.value):
+                if not (cell.font and cell.font.b):
+                    labels.setdefault(fill, []).append(cell)
+            elif isinstance(cell.value, (int, float)):
+                numbers[fill] = numbers.get(fill, 0) + 1
+    return {fill: cells[0] for fill, cells in labels.items() if len(cells) == 1 and numbers.get(fill, 0) >= MIN_LEGEND_CELLS}
+
+
+def _carried_key(ws: Any, top: int, col: int, body_rows: int) -> bool:
+    """A column of numbers written once per group of rows (section labels may sit in it too): filled in under
+    KEY_FILLED_SHARE of the body, each number beside a label of the column right of it, which is filled in more rows:
+    the column the groups are written out in."""
+    rows = range(top + 1, top + body_rows + 1)
+    filled = [r for r in rows if _kind(ws.cell(r, col).value) != "."]
+    if len(filled) < 2 or len(filled) >= KEY_FILLED_SHARE * body_rows:
+        return False
+    numbers = [r for r in filled if _kind(ws.cell(r, col).value) == "n" and not hasattr(ws.cell(r, col).value, "year")]
+    if len(numbers) < 2:
+        return False
+    labels = [r for r in rows if is_label(ws.cell(r, col + 1).value)]
+    return len(labels) > len(numbers) and all(r in labels for r in numbers)
 
 
 def block(layout: Layout, row: int) -> dict[str, Any]:
@@ -375,6 +486,26 @@ def cell_format(cell: Any) -> tuple[Any, ...]:
         color = cell.fill.fgColor
         fill = {"rgb": color.rgb, "theme": f"theme {color.theme}", "indexed": f"indexed {color.indexed}"}.get(color.type)
     return (bool(cell.font and cell.font.b), fill, int(cell.alignment.indent or 0))
+
+
+def font_colour(cell: Any) -> str | None:
+    """The font colour of a cell when it is not the default black."""
+    color = cell.font.color if cell.font is not None else None
+    named = None if color is None else {"rgb": color.rgb, "theme": f"theme {color.theme}", "indexed": f"indexed {color.indexed}"}.get(color.type)
+    return named if named not in ("FF000000", "theme 1") else None
+
+
+def colour_name(value: Any) -> str | None:
+    """A basic colour word for an ARGB or RGB hex value ("FFFF0000" -> "red"); None for theme and indexed colours."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8}", value):
+        return None
+    red, green, blue = (int(value[-6:][i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, saturation, brightness = colorsys.rgb_to_hsv(red, green, blue)
+    if brightness < 0.2:
+        return "black"
+    if saturation < 0.15:
+        return "white" if brightness > 0.9 else "grey"
+    return next(name for limit, name in COLOUR_HUES if hue * 360 < limit)
 
 
 def format_text(fmt: tuple[Any, ...]) -> str:
