@@ -1,438 +1,102 @@
 # TableAgent
 
-TableAgent extracts verified table structure from Excel workbooks and answers
-natural-language questions over one or more sheets.
-
-## Architecture
-
-Phase-specific implementation lives under `TableAgent/stages/structure`,
-`TableAgent/stages/retrieval`, and `TableAgent/stages/qa`. Cross-stage helpers live
-under `TableAgent/shared`, while `TableAgent/pipeline` composes the stages. See
-[`TableAgent/stages/README.md`](TableAgent/stages/README.md) for the ownership map.
+TableAgent answers natural-language questions over Excel workbooks. It plans what the question needs, reads
+each value by writing Python against the workbook, has a Checker test every value it read, and computes the
+answer in code. [`TableAgent/src/README.md`](TableAgent/src/README.md) describes the loop.
 
 ## Requirements
 
-- Python 3.13 or newer
-- [uv](https://docs.astral.sh/uv/) for dependency management
-- LibreOffice for workbook rendering
-- OpenAI-compatible chat-completions endpoints for the answer LLM and layout VLM
-
-LibreOffice must be available as `soffice` or `libreoffice` on `PATH`. Otherwise,
-set `table_agent.libreoffice_path` in the configuration.
+- Python 3.13 or newer and [uv](https://docs.astral.sh/uv/)
+- OpenAI-compatible chat-completions endpoints for the answer model and, optionally, a vision model
+- LibreOffice, when a vision model is configured (cell ranges are rendered for it to look at)
 
 ## Setup
 
-Install the dependencies:
-
 ```bash
 uv sync
-```
-
-Create the local configuration:
-
-```bash
 cp config.example.yaml config.yaml
 ```
 
-PowerShell:
+Fill in `config.yaml`:
 
-```powershell
-Copy-Item config.example.yaml config.yaml
-```
-
-### Fill In The Configuration
-
-Edit `config.yaml` before running TableAgent. The important sections are:
-
-| Configuration | What to fill in |
+| Key | What to set |
 | --- | --- |
-| `models.answer_model` | Answer LLM `base_url`, `model`, and `api_key` |
-| `vlm_models.layout_model` | Vision/layout model `base_url`, `model`, and `api_key` |
-| `llm.provider` | Name of the default profile under `models` |
-| `vlm.provider` | Name of the default profile under `vlm_models` |
-| `table_agent.libreoffice_path` | LibreOffice executable path when it is not on `PATH` |
-| `service.root_dir` | Root directory for saved CLI run output |
-| `service.max_workers` | Default number of concurrent structure and QA workers. |
+| `llm` | Name of the answer model's profile under `models` |
+| `vlm` | Name of the vision model's profile under `models` (leave it out to answer from cell values only) |
+| `models.<name>` | `base_url` (with the API prefix, e.g. `http://localhost:8000/v1`), `model`, `api_key` |
+| `table_agent` | How questions are answered: Checkers, generation cap, rendering ([`TableAgent/settings.py`](TableAgent/settings.py)) |
+| `service` | Job directory, workers, upload limit, API key |
 
-The profile names must match. For example, `llm.provider: answer_model` selects
-`models.answer_model`, while `vlm.provider: layout_model` selects
-`vlm_models.layout_model`.
+The example reads the endpoints from `TABLE_AGENT_LLM_BASE_URL`, `TABLE_AGENT_LLM_MODEL`,
+`TABLE_AGENT_LLM_API_KEY`, `TABLE_AGENT_VLM_BASE_URL`, `TABLE_AGENT_VLM_MODEL`, `TABLE_AGENT_VLM_API_KEY` and
+`TABLE_AGENT_SERVICE_API_KEY`; `${NAME:-default}` in any value reads an environment variable.
 
-The checked-in example reads model values from these environment variables, so you
-can either keep those references and set the variables or replace them with values
-directly in `config.yaml`:
-
-| Variable | Value |
-| --- | --- |
-| `TABLE_AGENT_LLM_BASE_URL` | Answer LLM API base URL |
-| `TABLE_AGENT_LLM_MODEL` | Answer LLM model name |
-| `TABLE_AGENT_LLM_API_KEY` | Answer LLM API key |
-| `TABLE_AGENT_VLM_BASE_URL` | Layout VLM API base URL |
-| `TABLE_AGENT_VLM_MODEL` | Layout VLM model name |
-| `TABLE_AGENT_VLM_API_KEY` | Layout VLM API key |
-| `TABLE_AGENT_SERVICE_API_KEY` | Optional API key for the HTTP service |
-
-Model base URLs should include the API prefix, for example
-`http://localhost:8000/v1`. TableAgent appends `/chat/completions`. The VLM endpoint
-must accept images in OpenAI-compatible message content.
-
-See [`config.example.yaml`](config.example.yaml) for the remaining pipeline,
-retrieval, rendering, and service settings.
-
-## Run From The CLI
-
-Run commands from the repository root. The CLI prints a JSON result containing the
-run ID, processing results, answers, and generated artifact paths. Each CLI run is
-saved directly under `service.root_dir/<run-id>/`, including the complete result in
-`run.json`. Pipeline scratch files and normalized workbooks are temporary and are
-removed after the run; a later run never reuses a prior structure.
-When no job ID is supplied programmatically, the generated ID is a UTC timestamp such
-as `2026-07-22T16-05-54.123456Z`.
-
-### Ingestion
-
-#### Description and requirements
-
-Use the `structure` stage to ingest one or more workbooks. TableAgent renders each
-selected worksheet, detects and verifies its table ranges, and writes the resulting
-artifacts into that run's output directory. The structures are not a reusable cache.
-
-- At least one `--workbook` is required. Supported extensions are `.xls`, `.xlsx`,
-  `.xlsm`, `.xltx`, and `.xltm`.
-- Structure generation requires LibreOffice and the configured layout VLM.
-- Schema generation also requires the configured answer LLM to describe the
-  workbook and its worksheets.
-
-#### Example: One workbook
-
-Ingestion always generates `schema.yaml`, `metadata.json`, and retrieval card
-artifacts:
+## Ask From The Command Line
 
 ```bash
-uv run table-agent --config config.yaml --stage structure --workbook sample/QA_sample.xlsx
+uv run table-agent --config config.yaml --workbook sample/QA_sample.xlsx \
+  --question "What is the total revenue in 2024?" --question "Which region grew most?"
 ```
 
-With `service.root_dir: outputs`, a saved run is stored at:
+The command prints the job as JSON: one entry per question with its answer, token usage, the path of its
+`trace.md`, and its QA metadata. `--llm` / `--vlm` pick other profiles, `--output-dir` another job root. Each job
+is a directory under `service.root_dir`:
 
 ```text
-outputs/<run-id>/
-  run.json
-  workbooks/<workbook-name>/
-    schema.yaml
-    metadata.json
-    retrieval_cards.jsonl
-    retrieval_cards.csv
-    <sheet-name>/
-      structure.yaml
-      metadata.yaml
-      metadata.json
-      sheet_text.txt
-      table.png
-      table.metadata.json
-      retrieval_cards.jsonl
-      retrieval_cards.csv
-  artifacts/
-    ... QA and execution artifacts ...
+outputs/<job-id>/
+  QA_sample.xlsx          the workbook, copied
+  qa/q1/<run>/            one directory per question: trace.md, ledger.json, events.jsonl, events.log,
+                          result.json, cells/ (every notebook cell), images/ (rendered ranges)
 ```
 
-`retrieval_cards.jsonl` and `retrieval_cards.csv` contain the card text used by
-retrieval. Records are labeled with `retrieval_type` (`data` or `metadata`) and
-`retrieval_level` (`workbook`, `sheet`, or `table`). The card text intentionally
-omits layout-only noise such as used ranges and merged ranges.
-
-Add `--embed` when you want ingestion to also export `retrieval_cards.pkl`. The
-pickle stores the same records plus an `embedding` field with the embedding model,
-dimension, and vector values. TableAgent uses
-`table_agent.retrieval_embedding_provider`, which must name a configured real
-OpenAI-compatible embedding model. Ingestion rejects missing or `mock` providers so
-production artifacts cannot silently contain test embeddings. The example configuration
-uses `BAAI/bge-m3` through `TABLE_AGENT_EMBEDDING_BASE_URL`.
-
-Workbook, sheet, and table vectors are corpus artifacts owned by the structure
-stage. End-to-end `qa` and `all` runs prepare temporary vectors before retrieval;
-retrieval embeds only the incoming query. `--embed` controls whether those prepared
-vectors are also included in persisted ingestion output.
-
-The returned `retrieval_records` are ready for an external index. Sheet- and
-table-level records include the sheet's `structure_yaml`, while every record also
-includes the workbook schema and metadata. Store the record unchanged so query-time
-hybrid retrieval can reuse the ingestion embedding instead of embedding each card
-again. Persisted CLI results also expose the workbook-level pickle under
-`retrieval_artifacts` and include it in the `artifacts` list.
-
-The CLI result includes per-sheet records in `structures` and workbook-level paths
-in `schema_artifacts` and `metadata_artifacts`. A schema embeds the parsed structure
-for each selected worksheet:
-
-```yaml
-Summary:
-  id: summary
-  description: Concise LLM-generated description of the worksheet.
-  structure:
-    table1:
-      name: Revenue summary
-      headers: []
-```
-
-`metadata.json` uses the following stable keys:
-
-```json
-{
-  "name": "book.xlsx",
-  "description": "Workbook summary generated from schema.yaml.",
-  "sheet_names": ["Summary", "Detail"],
-  "author": null,
-  "date_created": null,
-  "date_modified": null,
-  "size_bytes": 12345
-}
-```
-
-#### Available flags
-
-| Flag | Description |
-| --- | --- |
-| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
-| `--stage structure` | Runs ingestion only. |
-| `--workbook PATH` | Workbook to ingest. Repeat the flag to ingest multiple workbooks. |
-| `--embed` | Also writes `retrieval_cards.pkl` with retrieval card embeddings. |
-| `--sheet NAME[,NAME...]` | Processes only the named worksheets. Repeat the flag or separate names with commas. |
-| `--llm NAME` | Overrides the configured answer LLM profile used for descriptions. |
-| `--vlm NAME` | Overrides the configured layout VLM profile used for structure detection. |
-| `-em NAME` / `--embedding NAME` | Overrides the configured retrieval embedding profile for this run. |
-| `--workers N` | Overrides `service.max_workers` for this run; `--max-workers` is an alias. |
-| `--delete-job ID` | Deletes one saved run directory. Repeat for multiple run IDs. |
-| `--delete-all-jobs` | Deletes every saved run directory under `service.root_dir`. |
-
-Worksheet matching is exact and case-sensitive. When multiple workbooks are
-provided, every requested worksheet must exist in every workbook. Metadata always
-lists every worksheet in the workbook, even when `--sheet` limits structure and
-schema processing.
-
-Set `--workers` above `1` to process independent workbook sheets concurrently during
-structure generation and independent queries concurrently during QA. Each worker
-uses its own pipeline and, for configured model clients, its own HTTP session.
-LibreOffice runs with a separate temporary user profile per render. PDFium remains
-isolated in one subprocess per concurrent render because its API is not thread-safe.
-Use `--workers 1` to retain serial execution.
-
-```bash
-uv run table-agent --config config.yaml --stage all \
-  --workbook sample/QA_sample.xlsx \
-  --query "What is the total revenue?" \
-  --query "Which region is largest?" \
-  --workers 8
-```
-
-For example, the following command ingests `Summary`, `Detail`, and `Archive` only:
-
-```bash
-uv run table-agent --config config.yaml --stage structure \
-  --workbook sample/QA_sample.xlsx \
-  --sheet "Summary,Detail" --sheet Archive
-```
-
-To remove selected or all saved CLI output:
-
-```bash
-uv run table-agent --config config.yaml --delete-job 2026-07-22T16-05-54.123456Z
-uv run table-agent --config config.yaml --delete-all-jobs
-```
-
-### QA
-
-#### Description and requirements
-
-Use the `qa` stage to answer natural-language questions. This stage generates fresh
-worksheet structures in the same run, then calls the answer LLM. It does not depend
-on a previous ingestion run.
-
-- At least one `--workbook` and one non-empty `--query` are required.
-- Structure generation requires LibreOffice and the configured layout VLM.
-
-#### Example: One workbook and one query
-
-```bash
-uv run table-agent --config config.yaml --stage qa \
-  --workbook sample/QA_sample.xlsx \
-  --query "What is the total revenue?"
-```
-
-#### Output
-
-The CLI prints a JSON result with the answer and supporting execution details:
-
-```json
-{
-  "job_id": "<job-id>",
-  "stage": "qa",
-  "workbooks": ["QA_sample.xlsx"],
-  "structures": [
-    {
-      "workbook": "QA_sample.xlsx",
-      "sheet": "Summary",
-      "status": "good",
-      "structure": "<generated structure>",
-      "artifact": "workbooks/QA_sample.xlsx/Summary/structure.yaml"
-    }
-  ],
-  "schema_artifacts": [
-    {
-      "workbook": "QA_sample.xlsx",
-      "artifact": "workbooks/QA_sample.xlsx/schema.yaml"
-    }
-  ],
-  "metadata_artifacts": [
-    {
-      "workbook": "QA_sample.xlsx",
-      "artifact": "workbooks/QA_sample.xlsx/metadata.json"
-    }
-  ],
-  "retrieval_artifacts": [],
-  "answers": [
-    {
-      "query": "What is the total revenue?",
-      "answer": "<answer>",
-      "latency": 0.0,
-      "token_usage": {},
-      "workbook": "QA_sample.xlsx",
-      "sheets": ["Summary"],
-      "verification": {},
-      "retrieval": {},
-      "qa": {}
-    }
-  ],
-  "artifacts": [
-    "workbooks/QA_sample.xlsx/Summary/structure.yaml",
-    "workbooks/QA_sample.xlsx/schema.yaml",
-    "workbooks/QA_sample.xlsx/metadata.json"
-  ]
-}
-```
-
-The exact values depend on the workbook, retrieval result, and model response.
-The selected worksheet structures and workbook artifacts are saved only inside this
-run directory.
-
-#### Available flags
-
-| Flag | Description |
-| --- | --- |
-| `--config PATH` | Configuration file to load. Defaults to `config.yaml`. |
-| `--stage qa` | Generates structures and runs QA in one invocation. |
-| `--workbook PATH` | Workbook to query. Repeat the flag to query multiple workbooks together. |
-| `--query TEXT` | Question to answer. Repeat the flag to ask multiple questions. |
-| `--artifacts PATH` | Runs indexed QA from `run.json`, JSON/JSONL records, or a trusted `retrieval_cards.pkl`. Repeat for multiple files; requires `--stage qa`. |
-| `--sheet NAME[,NAME...]` | Limits retrieval to the named worksheets. |
-| `--llm NAME` | Overrides the configured answer LLM profile. |
-| `-em NAME` / `--embedding NAME` | Overrides the configured retrieval embedding profile for this run. |
-
-The `--vlm` option selects the layout VLM used to generate structures for QA.
-
-To query ingestion artifacts directly from the CLI without rerunning layout extraction:
-
-```bash
-uv run table-agent --config config.yaml --stage qa \
-  --workbook sample/QA_sample.xlsx \
-  --query "What is the total revenue?" \
-  --artifacts outputs/<ingestion-run>/run.json
-```
-
-You can instead pass the workbook-level
-`outputs/<ingestion-run>/workbooks/<workbook>/retrieval_cards.pkl` produced by
-`--embed`. Only load pickle files you trust, because Python pickle is executable data.
-
-### Run End-To-End
-
-Run the `all` stage to ingest the workbook when needed and answer the question in
-one command:
-
-```bash
-uv run table-agent --config config.yaml --stage all --workbook sample/QA_sample.xlsx --query "What is the total revenue?"
-```
-
-This stage requires both the layout VLM and answer LLM.
-
-Run `uv run table-agent --help` for the complete CLI reference.
+Workbooks must be `.xlsx`, `.xlsm`, `.xltx` or `.xltm`.
 
 ## Serve The API
-
-Start the HTTP service after configuring the same LLM and VLM profiles:
 
 ```bash
 uv run table-agent-api --config config.yaml --host 127.0.0.1 --port 3636
 ```
 
-Submit a workbook and receive the end-to-end result directly:
+| Method and path | What it does |
+| --- | --- |
+| `GET /health`, `/health/live`, `/health/ready` | Liveness and readiness |
+| `GET /v1/status` | Version and workers |
+| `POST /v1/jobs/upload` | Multipart form: `file` (the workbook) and `payload` (`{"questions": ["..."]}`) |
+| `POST /v1/jobs` | JSON `{"workbook": "<path>", "questions": ["..."]}`; only with `service.allow_local_paths`, and only under `service.allowed_input_roots` when set |
+
+With `service.api_key` set, every `/v1/` request needs the header `X-API-Key`.
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
-  -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"all","queries":["What is the total revenue?"],"embed":true,"sheets":["Summary,Detail"]}' \
-  -F "files=@sample/QA_sample.xlsx"
+curl -X POST http://127.0.0.1:3636/v1/jobs/upload \
+  -H "X-API-Key: $TABLE_AGENT_SERVICE_API_KEY" \
+  -F 'payload={"questions": ["What is the total revenue in 2024?"]}' \
+  -F "file=@sample/QA_sample.xlsx"
 ```
 
-Both `POST /v1/jobs` and `POST /v1/jobs/upload` accept `embed` and `sheets`.
-Ingestion always generates workbook schema and metadata artifacts. Sheet list
-entries may contain comma-separated names.
+The web page in [`web/`](web/README.md) is a chat over one uploaded workbook that calls this API.
 
-When `embed` is `true`, the response also includes one aggregate
-`retrieval_artifacts` entry per workbook. Serving is ephemeral, so embedded records
-are returned inline instead of as a temporary file:
+## Use As A Library
 
-```json
-{
-  "retrieval_artifacts": [
-    {
-      "workbook": "QA_sample.xlsx",
-      "retrieval_cards": [
-        {
-          "id": "QA_sample.xlsx:metadata",
-          "embedding": {
-            "model": "BAAI/bge-m3",
-            "dimension": 1024,
-            "values": [0.0]
-          }
-        }
-      ]
-    }
-  ]
-}
+```python
+from pathlib import Path
+
+from TableAgent import QASettings, WorkbookQA
+
+agent = WorkbookQA(llm, QASettings(checker=("independent",), checker_view="frame"), vision_llm)
+response, qa = agent.run(
+    question="What is the total revenue in 2024?",
+    workbook_path=Path("book.xlsx"),
+    qa_artifact_dir=Path("runs/q1"),
+    fallback_prompt="Question: ...\n\nTable content:\n...",  # used only when the exploration fails
+)
 ```
 
-The example vector is abbreviated; the actual `values` array contains the full
-embedding. With `embed` omitted or `false`, `retrieval_artifacts` is an empty list.
-
-For indexed QA, upload the selected workbook and send one query plus the retrieval
-records returned by ingestion (or a subset returned by your vector/metadata index):
-
-```bash
-curl -X POST "http://127.0.0.1:8000/v1/jobs/upload" \
-  -H "X-API-Key: your-service-key" \
-  -F 'payload={"stage":"qa","queries":["Compare Summary and Detail"],"artifacts":[{"id":"book.xlsx:Summary:table1","upload_name":"book.xlsx","sheet":"Summary","retrieval_card":"...","structure_yaml":"...","embedding":{"model":"...","dimension":3,"values":[0.1,0.2,0.3]}}]}' \
-  -F "files=@sample/QA_sample.xlsx"
-```
-
-TableAgent combines hybrid lexical, entity, and stored-embedding scores, selects one
-primary sheet, and supplies other indexed structures from the same workbook as
-multi-sheet context. If an older index record has retrieval context but no
-`structure_yaml`, the request is still accepted and returns a source-context fallback
-answer with `qa.fallback_source: "missing_structure"` instead of rejecting the job.
-
-Omit `X-API-Key` when `service.api_key` is empty. The serving layer keeps no jobs,
-logs, uploads, workbooks, structures, or other artifacts on disk. It uses temporary
-workspace files while processing and returns the result contents in the response;
-there is no polling or artifact-download endpoint. The interactive API documentation
-is at `http://127.0.0.1:8000/docs`.
-
-Server-side workbook paths are disabled by default. To enable `POST /v1/jobs`, set
-`service.allow_local_paths: true` and restrict access with
-`service.allowed_input_roots`.
+`llm` is any object with `generate(prompt, system_prompt)` returning a `TableAgent.llm.LLMResponse`; the vision
+model also needs `generate_with_image(prompt, image_path, system_prompt)`. `service/clients.py` has one for
+OpenAI-compatible endpoints.
 
 ## Development
 
-Run the test suite:
-
 ```bash
-uv run pytest -q
+uv run pytest
 ```

@@ -1,25 +1,20 @@
 [project]
 name = "table-agent"
 version = "0.1.0"
-description = "Image-assisted table structure extraction and question-answering pipeline"
+description = "Question answering over Excel workbooks"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "beautifulsoup4>=4.14.3",
-    "exstruct>=0.8.1",
     "fastapi>=0.116.0",
-    "nbformat>=5.10.0",
     "numpy>=2.0.0",
     "openpyxl>=3.1.0",
     "pandas>=3.0.0",
     "pillow>=10.0.0",
-    "pymupdf>=1.28.2",
     "pypdfium2>=4.30.0",
     "python-multipart>=0.0.20",
     "pyyaml>=6.0.3",
     "requests>=2.32.0",
     "uvicorn>=0.35.0",
-    "xlrd>=2.0.1",
 ]
 
 [project.scripts]

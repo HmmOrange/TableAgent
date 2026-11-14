@@ -12,13 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from TableAgent.configs import TableAgentConfig
-from TableAgent.rendering.converter import WorkbookConversion, sample_to_xlsx
-from TableAgent.rendering.image_utils import (
-    _generate_image_tiles,
-    _resize_image_file_to_fit,
-)
-from TableAgent.pipeline.sample import EvalSample
+from TableAgent.settings import QASettings
 
 
 _PDFIUM_LOCK = threading.Lock()
@@ -34,53 +28,10 @@ class RenderResult:
 
 
 class WorkbookRenderer:
-    def __init__(self, settings: TableAgentConfig, logger: Any):
+    """Renders a cell range of a workbook to a PNG with LibreOffice, for the vision model to look at."""
+
+    def __init__(self, settings: QASettings):
         self.settings = settings
-        self.logger = logger
-
-    def sample_to_image(self, sample: EvalSample, sample_dir: Path):
-        workbook_path = sample_dir / "table.xlsx"
-        source_path = Path(sample.table_path) if sample.table_path else None
-        if source_path and source_path.is_file() and source_path.suffix.lower() == ".xlsx":
-            shutil.copy2(source_path, workbook_path)
-            from openpyxl import load_workbook
-
-            source_workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-            try:
-                sheet_names = list(source_workbook.sheetnames)
-            finally:
-                source_workbook.close()
-            workbook = WorkbookConversion(workbook_path, "xlsx", sheet_names)
-        else:
-            workbook = sample_to_xlsx(sample, workbook_path)
-        render_result = self.render_workbook_range(
-            workbook_path,
-            workbook.sheet_names[0] if workbook.sheet_names else None,
-            None,
-            sample_dir / "table.png",
-        )
-        tiles = self.postprocess_image(render_result.image_path)
-        metadata = {"render": _read_render_metadata(render_result.image_path)}
-        if tiles:
-            metadata["image_tiles"] = tiles
-        (sample_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
-        return workbook, render_result
-
-    def source_to_image(self, source_path: Path, sheet_name: str, image_path: Path, html_path: Path) -> list[dict[str, Any]]:
-        if not image_path.is_file():
-            self.render_workbook_range(source_path, sheet_name, None, image_path)
-        return self.postprocess_image(image_path)
-
-    def source_viewport_to_image(
-        self,
-        source_path: Path,
-        sheet_name: str,
-        cell_range: str,
-        image_path: Path,
-    ) -> RenderResult:
-        result = self.render_workbook_range(source_path, sheet_name, cell_range, image_path)
-        self.postprocess_image(image_path)
-        return result
 
     def render_workbook_range(
         self,
@@ -95,9 +46,9 @@ class WorkbookRenderer:
             cell_range,
             image_path,
             libreoffice_path=self.settings.libreoffice_path,
-            resolution=self.settings.libreoffice_image_resolution,
+            resolution=self.settings.image_resolution,
             timeout_seconds=self.settings.render_timeout_seconds,
-            show_coordinates=self.settings.workbook_show_coordinates,
+            show_coordinates=self.settings.show_coordinates,
             max_workers=self.settings.max_workers,
             max_cell_width=self.settings.max_cell_width,
         )
@@ -108,26 +59,9 @@ class WorkbookRenderer:
             cell_range=cell_range,
             image_path=image_path,
             result=result,
-            show_coordinates=self.settings.workbook_show_coordinates,
+            show_coordinates=self.settings.show_coordinates,
         )
         return result
-
-    def postprocess_image(self, image_path: Path) -> list[dict[str, Any]]:
-        tiles = []
-        if self.settings.image_tile_size is not None:
-            tiles = _generate_image_tiles(
-                image_path,
-                self.settings.image_tile_size,
-                self.settings.image_tile_overlap,
-                logger=self.logger,
-            )
-        _resize_image_file_to_fit(
-            image_path,
-            self.settings.max_image_dimension,
-            self.settings.max_image_pixels,
-            logger=self.logger,
-        )
-        return tiles
 
 
 def _render_xlsx_range_with_libreoffice(
@@ -488,10 +422,3 @@ def _write_render_metadata(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
-
-def _read_render_metadata(image_path: Path) -> dict[str, Any] | None:
-    metadata_path = image_path.with_suffix(".metadata.json")
-    if not metadata_path.is_file():
-        return None
-    return json.loads(metadata_path.read_text(encoding="utf-8"))

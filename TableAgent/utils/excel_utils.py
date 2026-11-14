@@ -1,7 +1,30 @@
+"""A1 addresses: parse a cell or range ("B3", "'Data'!B3:F9") and write a cell's address."""
+
 from __future__ import annotations
+
 import re
-from typing import Any, List, Tuple
-from TableAgent.domain.ranges import CellRange
+from dataclasses import dataclass
+from typing import Tuple
+
+
+@dataclass(frozen=True)
+class CellRange:
+    start_row: int  # 1-indexed
+    start_col: int  # 1-indexed
+    end_row: int    # 1-indexed
+    end_col: int    # 1-indexed
+    sheet: str = ""
+
+    def __post_init__(self):
+        if self.start_row > self.end_row:
+            raise ValueError(f"start_row ({self.start_row}) cannot be greater than end_row ({self.end_row})")
+        if self.start_col > self.end_col:
+            raise ValueError(f"start_col ({self.start_col}) cannot be greater than end_col ({self.end_col})")
+
+    def __repr__(self) -> str:
+        sheet_prefix = f"'{self.sheet}'!" if self.sheet else ""
+        return f"CellRange({sheet_prefix}{self.start_row}:{self.start_col} to {self.end_row}:{self.end_col})"
+
 
 def col_name_to_num(col_str: str) -> int:
     col_str = col_str.upper()
@@ -49,42 +72,3 @@ def parse_a1_range(range_str: str, sheet: str = "") -> CellRange:
 
 def cell_to_a1(row: int, col: int) -> str:
     return f"{col_num_to_name(col)}{row}"
-
-def range_to_a1(r: CellRange) -> str:
-    if r.start_row == r.end_row and r.start_col == r.end_col:
-        return cell_to_a1(r.start_row, r.start_col)
-    return f"{cell_to_a1(r.start_row, r.start_col)}:{cell_to_a1(r.end_row, r.end_col)}"
-
-def read_excel_range(
-    sheet_obj: Any,
-    cell_range: CellRange,
-    *,
-    expand_merged: bool = False,
-) -> List[List[Any]]:
-    """Read cell values from an openpyxl sheet object for a given CellRange."""
-    values = []
-    for row in sheet_obj.iter_rows(
-        min_row=cell_range.start_row,
-        max_row=cell_range.end_row,
-        min_col=cell_range.start_col,
-        max_col=cell_range.end_col
-    ):
-        values.append([cell.value for cell in row])
-    if not expand_merged or not values or not hasattr(sheet_obj, "merged_cells"):
-        return values
-
-    # openpyxl stores a merged range's value only in its top-left cell. Expand
-    # that value in memory so QA sees the same grouping users see in Excel.
-    # Ordinary blank cells outside real merged ranges remain untouched.
-    for merged in sheet_obj.merged_cells.ranges:
-        start_row = max(cell_range.start_row, merged.min_row)
-        end_row = min(cell_range.end_row, merged.max_row)
-        start_col = max(cell_range.start_col, merged.min_col)
-        end_col = min(cell_range.end_col, merged.max_col)
-        if start_row > end_row or start_col > end_col:
-            continue
-        anchor_value = sheet_obj.cell(row=merged.min_row, column=merged.min_col).value
-        for row in range(start_row, end_row + 1):
-            for column in range(start_col, end_col + 1):
-                values[row - cell_range.start_row][column - cell_range.start_col] = anchor_value
-    return values

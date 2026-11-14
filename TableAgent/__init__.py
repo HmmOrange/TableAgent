@@ -1,22 +1,6 @@
-from importlib import import_module
+"""TableAgent: answers questions over Excel workbooks by exploring them in code (see src/README.md)."""
 
-__all__ = [
-    "TableAgentPipeline",
-    "TableAgentConfig",
-    "TableAgentSettings",
-    "answer_question",
-]
+from TableAgent.settings import QASettings
+from TableAgent.src.workbook_qa import WorkbookQA
 
-
-def __getattr__(name: str):
-    modules = {
-        "TableAgentPipeline": "TableAgent.pipeline",
-        "TableAgentConfig": "TableAgent.configs",
-        "TableAgentSettings": "TableAgent.configs",
-        "answer_question": "TableAgent.stages.qa",
-    }
-    if name not in modules:
-        raise AttributeError(name)
-    value = getattr(import_module(modules[name]), name)
-    globals()[name] = value
-    return value
+__all__ = ["QASettings", "WorkbookQA"]

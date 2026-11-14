@@ -11,12 +11,12 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill
 import pytest
 
-from TableAgent.stages.qa import orchestrator as orchestrator_module
-from TableAgent.stages.qa.checker import reverse_facts, same_values
-from TableAgent.stages.qa.inspector import shown_number
-from TableAgent.stages.qa.orchestrator import answer_question
-from TableAgent.stages.qa.ledger import Evidence, Need, Ledger
-from TableAgent.stages.qa.prompts import (
+from TableAgent.src import orchestrator as orchestrator_module
+from TableAgent.src.checker import reverse_facts, same_values
+from TableAgent.src.inspector import shown_number
+from TableAgent.src.orchestrator import answer_question
+from TableAgent.src.ledger import Evidence, Need, Ledger
+from TableAgent.src.prompts import (
     DEBATE_SYSTEM_PROMPT,
     REVERSE_PROMPT,
     INSPECTOR_SYSTEM_PROMPT,
@@ -24,12 +24,12 @@ from TableAgent.stages.qa.prompts import (
     REASONER_SYSTEM_PROMPT,
     SYNTHESIZER_SYSTEM_PROMPT,
 )
-from TableAgent.stages.qa.synthesizer import part_text
-from TableAgent.stages.qa.tools.formats import format_marks, legend_notes, legends
-from TableAgent.stages.qa.tools.headers import read_layout
-from TableAgent.stages.qa.tools.notebook import Notebook
-from TableAgent.stages.qa.tools.sheet import SheetTools
-from TableAgent.stages.qa.utils.llm import parse_json
+from TableAgent.src.synthesizer import part_text
+from TableAgent.src.tools.formats import format_marks, legend_notes, legends
+from TableAgent.src.tools.headers import read_layout
+from TableAgent.src.tools.notebook import Notebook
+from TableAgent.src.tools.sheet import SheetTools
+from TableAgent.src.utils.llm import parse_json
 
 
 @pytest.fixture
@@ -524,6 +524,9 @@ def test_the_starting_plan_is_written_twice_and_reconciled(tmp_path, workbook_fi
     assert "Plan B:\nhypothesis: The answer is the 2019 value of the item in its section." in reconciling
     assert "  - n1: the 2019 value of Alpha in the South section" in reconciling
     assert result.ledger.needs["n1"].description == "the 2019 value of Alpha in the South section"  # the reconciled plan stands
+    readable = Path(result.artifacts["events_log"]).read_text(encoding="utf-8")
+    named = [line.strip() for line in readable.splitlines() if line.startswith("  plan: ")]
+    assert named == ["plan: Plan A", "plan: Plan B", "plan: reconciled from Plan A and Plan B"]  # the log names each plan
     assert result.answer == "35"
 
 
@@ -533,6 +536,7 @@ def test_a_starting_plan_with_many_needs_is_sent_back_once_to_merge_them(tmp_pat
     result = _run(tmp_path, workbook_files, llm)
 
     assert "Your previous reply listed 4 needs" in llm.prompts["start"][2]
+    assert "  plan: needs merged (the plan before listed 4)" in Path(result.artifacts["events_log"]).read_text(encoding="utf-8")
     assert list(result.ledger.needs) == ["n1"] and result.answer == "35"
 
 
@@ -807,6 +811,6 @@ def test_ledger_rejects_the_structure_strategy():
 def test_evidence_with_date_keys_is_written_as_json():
     from datetime import date
 
-    from TableAgent.stages.qa.checker import _json
+    from TableAgent.src.checker import _json
 
     assert json.loads(_json({date(2024, 1, 31): [1, {date(2024, 2, 29): 2}]})) == {"2024-01-31": [1, {"2024-02-29": 2}]}

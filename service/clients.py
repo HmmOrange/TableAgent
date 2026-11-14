@@ -8,8 +8,8 @@ from typing import Any
 
 import requests
 
-from TableAgent.configs import resolve_llm_config, resolve_vlm_config
 from TableAgent.llm import BaseLLM, LLMResponse
+from service.config import model_profile
 
 
 OPENAI_COMPATIBLE_PROVIDERS = {
@@ -139,18 +139,9 @@ class OpenAICompatibleLLM(BaseLLM):
         self.session.close()
 
 
-def create_model_client(
-    config: dict[str, Any],
-    *,
-    kind: str,
-    profile: str = "table_agent",
-) -> OpenAICompatibleLLM:
-    if kind == "llm":
-        profile_name, model_config = resolve_llm_config(config, profile)
-    elif kind == "vlm":
-        profile_name, model_config = resolve_vlm_config(config, profile)
-    else:
-        raise ValueError("kind must be 'llm' or 'vlm'")
+def create_model_client(config: dict[str, Any], *, kind: str, profile: str | None = None) -> OpenAICompatibleLLM:
+    """A client for the profile `profile`, or for the default `kind` model ("llm" or "vlm") of the config."""
+    profile_name, model_config = model_profile(config, kind, profile)
 
     provider = str(model_config.get("provider", "openai_compatible")).lower()
     if provider not in OPENAI_COMPATIBLE_PROVIDERS:

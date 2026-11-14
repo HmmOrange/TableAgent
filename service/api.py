@@ -1,7 +1,10 @@
+"""HTTP API of the TableAgent service: ask questions about a workbook, by upload or by local path."""
+
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import tempfile
 from importlib.metadata import PackageNotFoundError, version
@@ -10,66 +13,27 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field
 
-from TableAgent.utils.paths import safe_name
-from service.runtime import Stage, TableAgentService
+from service.runtime import TableAgentService
 
 
 class PathJobRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    stage: Stage = "all"
-    queries: list[str] = Field(default_factory=list)
-    workbooks: list[str] = Field(min_length=1)
-    embed: bool = False
-    sheets: list[str] = Field(default_factory=list)
-    compress_before_structure: bool | None = None
-
-    @model_validator(mode="after")
-    def validate_queries(self) -> "PathJobRequest":
-        _require_queries(self.stage, self.queries)
-        return self
+    workbook: str = Field(min_length=1)
+    questions: list[str] = Field(min_length=1)
 
 
 class UploadJobRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    stage: Stage = "all"
-    queries: list[str] = Field(default_factory=list)
-    embed: bool = False
-    sheets: list[str] = Field(default_factory=list)
-    mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
-    artifacts: list[dict[str, Any]] = Field(default_factory=list)
-    compress_before_structure: bool | None = None
-
-    @model_validator(mode="after")
-    def validate_queries(self) -> "UploadJobRequest":
-        _require_queries(self.stage, self.queries)
-        if self.stage == "qa" and self.artifacts:
-            queries = [str(query).strip() for query in self.queries if str(query).strip()]
-            if len(queries) != 1:
-                raise ValueError("Indexed QA requires exactly one non-empty query")
-        return self
+    questions: list[str] = Field(min_length=1)
 
 
-class IndexedRetrievalRequest(BaseModel):
-    query: str = Field(min_length=1)
-    artifacts: list[dict[str, Any]] = Field(min_length=1)
-    mode: str = Field(default="thinking", pattern="^(instant|thinking)$")
-
-
-def create_app(
-    service: TableAgentService | None = None,
-    *,
-    config_path: str | Path | None = None,
-) -> FastAPI:
+def create_app(service: TableAgentService | None = None, *, config_path: str | Path | None = None) -> FastAPI:
     resolved_service = service or TableAgentService.from_config(config_path or _default_config_path())
 
     app = FastAPI(
         title="TableAgent API",
         version=_package_version(),
-        description="Ephemeral spreadsheet structure extraction and question answering.",
+        description="Question answering over Excel workbooks.",
     )
     app.state.service = resolved_service
 
@@ -78,10 +42,7 @@ def create_app(
         if request.url.path.startswith("/v1/") and resolved_service.api_key:
             provided = request.headers.get("X-API-Key")
             if not provided or not secrets.compare_digest(provided, resolved_service.api_key):
-                return JSONResponse(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Invalid or missing X-API-Key"},
-                )
+                return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Invalid or missing X-API-Key"})
         return await call_next(request)
 
     @app.get("/health")
@@ -95,108 +56,47 @@ def create_app(
 
     @app.get("/v1/status")
     def service_status() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "version": _package_version(),
-            "workers": resolved_service.max_workers,
-            "persistence": False,
-        }
+        return {"status": "ok", "version": _package_version(), "workers": resolved_service.max_workers}
 
     @app.post("/v1/jobs")
     def create_path_job(request: PathJobRequest) -> dict[str, Any]:
         try:
-            workbooks = [resolved_service.validate_local_workbook(path) for path in request.workbooks]
+            workbook = resolved_service.validate_local_workbook(request.workbook)
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-        except (FileNotFoundError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         try:
-            return resolved_service.run(
-                stage=request.stage,
-                queries=request.queries,
-                workbooks=workbooks,
-                embed=request.embed,
-                sheets=request.sheets,
-                compress_before_structure=request.compress_before_structure,
-                persist=False,
-            )
-        except (RuntimeError, ValueError) as exc:
+            return resolved_service.run(workbook, request.questions)
+        except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.post("/v1/jobs/upload")
-    async def create_upload_job(
-        payload: str = Form(...),
-        files: list[UploadFile] = File(...),
-    ) -> dict[str, Any]:
+    async def create_upload_job(payload: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
         try:
             request = UploadJobRequest.model_validate_json(payload)
-        except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid payload JSON: {exc}") from exc
-        if not files:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one workbook is required")
-        with tempfile.TemporaryDirectory(prefix="table-agent-upload-") as upload_text:
-            upload_dir = Path(upload_text)
-            saved: list[Path] = []
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid payload: {exc}") from exc
+        with tempfile.TemporaryDirectory(prefix="table-agent-upload-") as upload_dir:
+            target = Path(upload_dir) / _safe_name(Path(file.filename or "workbook.xlsx").name)
             try:
-                for index, upload in enumerate(files, start=1):
-                    filename = safe_name(Path(upload.filename or f"workbook-{index}.xlsx").name)
-                    target = upload_dir / filename
-                    if target.exists():
-                        target = upload_dir / f"{index:03d}_{filename}"
-                    size = 0
-                    with target.open("wb") as handle:
-                        while chunk := await upload.read(1024 * 1024):
-                            size += len(chunk)
-                            if size > resolved_service.max_upload_bytes:
-                                raise ValueError(
-                                    f"Upload '{filename}' exceeds the "
-                                    f"{resolved_service.max_upload_bytes // (1024 * 1024)} MB limit"
-                                )
-                            handle.write(chunk)
-                    resolved_service._validate_workbook(target)
-                    saved.append(target)
+                size = 0
+                with target.open("wb") as handle:
+                    while chunk := await file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > resolved_service.max_upload_bytes:
+                            limit = resolved_service.max_upload_bytes // (1024 * 1024)
+                            raise ValueError(f"Upload '{target.name}' exceeds the {limit} MB limit")
+                        handle.write(chunk)
+                resolved_service.validate_workbook(target)
             except (OSError, ValueError) as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
             finally:
-                for upload in files:
-                    await upload.close()
-
+                await file.close()
             try:
-                if request.stage == "qa" and request.artifacts:
-                    return await asyncio.to_thread(
-                        resolved_service.run_indexed_qa,
-                        query=request.queries[0],
-                        workbooks=saved,
-                        artifacts=request.artifacts,
-                        mode=request.mode,
-                    )
-                return await asyncio.to_thread(
-                    resolved_service.run,
-                    stage=request.stage,
-                    queries=request.queries,
-                    workbooks=saved,
-                    embed=request.embed,
-                    sheets=request.sheets,
-                    compress_before_structure=request.compress_before_structure,
-                    persist=False,
-                )
-            except (RuntimeError, ValueError) as exc:
+                return await asyncio.to_thread(resolved_service.run, target, request.questions)
+            except ValueError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    @app.post("/v1/retrieval/select")
-    def select_indexed_artifact(request: IndexedRetrievalRequest) -> dict[str, Any]:
-        try:
-            return resolved_service.select_indexed_artifact(
-                query=request.query,
-                artifacts=request.artifacts,
-                mode=request.mode,
-            )
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
 
     return app
 
@@ -216,14 +116,5 @@ def _package_version() -> str:
         return "0.1.0"
 
 
-def _require_queries(stage: Stage, queries: list[str]) -> None:
-    if stage in {"qa", "all"} and not any(str(query).strip() for query in queries):
-        raise ValueError("At least one non-empty query is required for qa and all stages")
-
-
-__all__ = [
-    "IndexedRetrievalRequest",
-    "PathJobRequest",
-    "UploadJobRequest",
-    "create_app",
-]
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value) or "workbook.xlsx"

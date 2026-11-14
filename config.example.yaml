@@ -1,103 +1,52 @@
-llm:
-  provider: "answer_model"
+# Copy to config.yaml and fill in the models. ${NAME:-default} reads the environment variable NAME.
 
-vlm:
-  provider: "layout_model"
+# Models: `llm` answers, `vlm` looks at rendered cell ranges (leave it out to answer from cell values only).
+llm: answer_model
+vlm: vision_model
 
+# Model profiles (OpenAI-compatible chat-completions endpoints); the names above pick one.
 models:
   answer_model:
-    provider: "openai_compatible"
+    provider: openai_compatible
     base_url: "${TABLE_AGENT_LLM_BASE_URL:-http://localhost:8000/v1}"
     model: "${TABLE_AGENT_LLM_MODEL:-your-answer-model}"
     api_key: "${TABLE_AGENT_LLM_API_KEY:-EMPTY}"
     temperature: 0.0
-    max_tokens: null
     timeout_seconds: 180
-  retrieval_embedding_model:
-    provider: "openai_compatible"
-    base_url: "${TABLE_AGENT_EMBEDDING_BASE_URL:-http://localhost:8001/v1}"
-    model: "${TABLE_AGENT_EMBEDDING_MODEL:-BAAI/bge-m3}"
-    api_key: "${TABLE_AGENT_EMBEDDING_API_KEY:-EMPTY}"
-    timeout_seconds: "${TABLE_AGENT_EMBEDDING_TIMEOUT_SECONDS:-120}"
-
-vlm_models:
-  layout_model:
-    provider: "openai_compatible"
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+  vision_model:
+    provider: openai_compatible
     base_url: "${TABLE_AGENT_VLM_BASE_URL:-http://localhost:8000/v1}"
     model: "${TABLE_AGENT_VLM_MODEL:-your-vision-model}"
     api_key: "${TABLE_AGENT_VLM_API_KEY:-EMPTY}"
     temperature: 0.0
-    max_tokens: null
     timeout_seconds: 180
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
 
+# How questions are answered (TableAgent/settings.py); every key is optional.
 table_agent:
-  phase: "all"
-  compression_before_structure: false
-  compression_similarity_threshold: 0.8
-  compression_keep_rows: 2
-  compression_insert_ellipsis: false
-  structure_cache_dir: "cache/table_agent/structure"
-  artifact_root: "outputs/table_agent/artifacts"
-  run_dir_template: "{run_name}"
-  repeat_dir_template: "repeat_{run_id}"
-  artifact_dir: "outputs/table_agent"
-  max_refinement_rounds: 3
-  max_context_chars: 240000
+  plan_count: 2                 # starting plans written independently, then reconciled when above 1
+  checker: [independent]        # Checkers that test each value read: reverse, independent, debate
+  checker_view: frame           # what the independent Checker reads the workbook through: grid, frame, image
+  checker_sees_value: true      # the Checker sees the value it tests
+  synthesis_check: false        # a Checker reviews how the answer was computed
+  generation_max_tokens: 8192   # generation cap of both models
+  max_context_chars: 240000     # table text of a fallback answer is cut to this length
+  libreoffice_path: null        # soffice executable when it is not on PATH
+  image_resolution: 600
   render_timeout_seconds: 60
-  libreoffice_path: null
-  libreoffice_image_resolution: 600
-  workbook_show_coordinates: true
-  structure_data_only: false
   max_cell_width: 50
-  generation_max_tokens: 8192
-  max_image_dimension: 8192
-  max_image_pixels: 33554432
-  image_tile_size: null
-  image_tile_overlap: 256
-  # QA checks (TableAgent/stages/qa/checker.py), none by default:
-  # qa_checker: checks of each found need, in order; a later one runs only when the earlier did not confirm:
-  #   reverse (from the cells back to their meaning), independent (re-derives the need with other tools),
-  #   debate (argues against the evidence). The reasoning step rules on a refuting check.
-  # qa_checker_sees_value: the independent check sees the claimed value (else it is compared in code).
-  # qa_checker_view: the independent check's tools: grid (raw cells), image (VLM), frame (DataFrames).
-  # qa_synthesis_check: a check of how the answer was computed, before the final review.
-  qa_checker: []
-  qa_checker_sees_value: true
-  qa_checker_view: grid
-  qa_synthesis_check: false
-  routing:
-    retrieval:
-      # off: use the supplied workbook/structure without source retrieval.
-      # auto: skip retrieval for an explicit single sheet/table; retrieve otherwise.
-      # lexical: BM25/keyword retrieval only; hybrid also uses embeddings when available.
-      # indexed: do not prepare/select local sources; use incoming indexed artifacts.
-      # perfect: deterministic/oracle source selection for controlled evaluations.
-      mode: "auto"
-      rerank_with_llm: true
-      top_k: 8
-      candidate_max_chars: 4000
-      bm25_weight: 0.3
-      embedding_weight: 0.7
-      explicit_workbook_guard: true
-      explicit_sheet_guard: true
-      audit_top_k: 10
-      query_type: "auto"
-      max_batches: 3
-  exstruct_mode: "light"
-  viewport_rows: 50
-  viewport_columns: 50
-  shift_cells: 45
-  max_retry: 3
-  qa_instant_generation_max_tokens: 2048
-  # Shared by query-time hybrid retrieval and optional ingestion embedding export.
-  retrieval_embedding_provider: "retrieval_embedding_model"
-  # Ingestion only: add embeddings to exported retrieval cards when requested.
-  embed_retrieval_cards: false
+  show_coordinates: true
 
+# HTTP service and CLI.
 service:
-  root_dir: "outputs"
-  max_workers: 1
+  root_dir: outputs             # one directory per job
+  max_workers: 1                # questions of a job answered at once
   max_upload_mb: 100
   api_key: "${TABLE_AGENT_SERVICE_API_KEY:-}"
-  allow_local_paths: false
+  allow_local_paths: false      # POST /v1/jobs with a workbook path
   allowed_input_roots: []

@@ -60,7 +60,7 @@ def test_openai_compatible_client_supports_text_and_images(tmp_path: Path):
 
 def test_create_model_client_resolves_public_config():
     config = {
-        "llm": {"provider": "answer"},
+        "llm": "answer",
         "models": {
             "answer": {
                 "provider": "openai_compatible",
