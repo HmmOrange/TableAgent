@@ -161,6 +161,22 @@ def test_reads_give_text_without_its_outer_spaces():
     assert column[1] == "CA" and column.isna()[2] and column[3] == "New  York"
 
 
+def test_reading_past_the_sheet_and_walking_headers_leave_its_size_as_loaded():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Region", "2019", "2020"])
+    sheet.append(["North", 1, 2])
+    sheet.append(["South", 3, 4])
+    tools = SheetTools(workbook)
+    size, frame = tools.sheets(), tools.frame()
+
+    assert tools.read("C3:E5") == [[4, None, None], [None, None, None], [None, None, None]]
+    assert tools.headers("B3", look=False)["row_labels"] == ["South"] and "E9=" not in tools.around("D8")
+    assert tools.cells("A1:Z50").shape[0] == 9 and len(tools.formats("A1:Z50").splitlines()) == 9
+    assert tools.sheets() == size == ["Sheet (3 rows x 3 columns)"] and tools.frame().equals(frame)
+    assert (sheet.max_row, sheet.max_column) == (3, 3)  # no cell was created past the loaded size
+
+
 def test_headers_walk_to_the_row_label_column_header_and_section(tools: SheetTools):
     found = tools.headers("D8")
     assert found["row_labels"] == ["Alpha"]
@@ -220,7 +236,8 @@ def test_headers_carry_merged_keys_down_and_ignore_striping(tmp_path: Path):
     assert found["block"] == {"rows": "2-6", "starts": "row 1 is the header", "ends": "row 7 has no data (label 'Total')"}
     assert {"header": "Location", "value": "North", "from": "A2", "rows": "2-4", "next": "South"}.items() <= found["keys"][0].items()
     assert "key: Location = North (from A2)" in tools.describe("C3")
-    assert read_layout(openpyxl.load_workbook(path).active, 1, openpyxl.load_workbook(path).active).totals == {7: (2, 6)}
+    formula_sheet = openpyxl.load_workbook(path).active
+    assert read_layout(formula_sheet, 1, (formula_sheet.max_row, formula_sheet.max_column), formula_sheet).totals == {7: (2, 6)}
 
 
 def test_striping_in_part_of_a_sheet_does_not_split_blocks_but_a_bold_total_does():
@@ -405,7 +422,7 @@ def test_numbers_written_once_per_group_of_rows_are_keys_not_data():
             sheet.cell(row, 2, item)
             sheet.cell(row, 3, row * 10)
             row += 1
-    layout = read_layout(sheet, 1)
+    layout = read_layout(sheet, 1, (sheet.max_row, sheet.max_column))
     assert layout.data_columns == [3] and layout.key_columns == [1, 2]
 
 def test_look_is_unavailable_without_a_vision_model(tools: SheetTools):
@@ -814,3 +831,36 @@ def test_evidence_with_date_keys_is_written_as_json():
     from TableAgent.src.checker import _json
 
     assert json.loads(_json({date(2024, 1, 31): [1, {date(2024, 2, 29): 2}]})) == {"2024-01-31": [1, {"2024-02-29": 2}]}
+
+
+def test_a_reply_cut_off_at_the_length_limit_does_not_use_up_the_retry():
+    from TableAgent.src.utils.llm import CountingLLM, ReplyError, ask_json, require_dict
+    from TableAgent.src.utils.trace import RunLog
+
+    class Replies:
+        def __init__(self, *replies: tuple[str, bool]):
+            self.replies, self.prompts = list(replies), []
+
+        def generate(self, prompt: str, system_prompt: str | None = None):
+            self.prompts.append(prompt)
+            content, capped = self.replies.pop(0)
+            return SimpleNamespace(content=content, prompt_tokens=1, completion_tokens=1, token_capped=capped)
+
+    def ask(*replies: tuple[str, bool]):
+        client = Replies(*replies)
+        try:
+            return ask_json(CountingLLM(client, RunLog()), "kind", "system", "PROMPT", require_dict), client.prompts
+        except ReplyError as exc:
+            return str(exc), client.prompts
+
+    cut, bad, good = ('{"thought": "and so', True), ("not json", False), ('{"a": 1}', False)
+    # A cut-off reply, then an ordinary bad one, still leaves the retry; each retry quotes the latest problem only.
+    reply, prompts = ask(cut, bad, good)
+    assert reply == {"a": 1}
+    assert [prompt.count("Your previous reply") for prompt in prompts] == [0, 1, 1]
+    assert "cut off at the length limit" in prompts[1] and "was rejected" in prompts[2]
+    assert ask(bad, cut, good)[0] == {"a": 1}
+    # Only one cut-off reply is free, and without one the ask still ends after two replies.
+    assert ask(cut, cut, good)[0] == {"a": 1}
+    assert ask(cut, cut, cut, good)[0] == "kind reply was invalid 3 times"
+    assert ask(bad, bad, good)[0] == "kind reply was invalid twice"

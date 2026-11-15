@@ -129,10 +129,11 @@ class HeaderWalker:
         key = (ws.title, row)
         if key not in self._number_rows:
             pairs = []
-            for c in range(1, min(ws.max_column, SCAN_COLUMNS) + 1):
+            last_row, last_col = self.tools.size(ws)
+            for c in range(1, min(last_col, SCAN_COLUMNS) + 1):
                 if _kind(v := ws.cell(row, c).value) != "n" or hasattr(v, "year"):
                     continue
-                below = next((ws.cell(r, c) for r in range(row + 1, min(ws.max_row, row + NUMBER_HEADER_LOOKDOWN) + 1)
+                below = next((ws.cell(r, c) for r in range(row + 1, min(last_row, row + NUMBER_HEADER_LOOKDOWN) + 1)
                               if _kind(ws.cell(r, c).value) == "n"), None)
                 if any(_kind(ws.cell(r, c).value) == "n" for r in range(1, row)):
                     pairs.append(False)  # a number above it: the row is in the body, not the header band
@@ -179,9 +180,10 @@ class HeaderWalker:
     def section_group(self, ws: Any, row: int, top: int) -> dict[str, Any]:
         """The section rows above a row (its own, then each parent) and the siblings of its own, with row spans."""
         sections = [section for section in self.section_rows(ws) if section["row"] > top]
+        last_row = self.tools.size(ws)[0]
 
         def span(start: int, level: tuple[int, ...]) -> str:
-            end = next((s["row"] for s in sections if s["row"] > start and s["level"] <= level), ws.max_row + 1)
+            end = next((s["row"] for s in sections if s["row"] > start and s["level"] <= level), last_row + 1)
             return f"{start + 1}-{end - 1}"
 
         def shown(section: dict[str, Any]) -> dict[str, Any]:
@@ -197,7 +199,7 @@ class HeaderWalker:
             if section["level"] < (parents[-1]["level"] if parents else own["level"]):
                 parents.append(section)
         parent = parents[0] if parents else None
-        parent_end = int(span(parent["row"], parent["level"]).split("-")[1]) if parent else ws.max_row
+        parent_end = int(span(parent["row"], parent["level"]).split("-")[1]) if parent else last_row
         siblings = [
             shown(s) for s in sections
             if s["level"] == own["level"] and s["row"] != own["row"] and (parent is None or parent["row"] < s["row"] <= parent_end)
@@ -212,7 +214,8 @@ class HeaderWalker:
         """
         if ws.title not in self._sections:
             found = []
-            for r, values in enumerate(ws.iter_rows(max_col=SCAN_COLUMNS, values_only=True), start=1):
+            last_row, last_col = self.tools.size(ws)
+            for r, values in enumerate(ws.iter_rows(max_row=last_row, max_col=min(last_col, SCAN_COLUMNS), values_only=True), start=1):
                 filled = [(c, value) for c, value in enumerate(values, start=1) if value not in (None, "")]
                 if not filled or len(filled) > SECTION_MAX_CELLS or not all(is_label(value) for _, value in filled):
                     continue
@@ -239,7 +242,7 @@ class HeaderWalker:
 
     def layout(self, ws: Any, top: int) -> Layout:
         if (ws.title, top) not in self._layouts:
-            self._layouts[(ws.title, top)] = read_layout(ws, top, self.formula_sheet(ws.title))
+            self._layouts[(ws.title, top)] = read_layout(ws, top, self.tools.size(ws), self.formula_sheet(ws.title))
         return self._layouts[(ws.title, top)]
 
     def formula_sheet(self, title: str) -> Any:
@@ -328,10 +331,11 @@ class Layout:
         return next((c for c in columns if _kind(self.value(row, c)) != "."), None)
 
 
-def read_layout(ws: Any, top: int, formula_ws: Any = None) -> Layout:
-    """The layout of a sheet whose header ends at row `top`; `formula_ws` is the same sheet read with formulas."""
-    width = min(ws.max_column, SCAN_COLUMNS)
-    values = [list(row) for row in ws.iter_rows(max_col=width, values_only=True)]
+def read_layout(ws: Any, top: int, size: tuple[int, int], formula_ws: Any = None) -> Layout:
+    """The layout of a sheet of `size` (rows, columns) whose header ends at row `top`; `formula_ws` is the same
+    sheet read with formulas."""
+    width = min(size[1], SCAN_COLUMNS)
+    values = [list(row) for row in ws.iter_rows(max_row=size[0], max_col=width, values_only=True)]
     body = values[top:]
     data_columns = []
     for c in range(1, width + 1):

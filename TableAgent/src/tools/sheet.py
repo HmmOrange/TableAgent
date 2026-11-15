@@ -53,10 +53,16 @@ class SheetTools:
         self._walker = HeaderWalker(self, formula_path)
         self._header_looks = 0
         self._merged: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
+        # Read once, before any cell is touched: openpyxl creates every cell it is asked for, which grows the sheet.
+        self._sizes = {ws.title: (ws.max_row, ws.max_column) for ws in workbook.worksheets}
 
     def sheets(self) -> list[str]:
         """Sheet names with their used size, e.g. `Data (233 rows x 19 columns)`."""
-        return [f"{ws.title} ({ws.max_row} rows x {ws.max_column} columns)" for ws in self.workbook.worksheets]
+        return [f"{ws.title} ({self.size(ws)[0]} rows x {self.size(ws)[1]} columns)" for ws in self.workbook.worksheets]
+
+    def size(self, ws: Any) -> tuple[int, int]:
+        """(rows, columns) of a sheet as it was loaded; every cell past them is empty."""
+        return self._sizes[ws.title]
 
     def worksheet(self, sheet: str = "") -> Any:
         """The named sheet, matched ignoring case and spacing; the first sheet when unnamed."""
@@ -76,6 +82,9 @@ class SheetTools:
         outer spaces, which do not show (blank text is empty)."""
         ws = self.worksheet(sheet)
         anchor_row, anchor_col = self._merged_map(ws).get((row, col), (row, col))
+        rows, cols = self.size(ws)
+        if anchor_row > rows or anchor_col > cols:
+            return None
         value = ws.cell(anchor_row, anchor_col).value
         return (value.strip() or None) if isinstance(value, str) else value
 
@@ -114,12 +123,13 @@ class SheetTools:
     def frame(self, sheet: str = "") -> pd.DataFrame:
         """The whole used range as a DataFrame: index = Excel row numbers, columns = column letters."""
         ws = self.worksheet(sheet)
+        last_row, last_col = self.size(ws)
         rows = [
-            [self.value(row, col, ws.title) for col in range(1, ws.max_column + 1)]
-            for row in range(1, ws.max_row + 1)
+            [self.value(row, col, ws.title) for col in range(1, last_col + 1)]
+            for row in range(1, last_row + 1)
         ]
-        columns = [get_column_letter(col) for col in range(1, ws.max_column + 1)]
-        return pd.DataFrame(rows, columns=columns, index=range(1, ws.max_row + 1))
+        columns = [get_column_letter(col) for col in range(1, last_col + 1)]
+        return pd.DataFrame(rows, columns=columns, index=range(1, last_row + 1))
 
     def headers(self, ref: str, sheet: str = "", look: bool = True) -> dict[str, Any]:
         """What one cell means: its row labels, column headers, sections and block.
@@ -156,7 +166,7 @@ class SheetTools:
         None; so is black font; the colour columns name an RGB value ("red", "green", ...)."""
         whole = WHOLE_COLUMNS.fullmatch(ref.strip())
         if whole:  # "C:C" or "C:F": the columns over every row of the sheet
-            ref = f"{whole.group(1)}1:{whole.group(2)}{self.worksheet(sheet).max_row}"
+            ref = f"{whole.group(1)}1:{whole.group(2)}{self.size(self.worksheet(sheet))[0]}"
         area = parse_a1_range(ref, sheet)
         ws = self.worksheet(area.sheet)
         covered = self._merged_map(ws)
@@ -164,8 +174,9 @@ class SheetTools:
         formulas = self._walker.formula_sheet(ws.title)
         seen: set[tuple[int, int]] = set()
         rows = []
-        for row in range(area.start_row, area.end_row + 1):
-            for col in range(area.start_col, area.end_col + 1):
+        last_row, last_col = self.size(ws)
+        for row in range(area.start_row, min(area.end_row, last_row) + 1):
+            for col in range(area.start_col, min(area.end_col, last_col) + 1):
                 anchor = covered.get((row, col), (row, col))
                 cell = ws.cell(*anchor)
                 value = self.value(*anchor, ws.title)
@@ -190,8 +201,9 @@ class SheetTools:
         ws = self.worksheet(cells.sheet)
         formulas = self._walker.formula_sheet(ws.title)
         lines = []
-        for row in range(cells.start_row, cells.end_row + 1):
-            for col in range(cells.start_col, cells.end_col + 1):
+        last_row, last_col = self.size(ws)
+        for row in range(cells.start_row, min(cells.end_row, last_row) + 1):
+            for col in range(cells.start_col, min(cells.end_col, last_col) + 1):
                 value = ws.cell(row, col).value
                 if value in (None, ""):
                     continue

@@ -74,22 +74,33 @@ def ask_json(
     prompt: str,
     check: Callable[[Any], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Ask for one JSON object and validate it with `check`; a bad reply gets one retry quoting the problem."""
+    """Ask for one JSON object and validate it with `check`; a bad reply gets one retry quoting the problem.
+
+    A reply cut off at the length limit is asked again without using up that retry, once.
+    """
     llm.log.event(f"{kind}_prompt", prompt=prompt)
-    for attempt in (1, 2):
+    asked, attempt, retries, spare = prompt, 0, 1, True
+    while True:
+        attempt += 1
         try:
-            content = llm.generate(prompt, system_prompt)
+            content = llm.generate(asked, system_prompt)
         except Exception as exc:
             raise ReplyError(f"{kind} call failed: {exc}") from exc
         try:
             reply = check(parse_json(content))
         except ValueError as exc:
+            capped = llm.calls[-1].get("token_capped", False)
             llm.log.event(f"{kind}_reply_rejected", attempt=attempt, error=str(exc), content=content[:LOGGED_REPLY_CHARS])
-            prompt = f"{prompt}\n\n{_retry_note(exc, llm.calls[-1].get('token_capped', False))}"
+            if capped and spare:
+                spare = False
+            elif retries:
+                retries -= 1
+            else:
+                raise ReplyError(f"{kind} reply was invalid {'twice' if attempt == 2 else f'{attempt} times'}") from exc
+            asked = f"{prompt}\n\n{_retry_note(exc, capped)}"
             continue
         llm.log.event(f"{kind}_reply", **reply)
         return reply
-    raise ReplyError(f"{kind} reply was invalid twice")
 
 
 def _retry_note(error: ValueError, capped: bool) -> str:
