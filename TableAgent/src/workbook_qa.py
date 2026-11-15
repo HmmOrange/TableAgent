@@ -63,6 +63,10 @@ class WorkbookQA:
             vision_client=self.vision_llm,
             renderer=self.renderer,
             plan_count=self.settings.plan_count,
+            inspector_max_turns=self.settings.inspector_max_turns,
+            max_returns=self.settings.max_returns,
+            disabled_tools=self.settings.disabled_tools,
+            save_artifacts=self.settings.save_artifacts,
         )
         if result.success:
             response = LLMResponse(

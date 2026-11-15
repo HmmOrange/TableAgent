@@ -18,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from TableAgent.src.ledger import MAX_LLM_CALLS, MAX_RETURNS, MAX_STEPS, Evidence, Ledger, Step
+from TableAgent.src.ledger import MAX_LLM_CALLS, MAX_STEPS, Evidence, Ledger, Step
 
 if TYPE_CHECKING:
     from TableAgent.src.orchestrator import AnswerResult
@@ -100,7 +100,7 @@ def render_trace(result: AnswerResult, ledger: Ledger, cell_paths: dict[str, str
         f"- **Answer:** {result.answer if result.answer is not None else '(none)'}",
         f"- **Success:** {result.success}" + (f" ({result.error})" if result.error else ""),
         f"- **Budget:** steps {len(ledger.decisions)}/{MAX_STEPS} | model calls {len(result.llm_calls)}/{MAX_LLM_CALLS} "
-        f"| hypothesis revisions {ledger.hypothesis_revisions} | review returns {ledger.returns}/{MAX_RETURNS} "
+        f"| hypothesis revisions {ledger.hypothesis_revisions} | review returns {ledger.returns}/{ledger.max_returns} "
         f"| {result.seconds:.1f}s | tokens {result.token_usage.get('prompt', 0)} in, {result.token_usage.get('completion', 0)} out",
         "",
     ]

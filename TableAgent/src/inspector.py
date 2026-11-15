@@ -27,7 +27,7 @@ from TableAgent.src.tools.sheet import SheetTools
 from TableAgent.src.utils.llm import CountingLLM, ReplyError, ask_json, require_dict
 from TableAgent.utils.excel_utils import parse_a1_range
 
-MAX_TURNS = 12
+MAX_TURNS = 12  # the default of QASettings.inspector_max_turns
 REPORT_TURNS = 1  # turns after the last one that only report what was already printed
 OUTPUT_CHARS = 3000  # of one turn's printed output, in the transcript
 TRANSCRIPT_CHARS = 24000  # beyond this the oldest outputs are left out first
@@ -46,10 +46,13 @@ class Turn:
 class Inspector:
     def __init__(
         self, llm: CountingLLM, notebook: Notebook, tools: SheetTools,
-        system_prompt: str = INSPECTOR_SYSTEM_PROMPT,
+        system_prompt: str = INSPECTOR_SYSTEM_PROMPT, max_turns: int = MAX_TURNS,
+        strategy_texts: dict[str, str] = STRATEGY_TEXTS,
     ):
         self.llm = llm
         self.system_prompt = system_prompt
+        self.max_turns = max_turns
+        self.strategy_texts = strategy_texts
         self.notebook = notebook
         self.tools = tools
         found = legends(tools.workbook.worksheets)
@@ -68,7 +71,7 @@ class Inspector:
         # A value left by an earlier attempt must not pass for this attempt's evidence.
         self.notebook.namespace.pop(need.variable, None)
         turns: list[Turn] = []
-        for number in range(1, MAX_TURNS + REPORT_TURNS + 1):
+        for number in range(1, self.max_turns + REPORT_TURNS + 1):
             if self.llm.used >= MAX_LLM_CALLS:
                 break
             prompt = self._prompt(question, ledger, need, strategy, instruction, turns, number)
@@ -149,32 +152,33 @@ class Inspector:
             need_id=need.id,
             need=need.description,
             strategy=strategy,
-            strategy_text=STRATEGY_TEXTS[strategy],
+            strategy_text=self.strategy_texts[strategy],
             instruction=(instruction or "(none)") + self.formats,
             earlier=("Earlier attempts for this need:\n" + "\n".join(earlier) + "\n") if earlier else "",
             sheets="; ".join(self.tools.sheets()) + " (listed here: do not call sheet.sheets())",
             variable=need.variable,
             transcript=transcript(turns),
             turn=turn,
-            max_turns=MAX_TURNS,
-            last=_last_text(need.variable, turn),
+            max_turns=self.max_turns,
+            last=_last_text(need.variable, turn, self.max_turns),
         )
 
 
-def _last_text(variable: str, turn: int) -> str:
+def _last_text(variable: str, turn: int, max_turns: int) -> str:
     """What the turn line adds: the pace, the last turn's order to report, or the report turn's."""
-    if turn > MAX_TURNS:
+    if turn > max_turns:
         return (
             f" The turns are used up and `{variable}` is not set. Report turn: look nothing up; set `{variable}` from what"
             " the turns above printed (value None, with why in note, if they do not show it) and set done to true."
         )
-    if turn == MAX_TURNS:
+    if turn == max_turns:
         return (
             f" This is the last turn: set `{variable}` from what you have found (value None, with why in note,"
             " if nothing fits) and set done to true."
         )
+    pace = " Most needs take 3 to 6 turns: as" if max_turns >= 6 else " As"  # the pace only where 6 turns fit
     return (
-        f" Most needs take 3 to 6 turns: as soon as you have seen where the value is, set `{variable}` and set done"
+        f"{pace} soon as you have seen where the value is, set `{variable}` and set done"
         " to true. Establish this need only; the other needs are inspected separately."
     )
 

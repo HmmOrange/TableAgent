@@ -109,6 +109,7 @@ class Ledger:
     evidence: list[Evidence] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
     answers: list[dict[str, Any]] = field(default_factory=list)
+    max_returns: int = MAX_RETURNS  # times the answer review may send the loop back (QASettings.max_returns)
 
     # ------------------------------------------------------------------ changes
 

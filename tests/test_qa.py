@@ -23,6 +23,7 @@ from TableAgent.src.prompts import (
     INSPECTOR_SYSTEM_PROMPT_WITH_LOOK,
     REASONER_SYSTEM_PROMPT,
     SYNTHESIZER_SYSTEM_PROMPT,
+    without_tools,
 )
 from TableAgent.src.synthesizer import part_text
 from TableAgent.src.tools.formats import format_marks, legend_notes, legends
@@ -73,15 +74,18 @@ class ScriptedLLM:
         }
         self.prompts: dict[str, list[str]] = {role: [] for role in self.scripts}
         self.check_systems: list[str] = []
+        self.inspect_systems: list[str] = []
 
     def generate(self, prompt: str, system_prompt: str | None = None):
         roles = {
             REASONER_SYSTEM_PROMPT: "reason", INSPECTOR_SYSTEM_PROMPT: "inspect", INSPECTOR_SYSTEM_PROMPT_WITH_LOOK: "inspect",
             SYNTHESIZER_SYSTEM_PROMPT: "synthesize",
         }
-        role = "check" if system_prompt.startswith("You are a Checker") else roles[system_prompt]
+        role = "check" if system_prompt.startswith("You are a Checker") else roles.get(system_prompt, "inspect")
         if role == "check":
             self.check_systems.append(system_prompt)
+        if role == "inspect":
+            self.inspect_systems.append(system_prompt)
         if role == "reason" and self.prompts["reason"] and "Reason about the question before anything is read" in prompt:
             role = "start"  # the starting plan asked for again
         self.prompts[role].append(prompt)
@@ -864,3 +868,66 @@ def test_a_reply_cut_off_at_the_length_limit_does_not_use_up_the_retry():
     assert ask(cut, cut, good)[0] == {"a": 1}
     assert ask(cut, cut, cut, good)[0] == "kind reply was invalid 3 times"
     assert ask(bad, bad, good)[0] == "kind reply was invalid twice"
+
+
+# ---------------------------------------------------------------------------------------------- ablation settings
+def test_settings_default_to_the_current_limits_and_check_the_ablation_values():
+    from TableAgent import QASettings
+    from TableAgent.src.inspector import MAX_TURNS
+    from TableAgent.src.ledger import MAX_RETURNS
+
+    defaults = QASettings.from_config({})
+    assert (defaults.inspector_max_turns, defaults.max_returns) == (MAX_TURNS, MAX_RETURNS)
+    assert (defaults.disabled_tools, defaults.save_artifacts) == ((), True)
+    chosen = QASettings.from_config({"disabled_tools": "find, headers, describe", "max_returns": 0, "inspector_max_turns": 4})
+    assert (chosen.disabled_tools, chosen.max_returns, chosen.inspector_max_turns) == (("find", "headers", "describe"), 0, 4)
+    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"max_returns": -1}, {"inspector_max_turns": 0}):
+        with pytest.raises(ValueError):
+            QASettings.from_config(bad)
+
+
+def test_the_settings_reach_the_exploration(monkeypatch):
+    from TableAgent import QASettings
+    from TableAgent.src import workbook_qa
+
+    seen = {}
+
+    def answer(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(workbook_qa, "answer_question", answer)
+    settings = QASettings(inspector_max_turns=8, max_returns=2, disabled_tools=("find",), save_artifacts=False)
+    with pytest.raises(RuntimeError):
+        workbook_qa.WorkbookQA(SimpleNamespace(), settings).run(
+            question="q", workbook_path=Path("w.xlsx"), qa_artifact_dir=Path("runs"), fallback_prompt="",
+        )
+    assert {key: seen[key] for key in ("inspector_max_turns", "max_returns", "disabled_tools", "save_artifacts")} == {
+        "inspector_max_turns": 8, "max_returns": 2, "disabled_tools": ("find",), "save_artifacts": False,
+    }
+
+
+def test_tools_switched_off_leave_the_inspector_prompts_and_its_notebook(tmp_path, workbook_files):
+    assert without_tools(INSPECTOR_SYSTEM_PROMPT, ()) == INSPECTOR_SYSTEM_PROMPT
+    tried = {"thought": "Read it.", "code": "print(sheet.read('B5:B8'))\nsheet.find('Alpha')", "done": False}
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [tried, SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm, disabled_tools=("find", "headers", "describe"))
+
+    assert result.answer == "35"
+    for name in ("find", "headers", "describe"):
+        assert f"sheet.{name}" not in llm.inspect_systems[0] and f"sheet.{name}" not in llm.prompts["inspect"][0]
+    assert "sheet.read" in llm.inspect_systems[0]
+    assert "Alpha" in llm.prompts["inspect"][1] and "sheet.find is not available" in llm.prompts["inspect"][1]
+
+
+def test_inspector_turns_review_returns_and_artifacts_follow_the_settings(tmp_path, workbook_files):
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [LOOK] * 3 + [SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm, inspector_max_turns=4)
+    assert "Turn 4 of 4. This is the last turn" in llm.prompts["inspect"][3] and result.answer == "35"
+    assert "Turn 1 of 4. As soon as you have seen where the value is" in llm.prompts["inspect"][0]
+    assert "Most needs take" not in llm.prompts["inspect"][0]
+
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE], [SOUTH_EVIDENCE], [PARTS])  # no review reply is scripted
+    result = _run(tmp_path / "no_review", workbook_files, llm, max_returns=0, save_artifacts=False)
+    assert result.answer == "35" and not any(step.kind == "end" for step in result.ledger.steps)
+    assert result.artifacts == {} and not (tmp_path / "no_review").exists()

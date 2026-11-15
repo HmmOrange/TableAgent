@@ -39,6 +39,19 @@ MAX_NEAR_CELLS = 10  # cells `find` lists when no cell holds all the words
 MAX_STACKED_LABELS = 3  # label cells `find` joins down a column (a header split over rows)
 
 
+class WithoutTools:
+    """The `sheet` object of the notebook with some tools switched off (QASettings.disabled_tools)."""
+
+    def __init__(self, tools: "SheetTools", off: tuple[str, ...]):
+        self._tools = tools
+        self._off = off
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._off:
+            raise AttributeError(f"sheet.{name} is not available")
+        return getattr(self._tools, name)
+
+
 class SheetTools:
     """Read, search and describe workbook cells; merged cells read as their visible value."""
 

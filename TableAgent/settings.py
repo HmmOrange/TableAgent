@@ -8,6 +8,7 @@ from typing import Any
 
 QA_CHECKS = ("reverse", "independent", "debate")  # see src/checker.py
 CHECKER_VIEWS = ("grid", "image", "frame")
+SWITCHABLE_TOOLS = ("find", "headers", "describe")  # Inspector tools that disabled_tools may switch off
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,10 @@ class QASettings:
     plan_count: how many starting plans are written independently; above 1, one more call reconciles them.
     checker, checker_view, checker_sees_value: the Checkers that test each found need (src/checker.py).
     synthesis_check: a Checker reviews how the answer was computed before the final review.
+    inspector_max_turns: turns of one inspection, before the turn that only reports (src/inspector.py MAX_TURNS).
+    max_returns: times the answer review may send the loop back (src/ledger.py MAX_RETURNS); 0 skips the review.
+    disabled_tools: Inspector tools switched off, among find, headers and describe (headers and describe together).
+    save_artifacts: write each question's trace, ledger, events and code cells.
     generation_max_tokens: the generation cap set on the answer and vision models (None keeps the clients' own).
     max_context_chars: table text given to a fallback answer is cut to this length.
     The rest configure LibreOffice rendering for `sheet.look`.
@@ -27,6 +32,10 @@ class QASettings:
     checker_view: str = "grid"
     checker_sees_value: bool = True
     synthesis_check: bool = False
+    inspector_max_turns: int = 12
+    max_returns: int = 1
+    disabled_tools: tuple[str, ...] = ()
+    save_artifacts: bool = True
     generation_max_tokens: int | None = None
     max_context_chars: int = 240000
     libreoffice_path: Path | None = None
@@ -50,6 +59,12 @@ class QASettings:
             checker_view=_choice(config.get("checker_view", defaults.checker_view), "checker_view", CHECKER_VIEWS),
             checker_sees_value=_bool(config.get("checker_sees_value", defaults.checker_sees_value)),
             synthesis_check=_bool(config.get("synthesis_check", defaults.synthesis_check)),
+            inspector_max_turns=_positive_int(
+                config.get("inspector_max_turns", defaults.inspector_max_turns), "inspector_max_turns",
+            ),
+            max_returns=_count(config.get("max_returns", defaults.max_returns), "max_returns"),
+            disabled_tools=_tools(config.get("disabled_tools", defaults.disabled_tools)),
+            save_artifacts=_bool(config.get("save_artifacts", defaults.save_artifacts)),
             generation_max_tokens=None if config.get("generation_max_tokens") is None else int(config["generation_max_tokens"]),
             max_context_chars=int(config.get("max_context_chars", defaults.max_context_chars)),
             libreoffice_path=None if config.get("libreoffice_path") is None else Path(str(config["libreoffice_path"])),
@@ -72,6 +87,24 @@ def _positive_int(value: Any, key: str) -> int:
     if parsed < 1:
         raise ValueError(f"table_agent.{key} must be a positive integer")
     return parsed
+
+
+def _count(value: Any, key: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"table_agent.{key} must be 0 or more")
+    return parsed
+
+
+def _tools(value: Any) -> tuple[str, ...]:
+    """Inspector tools to switch off: a list or a comma-separated string among find, headers, describe."""
+    names = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    tools = tuple(str(name).strip().lower() for name in names if str(name).strip())
+    if any(name not in SWITCHABLE_TOOLS for name in tools) or len(set(tools)) != len(tools):
+        raise ValueError(f"table_agent.disabled_tools must list distinct tools among: {', '.join(SWITCHABLE_TOOLS)}")
+    if ("headers" in tools) != ("describe" in tools):
+        raise ValueError("table_agent.disabled_tools: headers and describe are switched off together")
+    return tools
 
 
 def _checks(value: Any) -> tuple[str, ...]:

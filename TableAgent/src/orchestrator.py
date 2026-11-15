@@ -27,7 +27,7 @@ import openpyxl
 import pandas as pd
 
 from TableAgent.src.checker import Checker, check_method
-from TableAgent.src.inspector import Inspector
+from TableAgent.src.inspector import MAX_TURNS as INSPECTOR_MAX_TURNS, Inspector
 from TableAgent.src.ledger import (
     NEED_ID,
     MAX_LLM_CALLS,
@@ -53,12 +53,14 @@ from TableAgent.src.prompts import (
     RECONCILE_NOTE,
     REFUSED_AGAIN,
     RULINGS_TEXT,
+    STRATEGY_TEXTS,
+    without_tools,
 )
 from TableAgent.src.synthesizer import SynthesisError, Synthesizer
 from TableAgent.src.tools.formats import legend_notes, legends
 from TableAgent.src.tools.look import Vision
 from TableAgent.src.tools.notebook import Notebook
-from TableAgent.src.tools.sheet import SheetTools
+from TableAgent.src.tools.sheet import SheetTools, WithoutTools
 from TableAgent.src.utils.llm import CountingLLM, ReplyError, ask_json, require_dict
 from TableAgent.src.utils.trace import RunLog, run_dir_name, write_artifacts
 from TableAgent.src.utils.workbook_view import workbook_preview
@@ -94,12 +96,17 @@ def answer_question(
     vision_client: Any = None,
     renderer: Any = None,
     plan_count: int = 2,
+    inspector_max_turns: int = INSPECTOR_MAX_TURNS,
+    max_returns: int = MAX_RETURNS,
+    disabled_tools: tuple[str, ...] = (),
+    save_artifacts: bool = True,
 ) -> AnswerResult:
     """Answer `question`; the artifacts go to a new directory under `artifact_dir`.
 
     `checks`, `sees_value` and `view` configure the Checkers (checker.py). `vision_client`, with the
     workbook `renderer` that draws cell ranges, turns on looking at images. `plan_count` starting plans are
-    written independently and, above one, reconciled.
+    written independently and, above one, reconciled. `inspector_max_turns`, `max_returns` and `disabled_tools`
+    are the QASettings of those names; without `save_artifacts` no trace, ledger, events or cells are written.
     """
     started = time.perf_counter()
     run_dir = artifact_dir / run_dir_name(question)
@@ -112,6 +119,7 @@ def answer_question(
         run = Orchestrator(
             question, llm, workbook, Path(workbook_path), excluded_sheet_names,
             vision, checks, sees_value, view, synthesis_check, plan_count,
+            inspector_max_turns, max_returns, disabled_tools,
         )
         error = run.answer()
     finally:
@@ -128,6 +136,9 @@ def answer_question(
         ledger=run.ledger,
     )
     log.event("result", answer=result.answer, success=result.success, error=error)
+    if not save_artifacts:
+        log.say(f"done | success={result.success}")
+        return result
     cells = run.notebook.cells + (run.checker.cells if run.checker else [])
     result.artifacts = write_artifacts(run_dir, result, run.ledger, log, cells)
     log.say(f"done | success={result.success} | {result.artifacts['trace_md']}")
@@ -150,20 +161,27 @@ class Orchestrator:
         view: str,
         synthesis_check: bool,
         plan_count: int = 2,
+        inspector_max_turns: int = INSPECTOR_MAX_TURNS,
+        max_returns: int = MAX_RETURNS,
+        disabled_tools: tuple[str, ...] = (),
     ):
         self.question = question
         self.llm = llm
         self.log = llm.log
-        self.ledger = Ledger(question)
+        self.ledger = Ledger(question, max_returns=max_returns)
         tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
-        self.notebook = Notebook({"sheet": tools, "pd": pd, "np": np})
+        sheet = WithoutTools(tools, disabled_tools) if disabled_tools else tools
+        self.notebook = Notebook({"sheet": sheet, "pd": pd, "np": np})
         self.preview = workbook_preview(workbook, workbook_path.name, excluded_sheet_names, question=question)
         excluded = excluded_sheet_names or set()
         found = legends([ws for ws in workbook.worksheets if ws.title.strip().casefold() not in excluded])
         self.legends = LEGEND_TEXT.format(legends=legend_notes(found)) if found else ""  # for reason_start: the preview shows no colours
         self.reasoner = Reasoner(llm, plan_count)
         self.inspector = Inspector(
-            llm, self.notebook, tools, INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision is not None else INSPECTOR_SYSTEM_PROMPT,
+            llm, self.notebook, tools,
+            without_tools(INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision is not None else INSPECTOR_SYSTEM_PROMPT, disabled_tools),
+            inspector_max_turns,
+            {name: without_tools(text, disabled_tools) for name, text in STRATEGY_TEXTS.items()},
         )
         self.checker = Checker(llm, tools, checks, sees_value, view, self.preview) if checks else None
         self.synthesis_check = synthesis_check
@@ -193,7 +211,7 @@ class Orchestrator:
             composed = {"step": step, "parts": parts, "answer": answer, "code": code}
             ledger.answers.append(composed)
             self.log.say(f"synthesized | {answer}")
-            if not chose_synthesis or ledger.returns >= MAX_RETURNS or self.llm.used >= MAX_LLM_CALLS:
+            if not chose_synthesis or ledger.returns >= ledger.max_returns or self.llm.used >= MAX_LLM_CALLS:
                 return None
             if self.synthesis_check:
                 composed["method_check"] = check_method(self.llm, ledger, composed)

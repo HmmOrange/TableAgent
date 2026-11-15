@@ -169,6 +169,32 @@ Reply with one JSON object, then this turn's Python in one ```python block after
 ```"""
 
 INSPECTOR_SYSTEM_PROMPT_WITH_LOOK = INSPECTOR_SYSTEM_PROMPT.replace(SHEET_TOOLS, f"{SHEET_TOOLS}\n{LOOK_TOOL}")
+
+# The Inspector's text that names a tool, and what it says when the tool is switched off (QASettings.disabled_tools).
+# find goes first: its line names describe. headers and describe are switched off together.
+TOOL_TEXT_OFF = {
+    "find": (
+        (f"\n{FIND_TOOL}", ""),
+        ("Find each label of the need with `sheet.find(label)`, then", "Find each label of the need in code, then"),
+    ),
+    "headers": (
+        (f"\n{HEADERS_TOOL}", ""),
+        (": check them with `sheet.describe`", ": check them"),
+        ("Print the candidates with `sheet.describe`.", "Print the candidates with the cells around them."),
+        ("look at the candidates with `sheet.describe(ref)` and the rows", "look at the candidates and the rows"),
+        ("check with `sheet.headers` which block", "check which block"),
+        (' (`sheet.headers` reports it as "legend")', ""),
+    ),
+}
+
+
+def without_tools(text: str, tools: tuple[str, ...]) -> str:
+    """The Inspector's `text` with the given tools left out; unchanged when none is."""
+    for tool, swaps in TOOL_TEXT_OFF.items():
+        if tool in tools:
+            for old, new in swaps:
+                text = text.replace(old, new)
+    return text
 INSPECTOR_PROMPT = """Question: {question}
 Working hypothesis: {hypothesis}
 Need to establish ({need_id}): {need}
