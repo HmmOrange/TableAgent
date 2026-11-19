@@ -8,6 +8,7 @@ from typing import Any
 
 QA_CHECKS = ("reverse", "independent", "debate")  # see src/checker.py
 CHECKER_VIEWS = ("grid", "image", "frame")
+START_VIEWS = ("text", "none")
 SWITCHABLE_TOOLS = ("find", "headers", "describe")  # Inspector tools that disabled_tools may switch off
 
 
@@ -21,6 +22,8 @@ class QASettings:
     inspector_max_turns: turns of one inspection, before the turn that only reports (src/inspector.py MAX_TURNS).
     max_returns: times the answer review may send the loop back (src/ledger.py MAX_RETURNS); 0 skips the review.
     disabled_tools: Inspector tools switched off, among find, headers and describe (headers and describe together).
+    start_view: what the starting plans are shown of the workbook: the text preview, or none (sheet names and sizes
+        only). The Checkers keep the text preview.
     save_artifacts: write each question's trace, ledger, events and code cells.
     generation_max_tokens: the generation cap set on the answer and vision models (None keeps the clients' own).
     max_context_chars: table text given to a fallback answer is cut to this length.
@@ -35,6 +38,7 @@ class QASettings:
     inspector_max_turns: int = 12
     max_returns: int = 1
     disabled_tools: tuple[str, ...] = ()
+    start_view: str = "text"
     save_artifacts: bool = True
     generation_max_tokens: int | None = None
     max_context_chars: int = 240000
@@ -64,6 +68,7 @@ class QASettings:
             ),
             max_returns=_count(config.get("max_returns", defaults.max_returns), "max_returns"),
             disabled_tools=_tools(config.get("disabled_tools", defaults.disabled_tools)),
+            start_view=_choice(config.get("start_view", defaults.start_view), "start_view", START_VIEWS),
             save_artifacts=_bool(config.get("save_artifacts", defaults.save_artifacts)),
             generation_max_tokens=None if config.get("generation_max_tokens") is None else int(config["generation_max_tokens"]),
             max_context_chars=int(config.get("max_context_chars", defaults.max_context_chars)),

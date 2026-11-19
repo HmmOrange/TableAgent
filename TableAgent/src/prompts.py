@@ -14,8 +14,7 @@ You never read cells or compute the answer yourself. Reply with exactly one JSON
 
 REASON_START_PROMPT = """Question: {question}
 
-Workbook preview (A1-annotated rows; a merged cell is written once with its whole range, so `B3:P3:Label` is one cell spanning columns B to P; it may be partial):
-{preview}
+{workbook}
 {legends}
 Reason about the question before anything is read:
 1. What does it ask for, and in what form (one value, an item, a list, a comparison, a yes/no)? List the answer slots: one for each part the question asks to find, match, identify, report, check or infer, each with the exact phrase of the question that asks for it. Every clause that asks for something gets a slot: "find (or match) the value of X and check whether it exceeds Y" asks for X's value and for the result of the check; "infer whether ..." or "verify if ..." asks for Yes or No beside any item the question also asks for. A question asking how a value compares to another named value reports that other value too. Several items asked for together ("X and Y", "X/Y") are reported one by one unless the question asks for their total. A value used only inside a computation the question asks for (the operands of a difference, the values averaged or ranked) is a need, not a slot.
@@ -31,6 +30,12 @@ Answer form rules:
 
 Return JSON, slots in the order the answer reports them:
 {{"analysis": "<your reasoning>", "hypothesis": "<how the needs combine>", "answer_form": "<form of the answer>", "answer_slots": [{{"slot": "<what to report>", "asked_by": "<exact phrase of the question>"}}], "needs": [{{"id": "n1", "description": "<a need to read>"}}]}}"""
+
+# What reason_start is shown of the workbook, by QASettings.start_view.
+START_TEXT_VIEW = """Workbook preview (A1-annotated rows; a merged cell is written once with its whole range, so `B3:P3:Label` is one cell spanning columns B to P; it may be partial):
+{preview}"""
+START_NO_VIEW = """Workbook: {sheets}
+No preview of its cells is given."""
 
 REASON_STEP_PROMPT = """{open_needs}Question: {question}
 

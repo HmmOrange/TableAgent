@@ -66,6 +66,7 @@ class WorkbookQA:
             inspector_max_turns=self.settings.inspector_max_turns,
             max_returns=self.settings.max_returns,
             disabled_tools=self.settings.disabled_tools,
+            start_view=self.settings.start_view,
             save_artifacts=self.settings.save_artifacts,
         )
         if result.success:

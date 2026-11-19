@@ -53,6 +53,8 @@ from TableAgent.src.prompts import (
     RECONCILE_NOTE,
     REFUSED_AGAIN,
     RULINGS_TEXT,
+    START_NO_VIEW,
+    START_TEXT_VIEW,
     STRATEGY_TEXTS,
     without_tools,
 )
@@ -100,13 +102,15 @@ def answer_question(
     max_returns: int = MAX_RETURNS,
     disabled_tools: tuple[str, ...] = (),
     save_artifacts: bool = True,
+    start_view: str = "text",
 ) -> AnswerResult:
     """Answer `question`; the artifacts go to a new directory under `artifact_dir`.
 
     `checks`, `sees_value` and `view` configure the Checkers (checker.py). `vision_client`, with the
     workbook `renderer` that draws cell ranges, turns on looking at images. `plan_count` starting plans are
-    written independently and, above one, reconciled. `inspector_max_turns`, `max_returns` and `disabled_tools`
-    are the QASettings of those names; without `save_artifacts` no trace, ledger, events or cells are written.
+    written independently and, above one, reconciled. `inspector_max_turns`, `max_returns`, `disabled_tools`
+    and `start_view` are the QASettings of those names; without `save_artifacts` no trace, ledger, events or
+    cells are written.
     """
     started = time.perf_counter()
     run_dir = artifact_dir / run_dir_name(question)
@@ -119,7 +123,7 @@ def answer_question(
         run = Orchestrator(
             question, llm, workbook, Path(workbook_path), excluded_sheet_names,
             vision, checks, sees_value, view, synthesis_check, plan_count,
-            inspector_max_turns, max_returns, disabled_tools,
+            inspector_max_turns, max_returns, disabled_tools, start_view,
         )
         error = run.answer()
     finally:
@@ -164,17 +168,20 @@ class Orchestrator:
         inspector_max_turns: int = INSPECTOR_MAX_TURNS,
         max_returns: int = MAX_RETURNS,
         disabled_tools: tuple[str, ...] = (),
+        start_view: str = "text",
     ):
         self.question = question
         self.llm = llm
         self.log = llm.log
+        self.start_view = start_view
         self.ledger = Ledger(question, max_returns=max_returns)
         tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
         sheet = WithoutTools(tools, disabled_tools) if disabled_tools else tools
         self.notebook = Notebook({"sheet": sheet, "pd": pd, "np": np})
         self.preview = workbook_preview(workbook, workbook_path.name, excluded_sheet_names, question=question)
         excluded = excluded_sheet_names or set()
-        found = legends([ws for ws in workbook.worksheets if ws.title.strip().casefold() not in excluded])
+        self.sheets = [ws for ws in workbook.worksheets if ws.title.strip().casefold() not in excluded]
+        found = legends(self.sheets)
         self.legends = LEGEND_TEXT.format(legends=legend_notes(found)) if found else ""  # for reason_start: the preview shows no colours
         self.reasoner = Reasoner(llm, plan_count)
         self.inspector = Inspector(
@@ -191,7 +198,7 @@ class Orchestrator:
         """Run the loop; returns an error message, or None once an answer is set."""
         ledger = self.ledger
         try:
-            ledger.start(self.reasoner.reason_start(self.question, self.preview, self.legends))
+            ledger.start(self.reasoner.reason_start(self.question, self._start_view(), self.legends))
         except ReplyError as exc:
             return f"Framing the question failed: {exc}"
         self.log.say(f"framed | {len(ledger.needs)} need(s), {len(ledger.answer_slots)} answer slot(s)")
@@ -226,6 +233,13 @@ class Orchestrator:
             if review.get("answer_slots"):
                 ledger.answer_slots = review["answer_slots"]
                 feedback += "\nThe answer slots were revised to add the missing ones; establish what they need."
+
+    def _start_view(self) -> str:
+        """What reason_start is shown of the workbook (QASettings.start_view): the preview, or the sheet sizes only."""
+        if self.start_view == "none":
+            sheets = "; ".join(f'"{ws.title}" ({ws.max_row} rows x {ws.max_column} columns)' for ws in self.sheets)
+            return START_NO_VIEW.format(sheets=sheets)
+        return START_TEXT_VIEW.format(preview=self.preview)
 
     def _explore(self, feedback: str) -> bool:
         """Steps until one chooses synthesis (True) or the budget runs out (False)."""
@@ -291,17 +305,17 @@ class Reasoner:
         self.llm = llm
         self.plan_count = plan_count
 
-    def reason_start(self, question: str, preview: str, legends: str = "") -> dict[str, Any]:
+    def reason_start(self, question: str, workbook: str, legends: str = "") -> dict[str, Any]:
         """Before anything is read: what the question asks, the answer slots, the needs to read, a hypothesis.
 
         The plan is written `plan_count` times (twice by default), independently, and one more call settles where
         they differ; a plan with more than MAX_SPLIT_NEEDS needs is sent back once to merge those read from one row,
         column or block. The log names each plan before its call (a `starting_plan` event: Plan A, Plan B, ...,
-        reconciled, needs merged).
+        reconciled, needs merged). `workbook` is what the plans are shown of the workbook.
         """
         prompt = REASON_START_PROMPT.format(
             question=question,
-            preview=preview,
+            workbook=workbook,
             legends=legends,
             answer_form_rules=ANSWER_FORM_RULES,
         )

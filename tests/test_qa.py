@@ -878,10 +878,11 @@ def test_settings_default_to_the_current_limits_and_check_the_ablation_values():
 
     defaults = QASettings.from_config({})
     assert (defaults.inspector_max_turns, defaults.max_returns) == (MAX_TURNS, MAX_RETURNS)
-    assert (defaults.disabled_tools, defaults.save_artifacts) == ((), True)
+    assert (defaults.disabled_tools, defaults.save_artifacts, defaults.start_view) == ((), True, "text")
+    assert QASettings.from_config({"start_view": "none"}).start_view == "none"
     chosen = QASettings.from_config({"disabled_tools": "find, headers, describe", "max_returns": 0, "inspector_max_turns": 4})
     assert (chosen.disabled_tools, chosen.max_returns, chosen.inspector_max_turns) == (("find", "headers", "describe"), 0, 4)
-    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"max_returns": -1}, {"inspector_max_turns": 0}):
+    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"max_returns": -1}, {"inspector_max_turns": 0}, {"start_view": "image"}):
         with pytest.raises(ValueError):
             QASettings.from_config(bad)
 
@@ -897,13 +898,14 @@ def test_the_settings_reach_the_exploration(monkeypatch):
         raise RuntimeError("stop")
 
     monkeypatch.setattr(workbook_qa, "answer_question", answer)
-    settings = QASettings(inspector_max_turns=8, max_returns=2, disabled_tools=("find",), save_artifacts=False)
+    settings = QASettings(inspector_max_turns=8, max_returns=2, disabled_tools=("find",), save_artifacts=False, start_view="none")
     with pytest.raises(RuntimeError):
         workbook_qa.WorkbookQA(SimpleNamespace(), settings).run(
             question="q", workbook_path=Path("w.xlsx"), qa_artifact_dir=Path("runs"), fallback_prompt="",
         )
-    assert {key: seen[key] for key in ("inspector_max_turns", "max_returns", "disabled_tools", "save_artifacts")} == {
-        "inspector_max_turns": 8, "max_returns": 2, "disabled_tools": ("find",), "save_artifacts": False,
+    keys = ("inspector_max_turns", "max_returns", "disabled_tools", "save_artifacts", "start_view")
+    assert {key: seen[key] for key in keys} == {
+        "inspector_max_turns": 8, "max_returns": 2, "disabled_tools": ("find",), "save_artifacts": False, "start_view": "none",
     }
 
 
@@ -931,3 +933,14 @@ def test_inspector_turns_review_returns_and_artifacts_follow_the_settings(tmp_pa
     result = _run(tmp_path / "no_review", workbook_files, llm, max_returns=0, save_artifacts=False)
     assert result.answer == "35" and not any(step.kind == "end" for step in result.ledger.steps)
     assert result.artifacts == {} and not (tmp_path / "no_review").exists()
+
+
+def test_the_starting_plans_see_the_preview_or_only_the_sheet_sizes(tmp_path, workbook_files):
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [SOUTH_EVIDENCE], [PARTS], [CONFIRMED])
+    result = _run(tmp_path, workbook_files, llm, start_view="none", checks=("independent",), view="frame")
+    first = llm.prompts["reason"][0]
+    assert 'Workbook: "Data" (9 rows x 4 columns)\nNo preview of its cells is given.' in first
+    assert "Staff by region" not in first and "Workbook preview" not in first
+    assert all("Staff by region" not in prompt for prompt in llm.prompts["start"])  # Plan B and the reconciled plan
+    assert "| A1:D1:Staff by region |" in llm.prompts["check"][0]  # the Checker keeps the preview
+    assert result.answer == "35"
