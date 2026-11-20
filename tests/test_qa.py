@@ -6,6 +6,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill
@@ -184,11 +185,11 @@ def test_reading_past_the_sheet_and_walking_headers_leave_its_size_as_loaded():
 def test_headers_walk_to_the_row_label_column_header_and_section(tools: SheetTools):
     found = tools.headers("D8")
     assert found["row_labels"] == ["Alpha"]
-    assert found["column_headers"] == ["Staff by region"]
+    assert found["column_headers"] == ["Staff by region", "2019"]
     assert found["sections"] == [{"label": "South", "row": 7, "rows": "8-9"}]
     assert found["siblings"] == [{"label": "North", "row": 4, "rows": "5-6"}]
     assert found["uncertain"] == []
-    assert tools.describe("D5").startswith("D5 = 12 | row: Alpha | column: Staff by region | section: North (row 4)")
+    assert tools.describe("D5").startswith("D5 = 12 | row: Alpha | column: Staff by region > 2019 | section: North (row 4)")
     assert tools.around("D8", rows=1, cols=1).splitlines() == [
         "row 7: (empty)", "row 8: C8=30 | *D8=35", "row 9: C9=40 | D9=45",
     ]
@@ -277,12 +278,90 @@ def test_an_unsure_walk_asks_the_vision_model_about_the_area_a_few_times():
     assert len(asked) == 3  # at most three images per question
 
 
+def _stacked_sections_sheet() -> openpyxl.Workbook:
+    """A title, a header row of years written as text, two stacked section rows merged across, then the data."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Exposure statistics"
+    sheet["A3"], sheet["C3"], sheet["D3"] = "Region", "2017", "2018"
+    for row, label in ((4, "Measure: river flooding"), (5, "Unit: percent")):
+        sheet[f"A{row}"] = label
+        sheet.merge_cells(f"A{row}:D{row}")
+    for row, (region, first, second) in enumerate([("North", 1.5, 2.5), ("South", 3.0, 4.0)], start=6):
+        sheet[f"A{row}"], sheet[f"C{row}"], sheet[f"D{row}"] = region, first, second
+    return workbook
+
+
+def test_headers_pass_stacked_sections_to_the_years_written_as_text():
+    found = SheetTools(_stacked_sections_sheet()).headers("D7", look=False)
+    assert found["column_headers"][-1] == "2018"
+    assert found["sections"][0] == {"label": "Measure: river flooding / Unit: percent", "row": 4, "rows": "6-7"}
+    assert found["block"]["starts"] == "row 5 has no data (label 'Unit: percent')"
+
+
+def _titled_table(header: list[Any], rows: list[list[Any]]) -> openpyxl.Workbook:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Report title"])
+    sheet.append([])
+    sheet.append(header)
+    for row in rows:
+        sheet.append(row)
+    return workbook
+
+
+def test_headers_give_a_label_cell_of_the_body_its_column_header():
+    workbook = _titled_table(["School", "State", "Loans"], [[f"School {i}", "AK" if i < 15 else "AL", i * 10] for i in range(30)])
+    found = SheetTools(workbook).headers("B30", look=False)
+    assert found["column_headers"] == ["State"] and found["row_labels"] == ["School 26"]
+    assert found["block"]["starts"] == "row 3 is the header"
+
+
+def test_headers_read_a_placeholder_in_the_data_as_a_number():
+    workbook = _titled_table(["Region", "Cases", "Rate"], [[f"R{i}", "-" if i % 3 == 0 else i * 5, ".." if i % 3 == 0 else 0.5] for i in range(30)])
+    found = SheetTools(workbook).headers("B31", look=False)
+    assert found["column_headers"] == ["Cases"] and found["row_labels"] == ["R27"]
+    assert found["block"] == {"rows": "4-33", "starts": "row 3 is the header", "ends": "end of sheet"}
+
+
+def test_headers_take_repeated_text_for_data_where_no_number_is_near():
+    workbook = _titled_table(["Name", "State", "Grade"], [[f"P{i}", "AK" if i < 15 else "AL", "B"] for i in range(30)])
+    found = SheetTools(workbook).headers("B30", look=False)
+    assert found["column_headers"] == ["State"] and found["block"]["starts"] == "row 3 is the header"
+    texts = _titled_table(["Region", "2019", "2020"], [[f"R{i}", str(i * 3), str(i * 4)] for i in range(30)])
+    assert SheetTools(texts).headers("C30", look=False)["column_headers"] == []  # numbers written as text are data here
+
+
+def test_row_labels_keep_codes_written_as_text_and_the_label_columns():
+    workbook = _titled_table(
+        ["Grade", "Gender", "Number", "Reporting", "Percent"],
+        [["3", "Male", 1436, "1-3", 58.6], [None, "Female", 1013, "1-3", 41.4]],
+    )
+    tools = SheetTools(workbook)
+    assert tools.headers("C4", look=False)["row_labels"] == ["3", "Male"]
+    assert tools.headers("E4", look=False)["row_labels"] == ["3", "Male", "1-3"]
+    assert tools.headers("A4", look=False)["uncertain"] == []  # a label in the first column needs no row label
+
+
+def test_headers_count_a_merged_header_once():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "Students by grade"
+    sheet.merge_cells("A1:B1")
+    sheet["A3"], sheet["B3"], sheet["B5"] = "Grade", "Total students", "Number"
+    sheet.merge_cells("A3:A5")
+    sheet.merge_cells("B3:B4")
+    for row, (grade, count) in enumerate([("1", 10), ("2", 20), ("3", 30)], start=6):
+        sheet[f"A{row}"], sheet[f"B{row}"] = grade, count
+    assert SheetTools(workbook).headers("B7", look=False)["column_headers"] == ["Students by grade", "Total students", "Number"]
+
+
 def test_the_vision_area_skips_empty_cells_and_never_cuts_a_merged_cell():
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet["A1"] = "A title over the table"
     sheet.merge_cells("A1:F1")
-    sheet["B3"] = 7
+    sheet["A3"], sheet["B3"] = 5, 7
     asked = []
     tools = SheetTools(workbook, look=lambda ref, question, sheet: asked.append(ref) or "a title row above")
     assert "vision" not in tools.headers("B4")  # empty: nothing to ask about
@@ -440,7 +519,7 @@ def test_look_is_unavailable_without_a_vision_model(tools: SheetTools):
 def test_reverse_facts_give_the_meaning_of_the_cells_and_their_values(tools: SheetTools):
     ledger = Ledger("q")
     facts = reverse_facts(tools, ledger, Evidence("n1", 1, 1, "search_sheet", "", True, 35, ["D8"]))
-    assert facts[1].strip().startswith("D8 = 35 | row: Alpha | column: Staff by region | section: South (row 7)")
+    assert facts[1].strip().startswith("D8 = 35 | row: Alpha | column: Staff by region > 2019 | section: South (row 7)")
     assert "the cells hold the reported values" in facts
 
     facts = reverse_facts(tools, ledger, Evidence("n1", 1, 1, "search_sheet", "", True, [12, 99], ["D5", "D8"]))
@@ -730,7 +809,7 @@ def test_a_refuting_check_must_be_ruled_on_before_synthesis_then_shows_in_one_li
     )
     result = _run(tmp_path, workbook_files, llm, checks=("reverse",))
 
-    assert "D8 = 35 | row: Alpha | column: Staff by region | section: South" in llm.prompts["check"][0]
+    assert "D8 = 35 | row: Alpha | column: Staff by region > 2019 | section: South" in llm.prompts["check"][0]
     step = llm.prompts["reason"][2]
     assert "check reverse: REFUTED - the North row fits the need (cells: D5)" in step and "RULE ON IT" in step
     assert "Checks to rule on: n1." in step
