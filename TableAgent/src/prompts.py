@@ -175,9 +175,18 @@ Reply with one JSON object, then this turn's Python in one ```python block after
 
 INSPECTOR_SYSTEM_PROMPT_WITH_LOOK = INSPECTOR_SYSTEM_PROMPT.replace(SHEET_TOOLS, f"{SHEET_TOOLS}\n{LOOK_TOOL}")
 
+RAW_WORKBOOK_TEXT = """The variable `workbook` is the workbook opened with openpyxl (`openpyxl.load_workbook(path, data_only=True)`): read it in your own code, e.g. `workbook.sheetnames`, `ws = workbook["<name>"]`, `ws.iter_rows(min_row=1, max_row=20, values_only=True)`, `ws.cell(row=8, column=4).value`. Cells hold their last saved values; a merged cell holds its value in its top-left cell only (the others are None; `ws.merged_cells.ranges` lists the merged ranges). A cell's format is in `cell.font` (`.b`, `.i`, `.color`), `cell.fill.fgColor` and `cell.alignment.indent`."""
+
 # The Inspector's text that names a tool, and what it says when the tool is switched off (QASettings.disabled_tools).
-# find goes first: its line names describe. headers and describe are switched off together.
+# all goes first (its first swaps hold the whole tool list), then find (its line names describe). headers and
+# describe are switched off together.
 TOOL_TEXT_OFF = {
+    "all": (
+        (f"{SHEET_TOOLS}\n{LOOK_TOOL}", RAW_WORKBOOK_TEXT),
+        (SHEET_TOOLS, RAW_WORKBOOK_TEXT),
+        ("read their format with `sheet.formats` and select by it", "read their format in code and select by it"),
+        ("Read the window named in the instruction with `sheet.read`, including", "Read the window named in the instruction, including"),
+    ),
     "find": (
         (f"\n{FIND_TOOL}", ""),
         ("Find each label of the need with `sheet.find(label)`, then", "Find each label of the need in code, then"),
@@ -195,6 +204,8 @@ TOOL_TEXT_OFF = {
 
 def without_tools(text: str, tools: tuple[str, ...]) -> str:
     """The Inspector's `text` with the given tools left out; unchanged when none is."""
+    if "all" in tools:
+        tools = tuple(TOOL_TEXT_OFF)
     for tool, swaps in TOOL_TEXT_OFF.items():
         if tool in tools:
             for old, new in swaps:

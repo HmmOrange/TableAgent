@@ -10,6 +10,7 @@ QA_CHECKS = ("reverse", "independent", "debate")  # see src/checker.py
 CHECKER_VIEWS = ("grid", "image", "frame")
 START_VIEWS = ("text", "none")
 SWITCHABLE_TOOLS = ("find", "headers", "describe")  # Inspector tools that disabled_tools may switch off
+ALL_TOOLS = "all"  # disabled_tools: [all] leaves the Inspector only the openpyxl workbook
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,8 @@ class QASettings:
     synthesis_check: a Checker reviews how the answer was computed before the final review.
     inspector_max_turns: turns of one inspection, before the turn that only reports (src/inspector.py MAX_TURNS).
     max_returns: times the answer review may send the loop back (src/ledger.py MAX_RETURNS); 0 skips the review.
-    disabled_tools: Inspector tools switched off, among find, headers and describe (headers and describe together).
+    disabled_tools: Inspector tools switched off, among find, headers and describe (headers and describe together);
+        [all] switches off every tool: the Inspector reads the openpyxl workbook in its own code.
     start_view: what the starting plans are shown of the workbook: the text preview, or none (sheet names and sizes
         only). The Checkers keep the text preview.
     save_artifacts: write each question's trace, ledger, events and code cells.
@@ -102,11 +104,15 @@ def _count(value: Any, key: str) -> int:
 
 
 def _tools(value: Any) -> tuple[str, ...]:
-    """Inspector tools to switch off: a list or a comma-separated string among find, headers, describe."""
+    """Inspector tools to switch off: a list or a comma-separated string among find, headers, describe; or all."""
     names = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
     tools = tuple(str(name).strip().lower() for name in names if str(name).strip())
+    if tools == (ALL_TOOLS,):
+        return tools
     if any(name not in SWITCHABLE_TOOLS for name in tools) or len(set(tools)) != len(tools):
-        raise ValueError(f"table_agent.disabled_tools must list distinct tools among: {', '.join(SWITCHABLE_TOOLS)}")
+        raise ValueError(
+            f"table_agent.disabled_tools must list distinct tools among: {', '.join(SWITCHABLE_TOOLS)}, or be [all]"
+        )
     if ("headers" in tools) != ("describe" in tools):
         raise ValueError("table_agent.disabled_tools: headers and describe are switched off together")
     return tools

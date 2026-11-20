@@ -47,14 +47,19 @@ class Inspector:
     def __init__(
         self, llm: CountingLLM, notebook: Notebook, tools: SheetTools,
         system_prompt: str = INSPECTOR_SYSTEM_PROMPT, max_turns: int = MAX_TURNS,
-        strategy_texts: dict[str, str] = STRATEGY_TEXTS,
+        strategy_texts: dict[str, str] = STRATEGY_TEXTS, raw_workbook: bool = False,
     ):
+        """`raw_workbook`: the notebook holds only the openpyxl workbook, without the formats found in code."""
         self.llm = llm
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.strategy_texts = strategy_texts
         self.notebook = notebook
         self.tools = tools
+        self.raw_workbook = raw_workbook
+        if raw_workbook:
+            self.formats = ""
+            return
         found = legends(tools.workbook.worksheets)
         self.formats = INSPECTOR_LEGEND_TEXT.format(legends=legend_notes(found)) if found else ""  # added to the instruction
         if found:
@@ -155,7 +160,7 @@ class Inspector:
             strategy_text=self.strategy_texts[strategy],
             instruction=(instruction or "(none)") + self.formats,
             earlier=("Earlier attempts for this need:\n" + "\n".join(earlier) + "\n") if earlier else "",
-            sheets="; ".join(self.tools.sheets()) + " (listed here: do not call sheet.sheets())",
+            sheets="; ".join(self.tools.sheets()) + ("" if self.raw_workbook else " (listed here: do not call sheet.sheets())"),
             variable=need.variable,
             transcript=transcript(turns),
             turn=turn,

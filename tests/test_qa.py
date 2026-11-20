@@ -882,7 +882,8 @@ def test_settings_default_to_the_current_limits_and_check_the_ablation_values():
     assert QASettings.from_config({"start_view": "none"}).start_view == "none"
     chosen = QASettings.from_config({"disabled_tools": "find, headers, describe", "max_returns": 0, "inspector_max_turns": 4})
     assert (chosen.disabled_tools, chosen.max_returns, chosen.inspector_max_turns) == (("find", "headers", "describe"), 0, 4)
-    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"max_returns": -1}, {"inspector_max_turns": 0}, {"start_view": "image"}):
+    assert QASettings.from_config({"disabled_tools": ["all"]}).disabled_tools == ("all",)
+    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"disabled_tools": ["all", "find"]}, {"max_returns": -1}, {"inspector_max_turns": 0}, {"start_view": "image"}):
         with pytest.raises(ValueError):
             QASettings.from_config(bad)
 
@@ -920,6 +921,18 @@ def test_tools_switched_off_leave_the_inspector_prompts_and_its_notebook(tmp_pat
         assert f"sheet.{name}" not in llm.inspect_systems[0] and f"sheet.{name}" not in llm.prompts["inspect"][0]
     assert "sheet.read" in llm.inspect_systems[0]
     assert "Alpha" in llm.prompts["inspect"][1] and "sheet.find is not available" in llm.prompts["inspect"][1]
+
+
+def test_all_tools_switched_off_leave_the_inspector_only_the_openpyxl_workbook(tmp_path, workbook_files):
+    tried = {"thought": "Read it.", "code": "print(workbook['Data']['D8'].value)\nsheet.read('D8')", "done": False}
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [tried, SOUTH_EVIDENCE], [PARTS])
+    result = _run(tmp_path, workbook_files, llm, disabled_tools=("all",))
+
+    assert result.answer == "35"
+    for text in (llm.inspect_systems[0], llm.prompts["inspect"][0]):
+        assert "sheet." not in text and "`formats`" not in text
+    assert "openpyxl" in llm.inspect_systems[0] and "Find each label of the need in code" in llm.prompts["inspect"][0]
+    assert "35" in llm.prompts["inspect"][1] and "name 'sheet' is not defined" in llm.prompts["inspect"][1]
 
 
 def test_inspector_turns_review_returns_and_artifacts_follow_the_settings(tmp_path, workbook_files):

@@ -176,8 +176,12 @@ class Orchestrator:
         self.start_view = start_view
         self.ledger = Ledger(question, max_returns=max_returns)
         tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
-        sheet = WithoutTools(tools, disabled_tools) if disabled_tools else tools
-        self.notebook = Notebook({"sheet": sheet, "pd": pd, "np": np})
+        raw_workbook = "all" in disabled_tools
+        if raw_workbook:  # its own copy: code that changes the workbook cannot reach the tools of the Checkers
+            self.notebook = Notebook({"workbook": openpyxl.load_workbook(workbook_path, data_only=True), "pd": pd, "np": np})
+        else:
+            sheet = WithoutTools(tools, disabled_tools) if disabled_tools else tools
+            self.notebook = Notebook({"sheet": sheet, "pd": pd, "np": np})
         self.preview = workbook_preview(workbook, workbook_path.name, excluded_sheet_names, question=question)
         excluded = excluded_sheet_names or set()
         self.sheets = [ws for ws in workbook.worksheets if ws.title.strip().casefold() not in excluded]
@@ -189,6 +193,7 @@ class Orchestrator:
             without_tools(INSPECTOR_SYSTEM_PROMPT_WITH_LOOK if vision is not None else INSPECTOR_SYSTEM_PROMPT, disabled_tools),
             inspector_max_turns,
             {name: without_tools(text, disabled_tools) for name, text in STRATEGY_TEXTS.items()},
+            raw_workbook,
         )
         self.checker = Checker(llm, tools, checks, sees_value, view, self.preview) if checks else None
         self.synthesis_check = synthesis_check
