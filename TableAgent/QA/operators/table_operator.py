@@ -10,7 +10,9 @@ from TableAgent.QA.operators.range_operator import RangeOperator
 from TableAgent.QA.operators.workbook_operator import WorkbookOperator
 from TableAgent.QA.operators.filter_operator import FilterOperator
 from TableAgent.QA.operators.multitab_operator import MultiTableOperator
+from TableAgent.QA.operators.media_operator import MEDIA_COLUMN, MediaOperator
 from TableAgent.pipeline.retrieval import TableCandidate
+from TableAgent.utils import parse_a1_range
 
 class TableOperators(BaseOperator):
     """
@@ -27,11 +29,15 @@ class TableOperators(BaseOperator):
         self._workbook = WorkbookOperator(env)
         self._filter = FilterOperator(env)
         self._multitab = MultiTableOperator(env)
+        self._media = MediaOperator(env)
         self._catalog_sources = (self._structure, self._range, self._workbook, self._filter, self._multitab)
 
     def operator_catalog(self) -> str:
         """Return prompt-ready descriptions and examples for the exposed operators."""
         sections = [op.describe() for op in self._catalog_sources]
+        # Sheets without pictures keep the catalog they always had.
+        if self._media.has_media():
+            sections.append(self._media.describe())
         sections.append(
             "calculation: Write normal Python/pandas/numpy code for arithmetic, aggregation, "
             "filtering, joins, formatting, and final answer construction. For example: "
@@ -80,11 +86,19 @@ class TableOperators(BaseOperator):
             sheet,
         )
         if not has_headers:
-            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            return self._with_range_media(
+                self._workbook.read_range_as_dataframe(table_range, has_headers=False),
+                table_range,
+                table_range.start_row,
+            )
 
         header_ranges = [header.header_range for header in headers if header.header_range is not None]
         if not header_ranges:
-            return self._workbook.read_range_as_dataframe(table_range, has_headers=False)
+            return self._with_range_media(
+                self._workbook.read_range_as_dataframe(table_range, has_headers=False),
+                table_range,
+                table_range.start_row,
+            )
 
         data_start_row = max(header_range.end_row for header_range in header_ranges) + 1
         if data_start_row > table_range.end_row:
@@ -113,7 +127,7 @@ class TableOperators(BaseOperator):
         if len(set(column_ids)) == len(column_ids):
             if not frame.columns.is_unique:
                 raise ValueError("Logical table DataFrame contains duplicate column names.")
-            return frame
+            return self._with_range_media(frame, data_range, data_range.start_row)
 
         collapsed: dict[str, pd.Series] = {}
         for column_id in dict.fromkeys(column_ids):
@@ -146,7 +160,39 @@ class TableOperators(BaseOperator):
         result = pd.DataFrame(collapsed, index=frame.index)
         if not result.columns.is_unique:
             raise ValueError("Logical table DataFrame contains duplicate column names after collapse.")
-        return result
+        return self._with_range_media(result, data_range, data_range.start_row)
+
+    def _with_media_column(
+        self,
+        frame: pd.DataFrame,
+        sheet: str,
+        rows: List[int],
+        start_col: int,
+        end_col: int,
+    ) -> pd.DataFrame:
+        """Add the picture tokens of each sheet row; rows without pictures leave the frame unchanged."""
+        if frame.empty or MEDIA_COLUMN in frame.columns or len(rows) != len(frame.index):
+            return frame
+        tokens = self._media.tokens_for_rows(sheet, rows, start_col=start_col, end_col=end_col)
+        if tokens is None:
+            return frame
+        # object dtype keeps None for rows without pictures (a string column would hold NaN, which is truthy).
+        return frame.assign(**{MEDIA_COLUMN: pd.Series(tokens, index=frame.index, dtype=object)})
+
+    def _with_range_media(self, frame: pd.DataFrame, cell_range: CellRange, first_row: int) -> pd.DataFrame:
+        sheet = cell_range.sheet or self.env.get_active_sheet_name()
+        rows = list(range(first_row, first_row + len(frame.index)))
+        return self._with_media_column(frame, sheet, rows, cell_range.start_col, cell_range.end_col)
+
+    # Picture operators
+    def list_media(self, sheet: str = "", table_id: Optional[str] = None) -> pd.DataFrame:
+        return self._media.list_media(sheet=sheet, table_id=table_id)
+
+    def find_same_media(self, media_id: str) -> pd.DataFrame:
+        return self._media.find_same_media(media_id)
+
+    def describe_media(self, media_id: str, question: str = "") -> str:
+        return self._media.describe_media(media_id, question=question)
 
     # Range operators
     def resolve_ranges(
@@ -190,7 +236,17 @@ class TableOperators(BaseOperator):
         return self._workbook.read_range_flat(range_or_a1, sheet)
 
     def read_range_as_dataframe(self, range_or_a1: Union[CellRange, str], sheet: str = "", has_headers: bool = True) -> pd.DataFrame:
-        return self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
+        frame = self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
+        try:
+            cell_range = parse_a1_range(range_or_a1, sheet) if isinstance(range_or_a1, str) else range_or_a1
+        except Exception:
+            return frame
+        if sheet and not cell_range.sheet:
+            cell_range = CellRange(cell_range.start_row, cell_range.start_col, cell_range.end_row, cell_range.end_col, sheet)
+        span = cell_range.end_row - cell_range.start_row + 1
+        # The first row became the column names when there was more than one row.
+        first_row = cell_range.start_row + (1 if has_headers and span > 1 else 0)
+        return self._with_range_media(frame, cell_range, first_row)
 
     def sheet_dimensions(self, sheet: str = "") -> dict[str, int | str]:
         return self._workbook.sheet_dimensions(sheet)
@@ -204,12 +260,21 @@ class TableOperators(BaseOperator):
         min_col: int = 1,
         max_col: int | None = None,
     ) -> pd.DataFrame:
-        return self._workbook.read_sheet_as_dataframe(
+        frame = self._workbook.read_sheet_as_dataframe(
             sheet,
             min_row=min_row,
             max_row=max_row,
             min_col=min_col,
             max_col=max_col,
+        )
+        sheet_name = sheet or self.env.get_active_sheet_name()
+        # The frame is indexed by sheet row number.
+        return self._with_media_column(
+            frame,
+            sheet_name,
+            [int(row) for row in frame.index],
+            min_col,
+            min_col + len(frame.columns) - 1,
         )
 
     # Value filter / sparse selection operators

@@ -170,6 +170,8 @@ class TableQARunner:
         })
         
         self.llm_client = TokenCountingLLM(llm_client) if llm_client is not None else None
+        # operators.describe_media reads pictures with the answer model when it accepts images.
+        self.env.vision_client = self.llm_client
         self.planner = TableQAPlanner(self.env, llm_client=self.llm_client)
         
         # Store table_id if provided in config
