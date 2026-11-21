@@ -11,6 +11,7 @@ from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
+from urllib.parse import quote
 
 import openpyxl
 import pandas as pd
@@ -32,10 +33,41 @@ from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
 from TableAgent.schema import EvalSample
 from service.artifact_rebuild import rebuild_artifacts as rebuild_table_agent_artifacts
+from TableAgent.utils.workbook_media import index_workbook_media, render_media_tokens
 
 
 Stage = Literal["structure", "qa", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
+# Document Portal route that serves one picture of a stored workbook to a reader.
+SHEET_MEDIA_URL = "/api/v1/documents/{document_id}/spreadsheet-preview/media?path={media_path}"
+
+
+def render_answer_media(
+    answer: str,
+    workbook_path: str | Path,
+    artifacts: Iterable[dict[str, Any]],
+) -> str:
+    """Turn the answer's ``[[media:<id>]]`` tokens into images of the stored document."""
+    if "[[media:" not in str(answer):
+        return answer
+    document_id = next(
+        (
+            str(artifact.get("document_id") or "").strip()
+            for artifact in artifacts
+            if str(artifact.get("document_id") or "").strip()
+        ),
+        "",
+    )
+
+    def url_for(item: Any) -> str | None:
+        if not document_id:
+            return None
+        return SHEET_MEDIA_URL.format(
+            document_id=quote(document_id, safe=""),
+            media_path=quote(item.media_path, safe="/"),
+        )
+
+    return render_media_tokens(str(answer), index_workbook_media(workbook_path), url_for=url_for)
 
 
 class TableAgentService:
@@ -446,7 +478,11 @@ class TableAgentService:
                     {
                         "workbook": workbook_name,
                         "sheets": [sheet for sheet, _ in structures],
-                        "answer": answer_response.content,
+                        "answer": render_answer_media(
+                            answer_response.content,
+                            Path(by_name[workbook_name]["path"]),
+                            candidates,
+                        ),
                         "qa": public_qa_info,
                         "candidates": [
                             {
@@ -895,7 +931,11 @@ class TableAgentService:
                 "answers": [
                     {
                         "query": normalized_query,
-                        "answer": answer_response.content,
+                        "answer": render_answer_media(
+                            answer_response.content,
+                            candidate.workbook_path,
+                            selected_artifacts,
+                        ),
                         "workbook": selected_workbook,
                         "workbooks": [selected_workbook],
                         "sheets": [sheet for sheet, _ in structure_paths],
