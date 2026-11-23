@@ -364,19 +364,34 @@ class TableQARunner:
                 "error": error_msg,
                 "previous_plan": self._plan_payload(plan),
             })
-            try:
-                plan = self.planner.plan(
-                    question,
-                    table_id=table_id,
-                    failure_context=failure_context,
-                    previous_plan=self._plan_payload(plan),
-                )
-            except Exception as exc:
-                error_msg = f"Replanning failed after execution error ({error_msg}): {exc}"
-                self.env.logger.log_event("replanning_error", {
-                    "attempt": replan_count,
-                    "error": str(exc),
-                })
+            # An invalid plan is a fault of that one planner reply: ask again, within the
+            # same replanning budget, telling the planner what was wrong.
+            plan_error: str | None = None
+            while True:
+                try:
+                    plan = self.planner.plan(
+                        question,
+                        table_id=table_id,
+                        failure_context=(
+                            failure_context
+                            if plan_error is None
+                            else f"{failure_context}\n\nThe last corrected plan was invalid: {plan_error}"
+                        ),
+                        previous_plan=self._plan_payload(plan),
+                    )
+                    plan_error = None
+                    break
+                except Exception as exc:
+                    plan_error = str(exc)
+                    self.env.logger.log_event("replanning_error", {
+                        "attempt": replan_count,
+                        "error": plan_error,
+                    })
+                    if replan_count >= self.max_replans:
+                        break
+                    replan_count += 1
+            if plan_error is not None:
+                error_msg = f"Replanning failed after execution error ({error_msg}): {plan_error}"
                 break
             self.env.logger.log_event("replanning_complete", {
                 "attempt": replan_count,
@@ -567,8 +582,24 @@ class TableQARunner:
         )
         serialized = self._serialize_final_value(final_val)
         answer = serialized if pure_common_info else self._humanize_header_ids(serialized)
+        answer = self._with_described_pictures(answer)
         self.env.execution_namespace["final_answer"] = answer
         return answer
+
+    def _with_described_pictures(self, answer: str) -> str:
+        """Show the row pictures an answer describes in words but left out."""
+        media = getattr(getattr(self.env, "operators", None), "_media", None)
+        pictures_left_out = getattr(media, "pictures_left_out", None)
+        if not callable(pictures_left_out):
+            return answer
+        try:
+            tokens = pictures_left_out(answer)
+        except Exception:
+            return answer
+        if not tokens:
+            return answer
+        self.env.logger.log_event("described_pictures_restored", {"tokens": tokens})
+        return f"{answer.rstrip()}\n\n{' '.join(tokens)}"
 
     @classmethod
     def _serialize_final_value(cls, value: Any) -> str:

@@ -1147,3 +1147,45 @@ def test_common_info_plan_uses_deterministic_route(tmp_path: Path):
         assert all(output.category == "common_info" for output in result.subtask_outputs)
     finally:
         runner.close()
+
+
+def test_runner_asks_again_when_a_corrected_plan_is_invalid(monkeypatch):
+    runner = TableQARunner(
+        STRUCTURE_PATH,
+        WORKBOOK_PATH,
+        llm_client=FakeLLM({"Table Structure": _two_step_plan_json()}),
+        policy=MockActionPolicy(simulate_error=True),
+        config={"table_agent": {"qa_max_retries": 0, "qa_max_replans": 3}},
+    )
+    original_plan = runner.planner.plan
+    contexts = []
+
+    def flaky_plan(*args, **kwargs):
+        contexts.append(kwargs.get("failure_context"))
+        if len(contexts) == 2:
+            raise ValueError("subtask is missing its scope")
+        return original_plan(*args, **kwargs)
+
+    monkeypatch.setattr(runner.planner, "plan", flaky_plan)
+
+    result = runner.run("What is the average score of all people?")
+
+    # The invalid corrected plan does not end the run: the planner is asked again and told why.
+    assert len(contexts) >= 3
+    assert "The last corrected plan was invalid: subtask is missing its scope" in contexts[2]
+    assert not str(result.error or "").startswith("Replanning failed")
+
+
+def test_quoted_file_names_do_not_decide_the_answer_language():
+    from TableAgent.QA.language import required_answer_language
+
+    vietnamese = (
+        "Hãy liệt kê tên các sản phẩm có ảnh ghi chú trong file "
+        "LV01_설비_REPORT 베트남공장 요청품 진행사항(본사용)2026.03.18 (code)_KR_202603.26.xlsx"
+    )
+    korean = "LV01_SMT_QA_CHECK-SHEET_Check sheet Audit ECO partner 2026_EN_2026.09.23.XLSX 파일의 체크리스트를 보여주세요"
+
+    assert required_answer_language(vietnamese) == "Vietnamese"
+    assert required_answer_language(korean) == "Korean"
+    # A question made only of a file name still gets a language.
+    assert required_answer_language("LV01_설비_REPORT.xlsx") == "Korean"

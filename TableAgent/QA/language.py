@@ -15,10 +15,26 @@ _VIETNAMESE_MARKERS = re.compile(
 )
 
 
+_FILE_EXTENSION = r"\.(?:xlsx|xlsm|xls|csv|pdf|docx?|pptx?|txt)\b"
+# A file name quoted in the question, from its first underscore-joined part to its extension;
+# it may hold spaces ("LV01_설비_REPORT 베트남공장 ... _KR_2026.xlsx").
+_FILE_NAME_SPAN = re.compile(r"\S*_\S*.*?" + _FILE_EXTENSION, flags=re.IGNORECASE)
+# Identifier-like words left over: joined by underscores or ending in a file extension.
+_IDENTIFIER_WORD = re.compile(r"\S*_\S*|\S+" + _FILE_EXTENSION, flags=re.IGNORECASE)
+
+
+def _without_identifiers(text: str) -> str:
+    """The question without quoted file names and identifiers, which are not its prose."""
+    stripped = _IDENTIFIER_WORD.sub(" ", _FILE_NAME_SPAN.sub(" ", text))
+    # Keep the original when nothing but identifiers was written.
+    return stripped if re.search(r"[^\W\d_]", stripped) else text
+
+
 def required_answer_language(question: str) -> str:
     """Resolve an explicit target language from the grammatical question text."""
     text = _QUESTION_WRAPPER.sub("", str(question or "").strip())
     text = _PARENTHETICAL_GLOSS.sub("", text)
+    text = _without_identifiers(text)
 
     if re.search(r"[\uac00-\ud7af]", text):
         return "Korean"

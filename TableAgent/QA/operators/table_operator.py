@@ -100,6 +100,10 @@ class TableOperators(BaseOperator):
                 table_range.start_row,
             )
 
+        bands = self._header_bands(headers)
+        if len(bands) > 1:
+            return self._read_table_blocks(bands, table_range)
+
         data_start_row = max(header_range.end_row for header_range in header_ranges) + 1
         if data_start_row > table_range.end_row:
             return pd.DataFrame()
@@ -110,6 +114,76 @@ class TableOperators(BaseOperator):
             table_range.end_col,
             sheet,
         )
+        frame = self._logical_frame(headers, data_range)
+        return self._with_range_media(frame, data_range, data_range.start_row)
+
+    @staticmethod
+    def _header_bands(headers: List[Header]) -> List[tuple[int, int, List[Header]]]:
+        """Header blocks stacked down a table: ``(first header row, last header row, headers)``.
+
+        Column headers whose rows touch or overlap form one block, and a header
+        always shares the block of its sub-headers, however far below they sit.
+        A table laid out with row headers is left as a single block.
+        """
+        with_ranges = [header for header in headers if header.header_range is not None]
+        if not with_ranges or any(str(header.orientation).lower().startswith("row") for header in with_ranges):
+            return [(0, 0, with_ranges)]
+        # Each header starts with the rows of itself and every sub-header below it.
+        spans: dict[int, tuple[int, int]] = {}
+
+        def span_of(header: Header) -> tuple[int, int]:
+            start, end = header.header_range.start_row, header.header_range.end_row  # type: ignore[union-attr]
+            for child in header.sub_headers or []:
+                if child.header_range is not None:
+                    child_start, child_end = span_of(child)
+                    start, end = min(start, child_start), max(end, child_end)
+            spans[id(header)] = (start, end)
+            return start, end
+
+        for header in with_ranges:
+            span_of(header)
+        bands: List[tuple[int, int, List[Header]]] = []
+        for header in sorted(with_ranges, key=lambda header: spans[id(header)]):
+            start, end = spans[id(header)]
+            if bands and start <= bands[-1][1] + 1:
+                first, last, members = bands[-1]
+                bands[-1] = (first, max(last, end), members + [header])
+            else:
+                bands.append((start, end, [header]))
+        return bands
+
+    def _read_table_blocks(self, bands: List[tuple[int, int, List[Header]]], table_range: CellRange) -> pd.DataFrame:
+        """Rows of every header block, each named by its own headers.
+
+        A block's rows run from below its headers to just above the next block's
+        headers. The ``block`` column holds the block's first header label and
+        the index is the sheet row number.
+        """
+        frames = []
+        for position, (_, last_header_row, members) in enumerate(bands):
+            start = last_header_row + 1
+            end = bands[position + 1][0] - 1 if position + 1 < len(bands) else table_range.end_row
+            if start > end:
+                continue
+            data_range = CellRange(start, table_range.start_col, end, table_range.end_col, table_range.sheet)
+            frame = self._logical_frame(members, data_range)
+            frame.index = pd.RangeIndex(start, end + 1)
+            # The block is named by its top-left header.
+            first = min(members, key=lambda header: (header.header_range.start_row, header.header_range.start_col))  # type: ignore[union-attr]
+            frame.insert(0, "block", first.label)
+            # object dtype keeps whole numbers whole when another block has no value in that column.
+            frames.append(self._with_range_media(frame, data_range, start).astype(object))
+        if not frames:
+            return pd.DataFrame()
+        combined = pd.concat(frames, sort=False)
+        if MEDIA_COLUMN in combined.columns:
+            # Keep the picture column last, as single-block tables have it.
+            combined = combined[[column for column in combined.columns if column != MEDIA_COLUMN] + [MEDIA_COLUMN]]
+        # Fields one block does not have are None, not NaN.
+        return combined.astype(object).where(combined.notna(), None)
+
+    def _logical_frame(self, headers: List[Header], data_range: CellRange) -> pd.DataFrame:
+        """``data_range`` read as one column per header id."""
         rows = self._workbook.read_range(data_range, expand_merged=True)
         column_ids = []
         for column in range(data_range.start_col, data_range.end_col + 1):
@@ -127,7 +201,7 @@ class TableOperators(BaseOperator):
         if len(set(column_ids)) == len(column_ids):
             if not frame.columns.is_unique:
                 raise ValueError("Logical table DataFrame contains duplicate column names.")
-            return self._with_range_media(frame, data_range, data_range.start_row)
+            return frame
 
         collapsed: dict[str, pd.Series] = {}
         for column_id in dict.fromkeys(column_ids):
@@ -160,7 +234,7 @@ class TableOperators(BaseOperator):
         result = pd.DataFrame(collapsed, index=frame.index)
         if not result.columns.is_unique:
             raise ValueError("Logical table DataFrame contains duplicate column names after collapse.")
-        return self._with_range_media(result, data_range, data_range.start_row)
+        return result
 
     def _with_media_column(
         self,
@@ -176,6 +250,28 @@ class TableOperators(BaseOperator):
         tokens = self._media.tokens_for_rows(sheet, rows, start_col=start_col, end_col=end_col)
         if tokens is None:
             return frame
+        # Rows that hold pictures are labelled by sheet row number, the `row` of `list_media`,
+        # so a picture's row and the DataFrame row never need converting.
+        frame = frame.set_axis(pd.Index(rows), axis=0)
+        # A picture under a header is part of that header's value: a column named by the header
+        # id shows the picture's tokens (after any text the cell holds), so selecting the column
+        # keeps the picture. Numbers are left alone so they still compute.
+        by_header = self._media.tokens_by_header(sheet, rows, start_col=start_col, end_col=end_col)
+        for row, headers in by_header.items():
+            for header_id, header_tokens in headers.items():
+                if header_id not in frame.columns or frame.columns.tolist().count(header_id) != 1:
+                    continue
+                value = frame.at[row, header_id]
+                joined = " ".join(header_tokens)
+                if value is None or (isinstance(value, float) and pd.isna(value)) or not str(value).strip():
+                    filled = joined
+                elif isinstance(value, str):
+                    filled = f"{value.strip()} {joined}"
+                else:
+                    continue
+                if frame[header_id].dtype != object:
+                    frame[header_id] = frame[header_id].astype(object)
+                frame.at[row, header_id] = filled
         # object dtype keeps None for rows without pictures (a string column would hold NaN, which is truthy).
         return frame.assign(**{MEDIA_COLUMN: pd.Series(tokens, index=frame.index, dtype=object)})
 
@@ -187,6 +283,9 @@ class TableOperators(BaseOperator):
     # Picture operators
     def list_media(self, sheet: str = "", table_id: Optional[str] = None) -> pd.DataFrame:
         return self._media.list_media(sheet=sheet, table_id=table_id)
+
+    def find_media(self, query: str, sheet: str = "") -> pd.DataFrame:
+        return self._media.find_media(query, sheet=sheet)
 
     def find_same_media(self, media_id: str) -> pd.DataFrame:
         return self._media.find_same_media(media_id)

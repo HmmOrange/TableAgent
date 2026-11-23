@@ -38,7 +38,12 @@ class QAEnvironment:
         self.structures = load_table_structures(structure_path)
         self.relations = load_formula_relations(structure_path)
         self.related_structures = self._load_related_structures(related_structure_paths)
-        
+        # Sheets prepared alongside the main one belong to the same workbook and the planner is
+        # shown them, so their tables are as readable as the main sheet's (the main sheet's
+        # tables stay first, and keep their id when one repeats).
+        for source in self.related_structures:
+            self.structures.setdefault(source["table_id"], source["structure"])
+
         # Load workbook (data_only=True reads evaluated values of formulas)
         self.workbook = openpyxl.load_workbook(workbook_path, data_only=True)
         

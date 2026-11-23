@@ -39,6 +39,16 @@ PIXELS_PER_POINT = 96 / 72
 PREVIEWABLE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"})
 MAX_PREVIEWABLE_BYTES = 50 * 1024 * 1024
 MEDIA_TOKEN = re.compile(r"\[\[media:([A-Za-z0-9_]+)\]\]")
+# An id written into the text without the token brackets, optionally in backticks.
+MEDIA_MENTION = re.compile(r"`?\bmedia:([A-Za-z0-9_]+)`?")
+# A bare picture id in the text ("2_C18", "1_P22_2"): sheet number, cell, optional copy number.
+MEDIA_BARE_ID = re.compile(r"(?<![\w/:.\-])(\d+_[A-Z]{1,3}\d+(?:_\d+)?)(?!\w)")
+
+
+def mentions_media(text: str) -> bool:
+    """Whether ``text`` may hold picture tokens or picture ids to render."""
+    text = str(text or "")
+    return "media:" in text or MEDIA_BARE_ID.search(text) is not None
 
 
 @dataclass(frozen=True)
@@ -358,9 +368,11 @@ def render_media_tokens(
     """Replace ``[[media:<id>]]`` tokens with Markdown images.
 
     A picture the browser cannot show, or one without a URL, keeps only its
-    location; an unknown id is dropped.
+    location; an unknown id is dropped. A known id mentioned without the token
+    brackets (``(media:1_C30)`` or a bare ``1_C30``) is a reference in the
+    text, not a picture, so it reads as the picture's location.
     """
-    if "[[media:" not in text:
+    if not mentions_media(text):
         return text
     by_id = {item.media_id: item for item in media}
 
@@ -374,6 +386,12 @@ def render_media_tokens(
             return f"`{item.location} ({item.file_type})`"
         return f"![{alt}]({url})"
 
+    def mention(match: re.Match[str]) -> str:
+        item = by_id.get(match.group(1))
+        return item.location if item is not None else match.group(0)
+
     rendered = MEDIA_TOKEN.sub(replace, text)
+    rendered = MEDIA_MENTION.sub(mention, rendered)
+    rendered = MEDIA_BARE_ID.sub(mention, rendered)
     # A dropped token leaves no trailing spaces behind.
     return re.sub(r"[ \t]+(?=\n|$)", "", rendered)
