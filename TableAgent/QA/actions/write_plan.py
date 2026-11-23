@@ -131,9 +131,13 @@ def _split_depends_on(value: Any) -> list[str]:
 def _related_structure_summary(env: Any) -> str:
     lines = []
     seen = set()
+    loaded = getattr(env, "structures", {}) or {}
     for source in getattr(env, "related_structures", []):
         structure = source.get("structure") or {}
         table_id = str(source.get("table_id") or structure.get("id") or "")
+        if loaded.get(table_id) is structure:
+            # Already summarised with the loaded tables.
+            continue
         sheet_name = str(structure.get("sheet") or "")
         table_name = str(structure.get("name") or table_id)
         key = (sheet_name, table_id, table_name)

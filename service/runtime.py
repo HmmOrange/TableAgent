@@ -33,7 +33,7 @@ from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
 from TableAgent.schema import EvalSample
 from service.artifact_rebuild import rebuild_artifacts as rebuild_table_agent_artifacts
-from TableAgent.utils.workbook_media import index_workbook_media, render_media_tokens
+from TableAgent.utils.workbook_media import index_workbook_media, mentions_media, render_media_tokens
 
 
 Stage = Literal["structure", "qa", "all"]
@@ -48,7 +48,7 @@ def render_answer_media(
     artifacts: Iterable[dict[str, Any]],
 ) -> str:
     """Turn the answer's ``[[media:<id>]]`` tokens into images of the stored document."""
-    if "[[media:" not in str(answer):
+    if not mentions_media(str(answer)):
         return answer
     document_id = next(
         (
