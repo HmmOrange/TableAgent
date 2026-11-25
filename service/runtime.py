@@ -33,13 +33,22 @@ from TableAgent.pipeline.base import PipelineOutput
 from TableAgent.pipeline.common import safe_name
 from TableAgent.schema import EvalSample
 from service.artifact_rebuild import rebuild_artifacts as rebuild_table_agent_artifacts
-from TableAgent.utils.workbook_media import index_workbook_media, mentions_media, render_media_tokens
+from TableAgent.utils.workbook_media import (
+    KIND_PICTURE,
+    index_workbook_media,
+    mentions_media,
+    render_media_tokens,
+)
 
 
 Stage = Literal["structure", "qa", "all"]
 SUPPORTED_WORKBOOK_EXTENSIONS = {".xls", ".xlsm", ".xlsx", ".xltm", ".xltx"}
 # Document Portal route that serves one picture of a stored workbook to a reader.
 SHEET_MEDIA_URL = "/api/v1/documents/{document_id}/spreadsheet-preview/media?path={media_path}"
+# Document Portal route that redraws the charts and shapes over a cell range, for charts and diagrams.
+SHEET_DRAWING_AREA_URL = (
+    "/api/v1/documents/{document_id}/spreadsheet-preview/drawing-area?sheet={sheet}&range={cells}"
+)
 
 
 def render_answer_media(
@@ -47,7 +56,11 @@ def render_answer_media(
     workbook_path: str | Path,
     artifacts: Iterable[dict[str, Any]],
 ) -> str:
-    """Turn the answer's ``[[media:<id>]]`` tokens into images of the stored document."""
+    """Turn the answer's ``[[media:<id>]]`` tokens into images of the stored document.
+
+    A picture links its image file; a chart or diagram links the drawings over
+    its cells, which the chat redraws like the document preview does.
+    """
     if not mentions_media(str(answer)):
         return answer
     document_id = next(
@@ -62,6 +75,12 @@ def render_answer_media(
     def url_for(item: Any) -> str | None:
         if not document_id:
             return None
+        if item.kind != KIND_PICTURE:
+            return SHEET_DRAWING_AREA_URL.format(
+                document_id=quote(document_id, safe=""),
+                sheet=quote(item.sheet, safe=""),
+                cells=quote(item.cells, safe=""),
+            )
         return SHEET_MEDIA_URL.format(
             document_id=quote(document_id, safe=""),
             media_path=quote(item.media_path, safe="/"),
