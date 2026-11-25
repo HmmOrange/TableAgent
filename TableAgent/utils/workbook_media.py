@@ -1,8 +1,10 @@
-"""Pictures placed on the sheets of an XLSX workbook.
+"""Pictures, charts and diagrams placed on the sheets of an XLSX workbook.
 
-openpyxl drops most drawings, so pictures are read from the package parts:
-each worksheet's drawing part lists anchored pictures, and the drawing's
-relationships point at the image files under ``xl/media/``.
+openpyxl drops most drawings, so they are read from the package parts: each
+worksheet's drawing part lists anchored pictures, whose relationships point at
+the image files under ``xl/media/``, charts (``xl/charts/chartN.xml``), and
+shapes. Shapes that belong together (boxes joined by arrows, labels drawn on a
+photo) are reported as one diagram covering their joint area.
 
 Positions follow Excel's default geometry (seven pixels per width unit,
 96 dpi row heights), the same rule the document preview uses, so a picture is
@@ -18,10 +20,12 @@ import zipfile
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 from xml.etree import ElementTree
 
 from TableAgent.utils.excel_utils import cell_to_a1
+from TableAgent.utils.workbook_charts import chart_summary, read_chart
 
 _NS = {
     "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -29,6 +33,7 @@ _NS = {
     "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
     "xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
 }
 _R_ID = f"{{{_NS['r']}}}id"
 _R_EMBED = f"{{{_NS['r']}}}embed"
@@ -38,6 +43,13 @@ PIXELS_PER_POINT = 96 / 72
 # Image types a browser shows; others (EMF, WMF, WDP) are reported but not displayed.
 PREVIEWABLE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"})
 MAX_PREVIEWABLE_BYTES = 50 * 1024 * 1024
+KIND_PICTURE = "picture"
+KIND_CHART = "chart"
+KIND_DIAGRAM = "diagram"
+# Shapes this close (pixels) are drawn together: a connector ends on the box it points at.
+DIAGRAM_GAP_PX = 6.0
+# Text of one diagram box kept in the diagram's summary.
+_DIAGRAM_TEXT_MAX_CHARS = 120
 MEDIA_TOKEN = re.compile(r"\[\[media:([A-Za-z0-9_]+)\]\]")
 # An id written into the text without the token brackets, optionally in backticks.
 MEDIA_MENTION = re.compile(r"`?\bmedia:([A-Za-z0-9_]+)`?")
@@ -53,7 +65,11 @@ def mentions_media(text: str) -> bool:
 
 @dataclass(frozen=True)
 class WorkbookMedia:
-    """One picture placement; rows and columns are 1-based like openpyxl."""
+    """One picture, chart or diagram placement; rows and columns are 1-based like openpyxl.
+
+    ``media_path`` is the image part of a picture and the chart part of a chart;
+    a diagram is drawn from the shapes of its cells, so it has none.
+    """
 
     media_id: str
     sheet: str
@@ -70,6 +86,9 @@ class WorkbookMedia:
     description: str
     sha256: str
     previewable: bool
+    kind: str = KIND_PICTURE
+    # Chart data or diagram boxes and arrows, as text the agent can read.
+    text: str = ""
 
     @property
     def token(self) -> str:
@@ -87,6 +106,8 @@ class WorkbookMedia:
 
     @property
     def file_type(self) -> str:
+        if self.kind != KIND_PICTURE:
+            return self.kind
         return posixpath.splitext(self.media_path)[1].lower().lstrip(".")
 
 
@@ -255,16 +276,267 @@ def _anchor_rect(anchor: ElementTree.Element, rows: _Axis, cols: _Axis) -> tuple
     return None
 
 
+@dataclass
+class _ShapePart:
+    shape_id: str
+    text: str
+    connector: bool
+    # A box, symbol or line rather than a plain text box.
+    drawn: bool
+    start_id: str = ""
+    end_id: str = ""
+    # Arrowheads drawn at the connector's start and end.
+    head_arrow: bool = False
+    tail_arrow: bool = False
+
+
+@dataclass
+class _DrawingUnit:
+    """One anchor taking part in diagram grouping: a shape anchor or a picture."""
+
+    rect: tuple[float, float, float, float]
+    drawing: str
+    parts: list[_ShapePart]
+    # Set for a picture: the id it is listed under.
+    media_id: str = ""
+    # Ends of a connector anchored on its own, for arrows not glued to a box.
+    ends: tuple[tuple[float, float], tuple[float, float]] | None = None
+
+
+def _hidden(properties: ElementTree.Element | None) -> bool:
+    return properties is not None and properties.get("hidden") in {"1", "true"}
+
+
+def _paragraph_text(node: ElementTree.Element | None) -> str:
+    if node is None:
+        return ""
+    paragraphs = []
+    for paragraph in node.iter(f"{{{_NS['a']}}}p"):
+        text = " ".join("".join(run.text or "" for run in paragraph.iter(f"{{{_NS['a']}}}t")).split())
+        if text:
+            paragraphs.append(text)
+    text = " ".join(paragraphs)
+    return text if len(text) <= _DIAGRAM_TEXT_MAX_CHARS else text[: _DIAGRAM_TEXT_MAX_CHARS - 1] + "…"
+
+
+def _shape_parts(anchor: ElementTree.Element) -> list[_ShapePart]:
+    """Visible shapes and connectors of an anchor; empty text boxes draw nothing and are left out."""
+    parts: list[_ShapePart] = []
+    for shape in anchor.iter(f"{{{_NS['xdr']}}}sp"):
+        properties = shape.find("xdr:nvSpPr/xdr:cNvPr", _NS)
+        if _hidden(properties):
+            continue
+        flags = shape.find("xdr:nvSpPr/xdr:cNvSpPr", _NS)
+        text_box = flags is not None and flags.get("txBox") in {"1", "true"}
+        text = _paragraph_text(shape.find("xdr:txBody", _NS))
+        if text_box and not text:
+            continue
+        parts.append(
+            _ShapePart(
+                shape_id=properties.get("id", "") if properties is not None else "",
+                text=text,
+                connector=False,
+                drawn=not text_box,
+            )
+        )
+    for connector in anchor.iter(f"{{{_NS['xdr']}}}cxnSp"):
+        properties = connector.find("xdr:nvCxnSpPr/xdr:cNvPr", _NS)
+        if _hidden(properties):
+            continue
+        start = connector.find("xdr:nvCxnSpPr/xdr:cNvCxnSpPr/a:stCxn", _NS)
+        end = connector.find("xdr:nvCxnSpPr/xdr:cNvCxnSpPr/a:endCxn", _NS)
+        head = connector.find("xdr:spPr/a:ln/a:headEnd", _NS)
+        tail = connector.find("xdr:spPr/a:ln/a:tailEnd", _NS)
+        parts.append(
+            _ShapePart(
+                shape_id=properties.get("id", "") if properties is not None else "",
+                text="",
+                connector=True,
+                drawn=True,
+                start_id=start.get("id", "") if start is not None else "",
+                end_id=end.get("id", "") if end is not None else "",
+                head_arrow=head is not None and head.get("type", "none") != "none",
+                tail_arrow=tail is not None and tail.get("type", "none") != "none",
+            )
+        )
+    return parts
+
+
+def _connector_ends(
+    anchor: ElementTree.Element,
+    rect: tuple[float, float, float, float],
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Start and end of a connector that is the anchor's only content (flips swap the corners)."""
+    connector = anchor.find("xdr:cxnSp", _NS)
+    if connector is None:
+        return None
+    transform = connector.find("xdr:spPr/a:xfrm", _NS)
+    flip_h = transform is not None and transform.get("flipH") in {"1", "true"}
+    flip_v = transform is not None and transform.get("flipV") in {"1", "true"}
+    left, top, right, bottom = rect
+    start = (right if flip_h else left, bottom if flip_v else top)
+    end = (left if flip_h else right, top if flip_v else bottom)
+    return start, end
+
+
+def _near(first: tuple[float, float, float, float], second: tuple[float, float, float, float], gap: float) -> bool:
+    return (
+        first[0] - gap <= second[2]
+        and second[0] - gap <= first[2]
+        and first[1] - gap <= second[3]
+        and second[1] - gap <= first[3]
+    )
+
+
+def _group_units(units: list[_DrawingUnit]) -> list[list[_DrawingUnit]]:
+    """Units drawn together: shapes that touch, and the pictures they are drawn on.
+
+    Two pictures side by side stay apart unless a shape joins them.
+    """
+    parent = list(range(len(units)))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    shapes = [index for index, unit in enumerate(units) if not unit.media_id]
+    for index in shapes:
+        for other in range(len(units)):
+            if other != index and _near(units[index].rect, units[other].rect, DIAGRAM_GAP_PX):
+                parent[root(index)] = root(other)
+    groups: dict[int, list[_DrawingUnit]] = {}
+    for index, unit in enumerate(units):
+        groups.setdefault(root(index), []).append(unit)
+    return list(groups.values())
+
+
+def _is_diagram(members: list[_DrawingUnit]) -> bool:
+    """Boxes or lines drawn together, or shapes drawn on a picture; a lone note or plain text boxes are not."""
+    parts = [part for unit in members for part in unit.parts]
+    pictures = [unit for unit in members if unit.media_id]
+    if not pictures:
+        return len(parts) >= 2 and any(part.drawn for part in parts)
+    if any(part.drawn for part in parts):
+        return True
+    # Only text boxes: a label written on a picture, not a caption beside it.
+    return any(
+        _near(unit.rect, picture.rect, -1.0)
+        for unit in members
+        if unit.parts
+        for picture in pictures
+    )
+
+
+def _diagram_summary(members: list[_DrawingUnit], pictures: Mapping[str, WorkbookMedia]) -> tuple[str, str]:
+    """``(title, text)`` of a diagram: its text in reading order, its arrows and the pictures it covers."""
+    ordered = sorted(members, key=lambda unit: (round(unit.rect[1]), round(unit.rect[0])))
+    names: dict[tuple[str, str], str] = {}
+    texts: list[str] = []
+    shapes = connectors = 0
+    for unit in ordered:
+        for part in unit.parts:
+            if part.connector:
+                connectors += 1
+                continue
+            shapes += 1
+            if part.text:
+                names[(unit.drawing, part.shape_id)] = part.text
+                if part.text not in texts:
+                    texts.append(part.text)
+    text_units = [unit for unit in members if len(unit.parts) == 1 and unit.parts[0].text and not unit.parts[0].connector]
+
+    def text_at(point: tuple[float, float]) -> str:
+        x, y = point
+        hits = [
+            unit
+            for unit in text_units
+            if _near(unit.rect, (x, y, x, y), DIAGRAM_GAP_PX * 2)
+        ]
+        if not hits:
+            return ""
+        best = min(hits, key=lambda unit: (unit.rect[2] - unit.rect[0]) * (unit.rect[3] - unit.rect[1]))
+        return best.parts[0].text
+
+    arrows: list[str] = []
+    for unit in ordered:
+        for part in unit.parts:
+            if not part.connector:
+                continue
+            start = names.get((unit.drawing, part.start_id), "")
+            end = names.get((unit.drawing, part.end_id), "")
+            if unit.ends is not None:
+                start = start or text_at(unit.ends[0])
+                end = end or text_at(unit.ends[1])
+            if not start or not end or start == end:
+                continue
+            if part.head_arrow and not part.tail_arrow:
+                arrows.append(f"{end} → {start}")
+            elif part.head_arrow and part.tail_arrow:
+                arrows.append(f"{start} ↔ {end}")
+            elif part.tail_arrow:
+                arrows.append(f"{start} → {end}")
+            else:
+                arrows.append(f"{start} — {end}")
+    covered = [pictures[unit.media_id] for unit in ordered if unit.media_id in pictures]
+    counts = [f"{shapes} shape{'s' if shapes != 1 else ''}"]
+    if connectors:
+        counts.append(f"{connectors} connector{'s' if connectors != 1 else ''}")
+    if covered:
+        counts.append(f"{len(covered)} picture{'s' if len(covered) != 1 else ''}")
+    lines = [f"Diagram drawn with {', '.join(counts)}."]
+    if texts:
+        lines.append("Text on it, top to bottom: " + "; ".join(f"{index}. {text}" for index, text in enumerate(texts, start=1)))
+    else:
+        lines.append("It has no text.")
+    if arrows:
+        lines.append("Arrows and lines between boxes: " + "; ".join(arrows))
+    if covered:
+        lines.append(
+            "Pictures it is drawn on: "
+            + ", ".join(f"{item.media_id} ({item.location})" for item in covered)
+            + "; describe_media reads what they show."
+        )
+    title = " / ".join(texts[:3])
+    if len(title) > 80:
+        title = title[:79] + "…"
+    return title, "\n".join(lines)
+
+
+def _placement(rect: tuple[float, float, float, float], rows: _Axis, cols: _Axis) -> dict[str, Any]:
+    """Cells under a pixel rectangle: 1-based first, last and center row and column."""
+    left, top, right, bottom = rect
+    start_row, _ = rows.locate(top)
+    start_col, _ = cols.locate(left)
+    end_row, _ = rows.locate(max(top, bottom - 1))
+    end_col, _ = cols.locate(max(left, right - 1))
+    center_row, _ = rows.locate((top + bottom) / 2)
+    center_col, _ = cols.locate((left + right) / 2)
+    return {
+        "from_row": start_row + 1,
+        "from_col": start_col + 1,
+        "to_row": end_row + 1,
+        "to_col": end_col + 1,
+        "center_row": center_row + 1,
+        "center_col": center_col + 1,
+        "width_px": round(right - left, 1),
+        "height_px": round(bottom - top, 1),
+    }
+
+
 def index_workbook_media(
     workbook_path: str | Path,
     *,
     sheets: Iterable[str] | None = None,
 ) -> list[WorkbookMedia]:
-    """Every picture of the workbook (or of ``sheets``), in sheet and drawing order.
+    """Every picture, chart and diagram of the workbook (or of ``sheets``).
 
-    An id names the sheet position and the cell under the picture's center
-    (``1_C30``; ``1_C30_2`` for a second picture there), so it reads as a
+    An id names the sheet position and the cell under the item's center
+    (``1_C30``; ``1_C30_2`` for a second item there), so it reads as a
     location and is the same whether or not ``sheets`` filters the result.
+    A sheet lists its pictures first, in drawing order, then its charts, then
+    its diagrams, so adding chart and diagram support kept every picture id.
     """
     path = Path(workbook_path)
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
@@ -289,6 +561,15 @@ def index_workbook_media(
                 continue
             rows, cols = _sheet_geometry(archive, worksheet_path)
             ids_in_cell: dict[str, int] = {}
+
+            def next_id(place: dict[str, Any]) -> str:
+                base_id = f"{sheet_number}_{cell_to_a1(place['center_row'], place['center_col'])}"
+                ids_in_cell[base_id] = ids_in_cell.get(base_id, 0) + 1
+                return base_id if ids_in_cell[base_id] == 1 else f"{base_id}_{ids_in_cell[base_id]}"
+
+            charts: list[tuple[tuple[float, float, float, float], ElementTree.Element, str]] = []
+            units: list[_DrawingUnit] = []
+            pictures: dict[str, WorkbookMedia] = {}
             for drawing_path in drawings:
                 try:
                     root = ElementTree.fromstring(archive.read(drawing_path))
@@ -299,6 +580,13 @@ def index_workbook_media(
                     rect = _anchor_rect(anchor, rows, cols)
                     if rect is None:
                         continue
+                    frame = anchor.find("xdr:graphicFrame", _NS)
+                    chart_node = frame.find(".//c:chart", _NS) if frame is not None else None
+                    if chart_node is not None:
+                        target = targets.get(chart_node.get(_R_ID, ""))
+                        if target and not _hidden(frame.find("xdr:nvGraphicFramePr/xdr:cNvPr", _NS)):
+                            charts.append((rect, frame, target[0]))
+                        continue
                     # Pictures grouped with shapes share the group's anchor.
                     for picture in anchor.iter(f"{{{_NS['xdr']}}}pic"):
                         blip = picture.find(".//a:blip", _NS)
@@ -306,7 +594,7 @@ def index_workbook_media(
                         if not target or not target[0].startswith("xl/media/"):
                             continue
                         properties = picture.find("xdr:nvPicPr/xdr:cNvPr", _NS)
-                        if properties is not None and properties.get("hidden") in {"1", "true"}:
+                        if _hidden(properties):
                             continue
                         media_path = target[0]
                         try:
@@ -315,42 +603,88 @@ def index_workbook_media(
                             continue
                         if media_path not in hashes:
                             hashes[media_path] = hashlib.sha256(archive.read(media_path)).hexdigest()
-                        left, top, right, bottom = rect
-                        start_row, _ = rows.locate(top)
-                        start_col, _ = cols.locate(left)
-                        end_row, _ = rows.locate(max(top, bottom - 1))
-                        end_col, _ = cols.locate(max(left, right - 1))
-                        center_row, _ = rows.locate((top + bottom) / 2)
-                        center_col, _ = cols.locate((left + right) / 2)
+                        place = _placement(rect, rows, cols)
                         suffix = posixpath.splitext(media_path)[1].lower()
-                        base_id = f"{sheet_number}_{cell_to_a1(center_row + 1, center_col + 1)}"
-                        ids_in_cell[base_id] = ids_in_cell.get(base_id, 0) + 1
-                        media.append(
-                            WorkbookMedia(
-                                media_id=base_id if ids_in_cell[base_id] == 1 else f"{base_id}_{ids_in_cell[base_id]}",
-                                sheet=sheet_name,
-                                media_path=media_path,
-                                from_row=start_row + 1,
-                                from_col=start_col + 1,
-                                to_row=end_row + 1,
-                                to_col=end_col + 1,
-                                center_row=center_row + 1,
-                                center_col=center_col + 1,
-                                width_px=round(right - left, 1),
-                                height_px=round(bottom - top, 1),
-                                name=(properties.get("name", "") if properties is not None else "").strip(),
-                                description=" ".join(
-                                    value.strip()
-                                    for value in (
-                                        properties.get("title", "") if properties is not None else "",
-                                        properties.get("descr", "") if properties is not None else "",
-                                    )
-                                    if value and value.strip()
-                                ),
-                                sha256=hashes[media_path],
-                                previewable=suffix in PREVIEWABLE_SUFFIXES and size <= MAX_PREVIEWABLE_BYTES,
+                        item = WorkbookMedia(
+                            media_id=next_id(place),
+                            sheet=sheet_name,
+                            media_path=media_path,
+                            **place,
+                            name=(properties.get("name", "") if properties is not None else "").strip(),
+                            description=" ".join(
+                                value.strip()
+                                for value in (
+                                    properties.get("title", "") if properties is not None else "",
+                                    properties.get("descr", "") if properties is not None else "",
+                                )
+                                if value and value.strip()
+                            ),
+                            sha256=hashes[media_path],
+                            previewable=suffix in PREVIEWABLE_SUFFIXES and size <= MAX_PREVIEWABLE_BYTES,
+                        )
+                        media.append(item)
+                        pictures[item.media_id] = item
+                        units.append(_DrawingUnit(rect=rect, drawing=drawing_path, parts=[], media_id=item.media_id))
+                    parts = _shape_parts(anchor)
+                    if parts:
+                        units.append(
+                            _DrawingUnit(
+                                rect=rect,
+                                drawing=drawing_path,
+                                parts=parts,
+                                ends=_connector_ends(anchor, rect),
                             )
                         )
+
+            for rect, frame, chart_path in charts:
+                chart = read_chart(archive, chart_path)
+                if chart is None:
+                    continue
+                properties = frame.find("xdr:nvGraphicFramePr/xdr:cNvPr", _NS)
+                place = _placement(rect, rows, cols)
+                media.append(
+                    WorkbookMedia(
+                        media_id=next_id(place),
+                        sheet=sheet_name,
+                        media_path=chart_path,
+                        **place,
+                        name=(properties.get("name", "") if properties is not None else "").strip(),
+                        description=chart.label
+                        or (properties.get("descr", "") if properties is not None else "").strip(),
+                        sha256=hashlib.sha256(archive.read(chart_path)).hexdigest(),
+                        previewable=chart.drawable,
+                        kind=KIND_CHART,
+                        text=chart_summary(chart),
+                    )
+                )
+
+            if any(not unit.media_id for unit in units):
+                for members in _group_units(units):
+                    if not _is_diagram(members):
+                        continue
+                    rect = (
+                        min(unit.rect[0] for unit in members),
+                        min(unit.rect[1] for unit in members),
+                        max(unit.rect[2] for unit in members),
+                        max(unit.rect[3] for unit in members),
+                    )
+                    place = _placement(rect, rows, cols)
+                    title, text = _diagram_summary(members, pictures)
+                    media_id = next_id(place)
+                    media.append(
+                        WorkbookMedia(
+                            media_id=media_id,
+                            sheet=sheet_name,
+                            media_path="",
+                            **place,
+                            name="",
+                            description=title,
+                            sha256=hashlib.sha256(f"diagram\n{sheet_name}\n{media_id}\n{text}".encode()).hexdigest(),
+                            previewable=True,
+                            kind=KIND_DIAGRAM,
+                            text=text,
+                        )
+                    )
     return media
 
 
@@ -367,6 +701,9 @@ def render_media_tokens(
 ) -> str:
     """Replace ``[[media:<id>]]`` tokens with Markdown images.
 
+    Charts and diagrams are images too: ``url_for`` points them at a route
+    that redraws them, and the alt text carries their title.
+
     A picture the browser cannot show, or one without a URL, keeps only its
     location; an unknown id is dropped. A known id mentioned without the token
     brackets (``(media:1_C30)`` or a bare ``1_C30``) is a reference in the
@@ -380,7 +717,8 @@ def render_media_tokens(
         item = by_id.get(match.group(1))
         if item is None:
             return ""
-        alt = re.sub(r"[\[\]()]", " ", item.location).strip()
+        label = f"{item.description} — {item.location}" if item.kind != KIND_PICTURE and item.description else item.location
+        alt = " ".join(re.sub(r"[\[\]()]", " ", label).split())
         url = url_for(item) if item.previewable else None
         if not url:
             return f"`{item.location} ({item.file_type})`"

@@ -6,6 +6,7 @@ import math
 import re
 import tempfile
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -15,8 +16,15 @@ import pandas as pd
 from TableAgent.QA.operators.base_operator import BaseOperator
 from TableAgent.schema.header import Header
 from TableAgent.utils.excel_utils import cell_to_a1
+from TableAgent.utils.workbook_charts import chart_summary, read_chart, split_reference
 from TableAgent.utils.structure_utils import flatten_headers
-from TableAgent.utils.workbook_media import WorkbookMedia, index_workbook_media, read_media_bytes
+from TableAgent.utils.workbook_media import (
+    KIND_CHART,
+    KIND_PICTURE,
+    WorkbookMedia,
+    index_workbook_media,
+    read_media_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +51,8 @@ _LABELS_PER_SIDE = 2
 _ROW_VALUE_MAX_CHARS = 160
 # Rows of `list_media` that still fit a cell's printed output (about 2000 characters).
 _LIST_PRINT_LIMIT = 8
+# Cells of one chart reference read when a chart has no saved values.
+_CHART_RANGE_MAX_CELLS = 5000
 # Default names Excel gives inserted pictures ("Picture 12", "그림 3"); they say nothing.
 _DEFAULT_PICTURE_NAME = re.compile(r"^[^\W\d_]+\s*\d+$")
 _DESCRIBE_PROMPT = """Look at this picture from the spreadsheet sheet "{sheet}" (cells {cells}).
@@ -98,11 +108,13 @@ class _TableArea:
 
 
 class MediaOperator(BaseOperator):
-    """Pictures placed on the loaded sheets, read from the workbook package."""
+    """Pictures, charts and diagrams placed on the loaded sheets, read from the workbook package."""
 
     name = "media"
     description = (
-        "Pictures placed on the loaded sheets. A picture reaches the user only as its token "
+        "Pictures placed on the loaded sheets, and the Excel charts and diagrams (shapes, flowcharts, labels drawn on "
+        "photos) drawn there; all of them are listed and shown the same way, so `picture` below covers charts and "
+        "diagrams. A picture reaches the user only as its token "
         "`[[media:<id>]]` copied verbatim into `final_answer` where the picture should appear; it is shown as the image, so "
         "never call it a token or an id in the text, never write image URLs or Markdown image syntax yourself, and never "
         "invent ids. "
@@ -117,14 +129,19 @@ class MediaOperator(BaseOperator):
         "When the answer reports rows whose pictures show what the row describes (a part, a defect, a product, a person), "
         "put those tokens next to the row; leave them out of counts and totals. At most 8 tokens per answer. "
         "Pictures outside tables are listed by `operators.list_media`, with the cells they cover, their `kind` "
-        "(`drawing`: mostly white background, as diagrams, flowcharts, charts and logos are; `photo` otherwise), the text "
+        "(`chart`: an Excel chart; `diagram`: Excel shapes drawn together, such as a flowchart or labels on a photo; for "
+        "image files, `drawing`: mostly white background, as diagrams, flowcharts, charts and logos are; `photo` "
+        "otherwise), the text "
         "written just above and left of them, and the nearest table with the picture's side of it, in sheet order. That "
         "text is only the closest written cell: often the picture's caption, but it may title a neighbouring section or "
         "another picture. `operators.find_media(query)` ranks pictures by how well that text matches words you take from "
         "the question. Print a list in a step of its own with only the columns you need; never use an id you have not "
         "seen printed. Identical pictures share a `same_as` group. Use `operators.describe_media` only when the question "
-        "needs what a picture shows and the workbook text does not say it; it reads at most 4 pictures, so pick the "
-        "candidates by their text and kind first and read the best one first. Its text explains a picture but never "
+        "needs what a picture shows and the workbook text does not say it; it reads at most 4 image files, so pick the "
+        "candidates by their text and kind first and read the best one first. For a `chart` it returns the plotted series "
+        "and values with their cells, and for a `diagram` its text and arrows; those do not count toward the 4. When the "
+        "question asks to show, draw or see a chart or diagram, put its token in `final_answer`. Its text explains a "
+        "picture but never "
         "replaces it: when the picture is the value asked for, the token must still be in `final_answer`. For a picture on "
         "a table row it also lists the values on the same row, which may or may not be about this picture; it also "
         "names where an identical picture is placed. When it shows that a picture is not the one asked for, check the next "
@@ -135,7 +152,7 @@ class MediaOperator(BaseOperator):
         "operators.list_media(sheet='', table_id=None) -> pandas.DataFrame  # columns: " + ", ".join(_LIST_COLUMNS),
         "operators.find_media(query, sheet='') -> pandas.DataFrame  # every picture with list_media columns plus score, best match first (score 0: no word matched)",
         "operators.find_same_media(media_id) -> pandas.DataFrame  # identical picture elsewhere in the workbook, any sheet",
-        "operators.describe_media(media_id, question='') -> str  # vision model reads the picture once; at most 4 pictures",
+        "operators.describe_media(media_id, question='') -> str  # vision model reads an image once (at most 4); a chart or diagram is read from the workbook",
     )
 
     def __init__(self, env: Any):
@@ -233,13 +250,12 @@ class MediaOperator(BaseOperator):
         """
         outside: dict[str, int] = {}
         for item in self.loaded_media():
-            area = self._area_of(item)
-            if area is None or not area.has_data_row(self._record_row(item)):
+            if not self._on_table_row(item):
                 outside[item.sheet] = outside.get(item.sheet, 0) + 1
         lines = [f"- {sheet}: {count}" for sheet, count in outside.items()]
         text = super().describe()
         if lines:
-            text += "\nPictures outside table rows, listed by `list_media`, per loaded sheet:\n" + "\n".join(lines)
+            text += "\nPictures, charts and diagrams outside table rows, listed by `list_media`, per loaded sheet:\n" + "\n".join(lines)
             if any(count > _LIST_PRINT_LIMIT for count in outside.values()):
                 text += (
                     f"\nWith more than {_LIST_PRINT_LIMIT} pictures, filter `list_media` (by its text, cells or rows) "
@@ -287,6 +303,13 @@ class MediaOperator(BaseOperator):
                 return area
         return None
 
+    def _on_table_row(self, item: WorkbookMedia) -> bool:
+        """Whether a picture is a value of a table row; charts and diagrams never are."""
+        if item.kind != KIND_PICTURE:
+            return False
+        area = self._area_of(item)
+        return area is not None and area.has_data_row(self._record_row(item))
+
     @staticmethod
     def _header_label(area: _TableArea, row: int, column: int) -> str | None:
         header = MediaOperator._header_for(area, row, column)
@@ -314,11 +337,11 @@ class MediaOperator(BaseOperator):
     def _row_pictures(self, sheet: str, start_col: int, end_col: int):
         """``(row, header, picture)`` for pictures on table data rows overlapping the columns read."""
         for item in self.all_media():
-            if item.sheet.casefold() != sheet.casefold():
+            if item.sheet.casefold() != sheet.casefold() or not self._on_table_row(item):
                 continue
             area = self._area_of(item)
             row = self._record_row(item)
-            if area is None or not area.has_data_row(row):
+            if area is None:
                 continue
             if area.end_col < start_col or area.start_col > end_col:
                 continue
@@ -464,7 +487,7 @@ class MediaOperator(BaseOperator):
     def _row_record(self, item: WorkbookMedia, same_as: dict[str, str]) -> dict[str, Any]:
         area = self._area_of(item)
         row = self._record_row(item)
-        in_rows = area is not None and area.has_data_row(row)
+        in_rows = self._on_table_row(item)
         nearest_table, side = (area.table_id, "inside") if area is not None else self._nearest_table(item)
         return {
             "id": item.media_id,
@@ -485,7 +508,12 @@ class MediaOperator(BaseOperator):
         }
 
     def _kind(self, item: WorkbookMedia) -> str | None:
-        """``"drawing"`` for a picture mostly on white background, else ``"photo"``; None when unreadable."""
+        """``"chart"``/``"diagram"``; for an image ``"drawing"`` when mostly white background, else ``"photo"``.
+
+        None when the image cannot be read.
+        """
+        if item.kind != KIND_PICTURE:
+            return item.kind
         if not item.previewable:
             return None
         if item.sha256 not in self._kinds:
@@ -590,7 +618,7 @@ class MediaOperator(BaseOperator):
         """
         area = self._area_of(item)
         row = self._record_row(item)
-        if area is None or not area.has_data_row(row):
+        if area is None or not self._on_table_row(item):
             return None
         sheet = self.env.get_sheet(item.sheet)
         merged = self._merged_ranges(item.sheet)
@@ -633,6 +661,14 @@ class MediaOperator(BaseOperator):
         first reading, so the call budget covers distinct pictures.
         """
         item = self._media_by_id(media_id)
+        if item.kind != KIND_PICTURE:
+            # Read from the workbook itself: exact, and no vision call.
+            self._note_described(item)
+            heading = f"{item.kind.capitalize()} at {item.location}"
+            if not item.previewable:
+                heading += " (a chart type the chat cannot draw; its token shows only its location)"
+            text = self._chart_text(item) if item.kind == KIND_CHART else item.text
+            return f"{heading}:\n{text}" if text else f"{heading}: nothing could be read from it."
         if not item.previewable:
             return f"{item.location} is a .{item.file_type} picture that cannot be read."
         key = item.sha256
@@ -660,6 +696,30 @@ class MediaOperator(BaseOperator):
         self._note_described(item)
         return text + self._row_note(item) + self._copies_note(item)
 
+    def _read_chart_range(self, formula: str) -> list[object]:
+        reference = split_reference(formula)
+        if reference is None:
+            return []
+        sheet_name, cells = reference
+        sheet = self.env.get_sheet(sheet_name)
+        values: list[object] = []
+        for row in sheet[cells] if ":" in cells else ((sheet[cells],),):
+            for cell in row if isinstance(row, tuple) else (row,):
+                values.append(cell.value)
+                if len(values) >= _CHART_RANGE_MAX_CELLS:
+                    return values
+        return values
+
+    def _chart_text(self, item: WorkbookMedia) -> str:
+        """The chart's series, from its saved values or, without them, from its cells."""
+        try:
+            with zipfile.ZipFile(self.env.workbook_path) as archive:
+                chart = read_chart(archive, item.media_path, read_range=self._read_chart_range)
+        except Exception:
+            logger.debug("Chart could not be read again from its cells", exc_info=True)
+            return item.text
+        return chart_summary(chart) if chart is not None else item.text
+
     def _note_described(self, item: WorkbookMedia) -> None:
         if item.media_id not in self.described:
             self.described.append(item.media_id)
@@ -680,7 +740,7 @@ class MediaOperator(BaseOperator):
             item = self._media_by_id(media_id)
             area = self._area_of(item)
             row = self._record_row(item)
-            if area is None or not area.has_data_row(row):
+            if area is None or not self._on_table_row(item):
                 return []
             rows.add((area.table_id, row))
             items.append(item)
