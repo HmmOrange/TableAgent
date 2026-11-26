@@ -9,6 +9,8 @@ from typing import Any
 QA_CHECKS = ("reverse", "independent", "debate")  # see src/checker.py
 CHECKER_VIEWS = ("grid", "image", "frame")
 START_VIEWS = ("text", "none")
+EXPLORATIONS = ("progressive", "none")
+SYNTHESES = ("code", "direct")
 SWITCHABLE_TOOLS = ("find", "headers", "describe")  # Inspector tools that disabled_tools may switch off
 ALL_TOOLS = "all"  # disabled_tools: [all] leaves the Inspector only the openpyxl workbook
 
@@ -26,9 +28,15 @@ class QASettings:
         [all] switches off every tool: the Inspector reads the openpyxl workbook in its own code.
     start_view: what the starting plans are shown of the workbook: the text preview, or none (sheet names and sizes
         only). The Checkers keep the text preview.
+    exploration: progressive (reasoning steps, Inspectors and Checkers read the needs before synthesis), or none (an
+        ablation: after the plan, the Synthesizer's code reads the workbook itself through openpyxl, and the final
+        review sees that code); none takes no checker, synthesis_check or direct synthesis.
+    synthesis: code (the answer parts are computed in code from the evidence), or direct (an ablation: the model
+        writes them from the evidence without code).
     save_artifacts: write each question's trace, ledger, events and code cells.
     generation_max_tokens: the generation cap set on the answer and vision models (None keeps the clients' own).
-    max_context_chars: table text given to a fallback answer is cut to this length.
+    max_context_chars: table text given to a fallback answer, and each evidence value given to a direct synthesis,
+        is cut to this length.
     The rest configure LibreOffice rendering for `sheet.look`.
     """
 
@@ -41,6 +49,8 @@ class QASettings:
     max_returns: int = 1
     disabled_tools: tuple[str, ...] = ()
     start_view: str = "text"
+    exploration: str = "progressive"
+    synthesis: str = "code"
     save_artifacts: bool = True
     generation_max_tokens: int | None = None
     max_context_chars: int = 240000
@@ -59,7 +69,7 @@ class QASettings:
         if unknown:
             raise ValueError(f"Unknown table_agent settings: {', '.join(unknown)}")
         defaults = cls()
-        return cls(
+        settings = cls(
             plan_count=_positive_int(config.get("plan_count", defaults.plan_count), "plan_count"),
             checker=_checks(config.get("checker", defaults.checker)),
             checker_view=_choice(config.get("checker_view", defaults.checker_view), "checker_view", CHECKER_VIEWS),
@@ -71,6 +81,8 @@ class QASettings:
             max_returns=_count(config.get("max_returns", defaults.max_returns), "max_returns"),
             disabled_tools=_tools(config.get("disabled_tools", defaults.disabled_tools)),
             start_view=_choice(config.get("start_view", defaults.start_view), "start_view", START_VIEWS),
+            exploration=_choice(config.get("exploration", defaults.exploration), "exploration", EXPLORATIONS),
+            synthesis=_choice(config.get("synthesis", defaults.synthesis), "synthesis", SYNTHESES),
             save_artifacts=_bool(config.get("save_artifacts", defaults.save_artifacts)),
             generation_max_tokens=None if config.get("generation_max_tokens") is None else int(config["generation_max_tokens"]),
             max_context_chars=int(config.get("max_context_chars", defaults.max_context_chars)),
@@ -81,6 +93,14 @@ class QASettings:
             max_cell_width=_positive_int(config.get("max_cell_width", defaults.max_cell_width), "max_cell_width"),
             max_workers=_positive_int(config.get("max_workers", defaults.max_workers), "max_workers"),
         )
+        if settings.synthesis == "direct" and settings.synthesis_check:
+            raise ValueError("table_agent.synthesis_check reviews the synthesis code: it needs synthesis: code")
+        if settings.exploration == "none" and (settings.checker or settings.synthesis_check or settings.synthesis != "code"):
+            raise ValueError(
+                "table_agent.exploration: none reads no evidence to check or answer from: "
+                "it needs checker: [], synthesis_check: false and synthesis: code"
+            )
+        return settings
 
 
 def _bool(value: Any) -> bool:

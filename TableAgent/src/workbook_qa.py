@@ -67,6 +67,9 @@ class WorkbookQA:
             max_returns=self.settings.max_returns,
             disabled_tools=self.settings.disabled_tools,
             start_view=self.settings.start_view,
+            exploration=self.settings.exploration,
+            synthesis=self.settings.synthesis,
+            max_context_chars=self.settings.max_context_chars,
             save_artifacts=self.settings.save_artifacts,
         )
         if result.success:

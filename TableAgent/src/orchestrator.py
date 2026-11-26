@@ -13,6 +13,8 @@ Its three abstract reasoning steps are made by `Reasoner`:
 Settings: `checks` are the Checkers that test each found need (checker.py, none by default), and
 `synthesis_check` has a Checker review how the answer was computed before reason_end. A `vision_client`
 gives the Inspector `sheet.look` and lets `sheet.headers` ask about an image when its walk is unsure.
+Two ablations: `exploration="none"` leaves out step 2, so the Synthesizer's code reads the workbook itself from the
+plan, and `synthesis="direct"` has the model write the answer parts from the evidence without code (synthesizer.py).
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ from TableAgent.src.prompts import (
     STRATEGY_TEXTS,
     without_tools,
 )
-from TableAgent.src.synthesizer import SynthesisError, Synthesizer
+from TableAgent.src.synthesizer import DirectSynthesizer, SynthesisError, Synthesizer, WorkbookSynthesizer
 from TableAgent.src.tools.formats import legend_notes, legends
 from TableAgent.src.tools.look import Vision
 from TableAgent.src.tools.notebook import Notebook
@@ -103,14 +105,17 @@ def answer_question(
     disabled_tools: tuple[str, ...] = (),
     save_artifacts: bool = True,
     start_view: str = "text",
+    exploration: str = "progressive",
+    synthesis: str = "code",
+    max_context_chars: int = 240000,
 ) -> AnswerResult:
     """Answer `question`; the artifacts go to a new directory under `artifact_dir`.
 
     `checks`, `sees_value` and `view` configure the Checkers (checker.py). `vision_client`, with the
     workbook `renderer` that draws cell ranges, turns on looking at images. `plan_count` starting plans are
-    written independently and, above one, reconciled. `inspector_max_turns`, `max_returns`, `disabled_tools`
-    and `start_view` are the QASettings of those names; without `save_artifacts` no trace, ledger, events or
-    cells are written.
+    written independently and, above one, reconciled. `inspector_max_turns`, `max_returns`, `disabled_tools`,
+    `start_view`, `exploration`, `synthesis` and `max_context_chars` are the QASettings of those names; without
+    `save_artifacts` no trace, ledger, events or cells are written.
     """
     started = time.perf_counter()
     run_dir = artifact_dir / run_dir_name(question)
@@ -123,7 +128,7 @@ def answer_question(
         run = Orchestrator(
             question, llm, workbook, Path(workbook_path), excluded_sheet_names,
             vision, checks, sees_value, view, synthesis_check, plan_count,
-            inspector_max_turns, max_returns, disabled_tools, start_view,
+            inspector_max_turns, max_returns, disabled_tools, start_view, exploration, synthesis, max_context_chars,
         )
         error = run.answer()
     finally:
@@ -169,6 +174,9 @@ class Orchestrator:
         max_returns: int = MAX_RETURNS,
         disabled_tools: tuple[str, ...] = (),
         start_view: str = "text",
+        exploration: str = "progressive",
+        synthesis: str = "code",
+        max_context_chars: int = 240000,
     ):
         self.question = question
         self.llm = llm
@@ -176,7 +184,7 @@ class Orchestrator:
         self.start_view = start_view
         self.ledger = Ledger(question, max_returns=max_returns)
         tools = SheetTools(workbook, look=vision.look if vision else None, formula_path=workbook_path)
-        raw_workbook = "all" in disabled_tools
+        raw_workbook = "all" in disabled_tools or exploration == "none"  # without exploration, no tools either
         if raw_workbook:  # its own copy: code that changes the workbook cannot reach the tools of the Checkers
             self.notebook = Notebook({"workbook": openpyxl.load_workbook(workbook_path, data_only=True), "pd": pd, "np": np})
         else:
@@ -197,7 +205,13 @@ class Orchestrator:
         )
         self.checker = Checker(llm, tools, checks, sees_value, view, self.preview) if checks else None
         self.synthesis_check = synthesis_check
-        self.synthesizer = Synthesizer(llm, self.notebook)
+        if exploration == "none":
+            self.synthesizer = WorkbookSynthesizer(llm, self.notebook, self._start_view(), self.legends)
+        elif synthesis == "direct":
+            self.synthesizer = DirectSynthesizer(llm, self.notebook, max_context_chars)
+        else:
+            self.synthesizer = Synthesizer(llm, self.notebook)
+        self.explore = self._explore if exploration == "progressive" else self._no_exploration
 
     def answer(self) -> str | None:
         """Run the loop; returns an error message, or None once an answer is set."""
@@ -209,11 +223,9 @@ class Orchestrator:
         self.log.say(f"framed | {len(ledger.needs)} need(s), {len(ledger.answer_slots)} answer slot(s)")
         feedback = ""
         while True:
-            chose_synthesis = self._explore(feedback)
-            if ledger.open_needs() and not chose_synthesis:
-                return f"Out of budget with open needs: {', '.join(need.id for need in ledger.open_needs())}."
-            if not ledger.found_needs():
-                return "No need was found."
+            chose_synthesis, error = self.explore(feedback)
+            if error:
+                return error
             step = len(ledger.decisions)
             try:
                 parts, answer, code = self.synthesizer.compose(ledger, feedback)
@@ -228,7 +240,7 @@ class Orchestrator:
             if self.synthesis_check:
                 composed["method_check"] = check_method(self.llm, ledger, composed)
                 self.log.say(f"method check | {composed['method_check']['verdict']}")
-            review = self._reason_end(parts, answer, composed.get("method_check"))
+            review = self._reason_end(composed)
             if review["verdict"] == "accept":
                 return None
             feedback = (
@@ -246,8 +258,9 @@ class Orchestrator:
             return START_NO_VIEW.format(sheets=sheets)
         return START_TEXT_VIEW.format(preview=self.preview)
 
-    def _explore(self, feedback: str) -> bool:
-        """Steps until one chooses synthesis (True) or the budget runs out (False)."""
+    def _explore(self, feedback: str) -> tuple[bool, str | None]:
+        """Steps until one chooses synthesis (True) or the budget runs out (False), with an error when nothing can be
+        synthesized then; only an answer whose synthesis was chosen goes to reason_end."""
         ledger = self.ledger
         while len(ledger.decisions) < MAX_STEPS and self.llm.used < MAX_LLM_CALLS:
             index = len(ledger.decisions) + 1
@@ -273,7 +286,7 @@ class Orchestrator:
                 continue
             feedback = ""
             if action == "synthesize":
-                return True
+                return True, None
             if action == "inspect":
                 need = ledger.needs[str(args["need_id"])]
                 evidence = self.inspector.inspect(
@@ -288,11 +301,21 @@ class Orchestrator:
             else:
                 ledger.apply(action, args, index, step.reason)
         self.log.event("budget_used_up", steps=len(ledger.decisions), llm_calls=self.llm.used)
-        return False
+        if ledger.open_needs():
+            return False, f"Out of budget with open needs: {', '.join(need.id for need in ledger.open_needs())}."
+        if not ledger.found_needs():
+            return False, "No need was found."
+        return False, None
 
-    def _reason_end(self, parts: list[str], answer: str, method_check: dict[str, str] | None) -> dict[str, Any]:
+    def _no_exploration(self, feedback: str) -> tuple[bool, str | None]:
+        """exploration: none: nothing is read before synthesis (the Synthesizer reads the workbook), and its answer
+        goes to reason_end."""
+        return True, None
+
+    def _reason_end(self, composed: dict[str, Any]) -> dict[str, Any]:
+        support = self.synthesizer.support(self.ledger, composed)
         try:
-            review = self.reasoner.reason_end(self.ledger, answer, parts, method_check)
+            review = self.reasoner.reason_end(self.ledger, composed["answer"], composed["parts"], support, composed.get("method_check"))
         except ReplyError as exc:
             review = {"verdict": "accept", "assessment": f"The review was unavailable: {exc}"}
         args = {key: review.get(key, "") for key in ("verdict", "problem", "instruction")}
@@ -373,16 +396,18 @@ class Reasoner:
         return ask_json(self.llm, "reason_step", REASONER_SYSTEM_PROMPT, prompt, require_dict)
 
     def reason_end(
-        self, ledger: Ledger, answer: str, parts: list[str], method_check: dict[str, str] | None = None,
+        self, ledger: Ledger, answer: str, parts: list[str], support: dict[str, str],
+        method_check: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """After synthesis: does the answer respond to the question, slot by slot, from the evidence?"""
+        """After synthesis: does the answer respond to the question, slot by slot, from its `support` (the evidence,
+        or the code that read the workbook: Synthesizer.support)?"""
         prompt = REASON_END_PROMPT.format(
             question=ledger.question,
             hypothesis=ledger.hypothesis,
             answer_form=ledger.answer_form,
             slots=ledger.slots_text(parts),
-            needs=ledger.needs_text(),
             answer=answer,
+            **support,
             method_check=METHOD_CHECK_TEXT.format(**method_check) if method_check else "",
         )
         return ask_json(self.llm, "reason_end", REASONER_SYSTEM_PROMPT, prompt, _check_end)

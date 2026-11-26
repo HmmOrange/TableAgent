@@ -81,21 +81,35 @@ Answer form: {answer_form}
 Answer slots with the part of the answer filled in for each:
 {slots}
 
-Needs and evidence:
-{needs}
+{support}
 
 Proposed answer: {answer}
 {method_check}
 Review the answer against the question:
 - Does it answer what was asked, in the requested form, with every slot filled and nothing the question did not ask for?
 - Read the question again clause by clause: does the answer report every item it asks for, even one the slots leave out (each of several items asked for together, the other side of a comparison it asks about, the result of a check beside the item checked)? An item the slots leave out is a missing slot.
-- Is each part supported by found evidence read where every qualifier of its need holds?
+{support_check}
 Return the answer only when a slot is missing, a part was not asked for, a part is not supported by the evidence, the evidence was read in the wrong place, the computation does not follow from the question, or the answer does not respond to the question. Return it also when a number was multiplied by a scale stated in a title, header or note ("in thousands") although the question names no other scale: the answer keeps the figure as the table holds it. Wording, units shown, a scale stated in a header that was not multiplied in, and number formatting are not reasons.
 
 When a slot is missing, also return "answer_slots": every slot in the order the answer reports them, the missing ones added.
 
 Return JSON:
 {{"assessment": "<your reasoning>", "verdict": "accept" or "return", "problem": "<what is wrong, empty when accepted>", "instruction": "<what to establish next, empty when accepted>", "answer_slots": [{{"slot": "<what to report>", "asked_by": "<exact phrase of the question>"}}] (only when a slot is missing)}}"""
+
+# What REASON_END_PROMPT shows as the answer's support ({support}) and asks of it ({support_check}): the evidence by
+# default; with exploration: none, the code that read the workbook (synthesizer.py WorkbookSynthesizer).
+EVIDENCE_SUPPORT = """Needs and evidence:
+{needs}"""
+EVIDENCE_SUPPORT_CHECK = "- Is each part supported by found evidence read where every qualifier of its need holds?"
+CODE_SUPPORT = """Needs (what the answer requires):
+{needs}
+
+The code that read the workbook and computed the answer, and what it printed:
+```python
+{code}
+```
+Printed: {printed}"""
+CODE_SUPPORT_CHECK = "- Does the code read each part where every qualifier of its need holds (the section, row, column, period and unit the question means)?"
 
 METHOD_CHECK_TEXT = """
 A Checker reviewed how the answer was computed and found it {verdict}: {problem}
@@ -372,19 +386,46 @@ HEADERS_LOOK_QUESTION = (
 
 # ----------------------------------------------------------------------------- synthesis
 
-SYNTHESIZER_SYSTEM_PROMPT = """You compose the answer of a spreadsheet question from evidence already read, by writing Python in a notebook where each evidence variable is a dict with "value", "cells", "where" and "note".
-Imports: pandas, numpy, math, statistics, datetime, re, json, collections, itertools, functools, operator. Do not read the workbook again.
-Your code must set `answer_parts`: a list with exactly one entry per answer slot, in slot order.
-- An entry is the value for its slot as it should appear in the answer; keep its unit (days, a percent sign, a currency) when it has one.
+# How each entry of `answer_parts` is written, whichever way the parts are composed.
+ANSWER_PARTS_RULES = """- An entry is the value for its slot as it should appear in the answer; keep its unit (days, a percent sign, a currency) when it has one.
 - Report a number as the cells hold it: a scale stated in a title, header or note ("in thousands", "in millions") is not multiplied in or appended and the answer stays in the table's scale. "How many" or "the number of" asks for the figure as the table holds it; convert only when the question itself names the other scale.
 - A slot that asks for several items gets a list of them; a yes/no slot gets True or False.
 - Round a number to the precision the question states; otherwise keep non-integers to four decimals.
-- A difference whose direction the question does not state is reported as its magnitude.
+- A difference whose direction the question does not state is reported as its magnitude."""
+
+SYNTHESIZER_SYSTEM_PROMPT = """You compose the answer of a spreadsheet question from evidence already read, by writing Python in a notebook where each evidence variable is a dict with "value", "cells", "where" and "note".
+Imports: pandas, numpy, math, statistics, datetime, re, json, collections, itertools, functools, operator. Do not read the workbook again.
+Your code must set `answer_parts`: a list with exactly one entry per answer slot, in slot order.
+""" + ANSWER_PARTS_RULES + """
 
 Reply with one JSON object, then your Python in one ```python block after it, and no other text:
 {"thought": "<how the evidence gives each slot>"}
 ```python
 <Python that sets answer_parts>
+```"""
+
+# synthesis: direct: the parts are written by the model itself, without code.
+SYNTHESIZER_DIRECT_SYSTEM_PROMPT = """You compose the answer of a spreadsheet question from evidence already read: each evidence variable holds values read from the workbook. You run no code: work out each part from the values yourself.
+`answer_parts` is a list with exactly one entry per answer slot, in slot order.
+""" + ANSWER_PARTS_RULES + """
+
+Reply with one JSON object and no other text:
+{"thought": "<how the evidence gives each slot, with each computation worked out>", "answer_parts": [<one entry per answer slot>]}"""
+
+# exploration: none: no evidence is read before synthesis; the code reads the workbook itself, from the plan.
+SYNTHESIZER_WORKBOOK_SYSTEM_PROMPT = """You answer a spreadsheet question by writing Python in a notebook that reads the workbook. A plan lists the needs the answer requires (facts to read from the workbook) and how they combine.
+""" + RAW_WORKBOOK_TEXT + """
+""" + NOTEBOOK_IMPORTS + """
+`workbook` is already loaded: use it and never open a file (the notebook has no file access).
+Your code runs once and you see what it printed only when it fails, so read the needs and compute the answer in this code.
+Print each value you use with its cell and the labels that place it: the review checks the answer from what you printed.
+Your code must set `answer_parts`: a list with exactly one entry per answer slot, in slot order.
+""" + ANSWER_PARTS_RULES + """
+
+Reply with one JSON object, then your Python in one ```python block after it, and no other text:
+{"thought": "<where each need is in the workbook and how they give each slot>"}
+```python
+<Python that reads the workbook and sets answer_parts>
 ```"""
 
 SYNTHESIZER_PROMPT = """Question: {question}
@@ -395,6 +436,21 @@ Answer slots, in order:
 Evidence variables:
 {evidence}
 
+Answer form rules:
+{answer_form_rules}
+{transcript}"""
+
+SYNTHESIZER_WORKBOOK_PROMPT = """Question: {question}
+Hypothesis: {hypothesis}
+Answer form: {answer_form}
+Answer slots, in order:
+{slots}
+
+Needs to read from the workbook:
+{needs}
+
+{workbook}
+{legends}
 Answer form rules:
 {answer_form_rules}
 {transcript}"""

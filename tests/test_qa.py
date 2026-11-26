@@ -22,7 +22,9 @@ from TableAgent.src.prompts import (
     INSPECTOR_SYSTEM_PROMPT,
     INSPECTOR_SYSTEM_PROMPT_WITH_LOOK,
     REASONER_SYSTEM_PROMPT,
+    SYNTHESIZER_DIRECT_SYSTEM_PROMPT,
     SYNTHESIZER_SYSTEM_PROMPT,
+    SYNTHESIZER_WORKBOOK_SYSTEM_PROMPT,
     without_tools,
 )
 from TableAgent.src.synthesizer import part_text
@@ -79,7 +81,8 @@ class ScriptedLLM:
     def generate(self, prompt: str, system_prompt: str | None = None):
         roles = {
             REASONER_SYSTEM_PROMPT: "reason", INSPECTOR_SYSTEM_PROMPT: "inspect", INSPECTOR_SYSTEM_PROMPT_WITH_LOOK: "inspect",
-            SYNTHESIZER_SYSTEM_PROMPT: "synthesize",
+            SYNTHESIZER_SYSTEM_PROMPT: "synthesize", SYNTHESIZER_DIRECT_SYSTEM_PROMPT: "synthesize",
+            SYNTHESIZER_WORKBOOK_SYSTEM_PROMPT: "synthesize",
         }
         role = "check" if system_prompt.startswith("You are a Checker") else roles.get(system_prompt, "inspect")
         if role == "check":
@@ -879,11 +882,16 @@ def test_settings_default_to_the_current_limits_and_check_the_ablation_values():
     defaults = QASettings.from_config({})
     assert (defaults.inspector_max_turns, defaults.max_returns) == (MAX_TURNS, MAX_RETURNS)
     assert (defaults.disabled_tools, defaults.save_artifacts, defaults.start_view) == ((), True, "text")
+    assert (defaults.exploration, defaults.synthesis) == ("progressive", "code")
+    assert QASettings.from_config({"synthesis": "direct"}).synthesis == "direct"
+    assert QASettings.from_config({"exploration": "none", "checker": []}).exploration == "none"
     assert QASettings.from_config({"start_view": "none"}).start_view == "none"
     chosen = QASettings.from_config({"disabled_tools": "find, headers, describe", "max_returns": 0, "inspector_max_turns": 4})
     assert (chosen.disabled_tools, chosen.max_returns, chosen.inspector_max_turns) == (("find", "headers", "describe"), 0, 4)
     assert QASettings.from_config({"disabled_tools": ["all"]}).disabled_tools == ("all",)
-    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"disabled_tools": ["all", "find"]}, {"max_returns": -1}, {"inspector_max_turns": 0}, {"start_view": "image"}):
+    for bad in ({"disabled_tools": ["headers"]}, {"disabled_tools": ["read"]}, {"disabled_tools": ["all", "find"]}, {"max_returns": -1}, {"inspector_max_turns": 0}, {"start_view": "image"},
+                {"exploration": "joint"}, {"synthesis": "text"}, {"synthesis": "direct", "synthesis_check": True},
+                {"exploration": "none", "checker": ["independent"]}, {"exploration": "none", "synthesis": "direct"}):
         with pytest.raises(ValueError):
             QASettings.from_config(bad)
 
@@ -899,14 +907,21 @@ def test_the_settings_reach_the_exploration(monkeypatch):
         raise RuntimeError("stop")
 
     monkeypatch.setattr(workbook_qa, "answer_question", answer)
-    settings = QASettings(inspector_max_turns=8, max_returns=2, disabled_tools=("find",), save_artifacts=False, start_view="none")
+    settings = QASettings(
+        inspector_max_turns=8, max_returns=2, disabled_tools=("find",), save_artifacts=False, start_view="none",
+        exploration="none", synthesis="direct", max_context_chars=500,
+    )
     with pytest.raises(RuntimeError):
         workbook_qa.WorkbookQA(SimpleNamespace(), settings).run(
             question="q", workbook_path=Path("w.xlsx"), qa_artifact_dir=Path("runs"), fallback_prompt="",
         )
-    keys = ("inspector_max_turns", "max_returns", "disabled_tools", "save_artifacts", "start_view")
+    keys = (
+        "inspector_max_turns", "max_returns", "disabled_tools", "save_artifacts", "start_view", "exploration", "synthesis",
+        "max_context_chars",
+    )
     assert {key: seen[key] for key in keys} == {
         "inspector_max_turns": 8, "max_returns": 2, "disabled_tools": ("find",), "save_artifacts": False, "start_view": "none",
+        "exploration": "none", "synthesis": "direct", "max_context_chars": 500,
     }
 
 
@@ -957,3 +972,51 @@ def test_the_starting_plans_see_the_preview_or_only_the_sheet_sizes(tmp_path, wo
     assert all("Staff by region" not in prompt for prompt in llm.prompts["start"])  # Plan B and the reconciled plan
     assert "| A1:D1:Staff by region |" in llm.prompts["check"][0]  # the Checker keeps the preview
     assert result.answer == "35"
+
+
+def test_direct_synthesis_writes_the_parts_without_code_from_whole_evidence_values(tmp_path, workbook_files):
+    rows = [f"row {i} of the South section" for i in range(150)]  # about 4000 characters of JSON
+    evidence = {**SOUTH_EVIDENCE, "code": f"evidence_n1 = {{'value': {rows!r}, 'cells': ['D8'], 'where': 'South', 'note': ''}}"}
+    two = {"thought": "Two.", "answer_parts": [35, "extra"]}
+    one = {"thought": "The count of rows.", "answer_parts": [150]}
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [evidence], [two, one])
+    result = _run(tmp_path, workbook_files, llm, synthesis="direct")
+
+    assert result.answer == "150" and result.ledger.answers[-1]["code"] == ""
+    assert "row 149 of the South section" in llm.prompts["synthesize"][0]  # whole, not cut at 2000 characters
+    assert 'answer_parts: [35, "extra"]' in llm.prompts["synthesize"][1] and "has 2 entries" in llm.prompts["synthesize"][1]
+    assert "Needs and evidence:" in llm.prompts["reason"][-1]
+
+    llm = ScriptedLLM([START, INSPECT_N1, SYNTHESIZE, ACCEPT], [evidence], [one])
+    _run(tmp_path / "cut", workbook_files, llm, synthesis="direct", max_context_chars=2500)
+    assert "row 149 of the South section" not in llm.prompts["synthesize"][0]  # cut at max_context_chars
+
+
+def test_without_exploration_the_synthesizer_reads_the_workbook_from_the_plan(tmp_path, workbook_files):
+    sheet_code = {"thought": "Use the tools.", "code": "answer_parts = [sheet.read('D8')[0][0]]"}
+    read = {"thought": "South Alpha is row 8.", "code": "ws = workbook['Data']\nprint(ws['A7'].value, ws['B8'].value)\nanswer_parts = [ws['D8'].value]"}
+    llm = ScriptedLLM([START, ACCEPT], synthesize=[sheet_code, read])
+    result = _run(tmp_path, workbook_files, llm, exploration="none")
+
+    assert result.success and result.answer == "35"
+    assert llm.prompts["inspect"] == [] and llm.prompts["check"] == []
+    first = llm.prompts["synthesize"][0]
+    assert "Needs to read from the workbook:\n- n1: the 2019 value of Alpha in the South section" in first
+    assert "Hypothesis: The answer is the 2019 value" in first and "| A1:D1:Staff by region |" in first
+    assert "name 'sheet' is not defined" in llm.prompts["synthesize"][1]  # only the openpyxl workbook
+    review = llm.prompts["reason"][-1]
+    assert "Needs and evidence" not in review and "ws['D8'].value" in review and "Printed: South Alpha" in review
+    assert "Does the code read each part where every qualifier of its need holds" in review
+    assert result.ledger.evidence == [] and [step.kind for step in result.ledger.steps] == ["start", "end"]
+
+
+def test_without_exploration_a_returned_answer_is_rewritten_from_its_code(tmp_path, workbook_files):
+    north = {"thought": "Row 5.", "code": "answer_parts = [workbook['Data']['D5'].value]"}
+    south = {"thought": "Row 8.", "code": "answer_parts = [workbook['Data']['D8'].value]"}
+    returned = {"assessment": "North row.", "verdict": "return", "problem": "read in North", "instruction": "use South"}
+    llm = ScriptedLLM([START, returned], synthesize=[north, south])
+    result = _run(tmp_path, workbook_files, llm, exploration="none")
+
+    assert result.answer == "35" and result.ledger.returns == 1
+    again = llm.prompts["synthesize"][1]
+    assert "The review returned the answer '12'" in again and "Its code:\n```python\nanswer_parts = [workbook['Data']['D5'].value]" in again
