@@ -23,6 +23,8 @@ class CommonInfoRecord:
     sheet_name: str
     table_names: tuple[str, ...]
     headers: tuple[tuple[str, str], ...]
+    # Charts, diagrams and pictures on the sheet, named in words (never shown here).
+    visuals: str = ""
 
 
 class CommonInfoSubtaskAction:
@@ -244,6 +246,9 @@ class CommonInfoSubtaskAction:
         for source in sources:
             structure = source.get("structure") or {}
             sheet_name = str(structure.get("sheet") or "")
+            # A structure may write the sheet name loosely ("Sheet2" for "Sheet2..").
+            resolve = getattr(self.env, "resolve_sheet_name", None)
+            sheet_name = (resolve(sheet_name) if callable(resolve) else None) or sheet_name
             if sheet_name and sheet_name.strip().casefold() not in excluded_sheet_names:
                 grouped.setdefault(sheet_name, []).append(source)
 
@@ -274,8 +279,18 @@ class CommonInfoSubtaskAction:
                 sheet_name=sheet_name,
                 table_names=tuple(table_names),
                 headers=tuple(headers),
+                visuals=self._visuals(sheet_name),
             ))
         return records
+
+    def _visuals(self, sheet_name: str) -> str:
+        inventory = getattr(getattr(self.env, "operators", None), "media_inventory", None)
+        if not callable(inventory):
+            return ""
+        try:
+            return str(inventory(sheet_name) or "")
+        except Exception:
+            return ""
 
     @staticmethod
     def _header_pairs(headers: list[Header]) -> list[tuple[str, str]]:
@@ -307,6 +322,10 @@ class CommonInfoSubtaskAction:
                     CommonInfoSubtaskAction._escape(name) for name in record.table_names
                 )
                 lines.append(f"- Tables: {table_names}")
+            if record.visuals and record.scope == "sheet":
+                lines.append(
+                    f"- Charts, diagrams and pictures: {CommonInfoSubtaskAction._escape(record.visuals)}"
+                )
             lines.extend(["", "| Header | Description |", "| --- | --- |"])
             if record.headers:
                 lines.extend(

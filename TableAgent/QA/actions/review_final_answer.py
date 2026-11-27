@@ -52,6 +52,9 @@ class ReviewFinalAnswerAction:
             grouped_headers=grouped_headers,
             final_answer=final_answer,
         )
+        legend = self._picture_legend(final_answer)
+        if legend:
+            prompt += f"\n\nPictures shown by the answer (read from the workbook):\n{legend}\n"
         self.env.logger.log_event("final_answer_review_prompt", {
             "prompt": prompt,
             "system_prompt": FINAL_ANSWER_REVIEW_SYSTEM_PROMPT,
@@ -87,6 +90,15 @@ class ReviewFinalAnswerAction:
             score = 1.0 if accepted else 0.0
         feedback = str(data.get("feedback") or ("Accepted." if accepted else "Rejected.")).strip()
         return ReviewResult(accepted=accepted, feedback=feedback, score=score)
+
+    def _picture_legend(self, final_answer: str) -> str:
+        legend = getattr(getattr(self.env, "operators", None), "media_legend", None)
+        if not callable(legend):
+            return ""
+        try:
+            return str(legend(final_answer) or "")
+        except Exception:
+            return ""
 
     def _grouped_header_context(self) -> str:
         """Expose verified sibling headers so final review can detect partial group coverage."""

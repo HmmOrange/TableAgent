@@ -21,6 +21,7 @@ from TableAgent.utils.structure_utils import flatten_headers
 from TableAgent.utils.workbook_media import (
     KIND_CHART,
     KIND_PICTURE,
+    MEDIA_TOKEN,
     WorkbookMedia,
     index_workbook_media,
     read_media_bytes,
@@ -31,8 +32,8 @@ logger = logging.getLogger(__name__)
 MEDIA_COLUMN = "media"
 # What tells pictures apart comes first: a wide printout elides the middle columns.
 _LIST_COLUMNS = [
-    "id", "cells", "kind", "text_above", "text_left", "row", "header", "table_id",
-    "nearest_table", "side", "same_as", "name", "sheet", "viewable", "token",
+    "id", "cells", "kind", "title", "text_above", "text_left", "row", "header", "table_id",
+    "nearest_table", "side", "same_as", "sheet", "viewable", "token",
 ]
 # A picture mostly made of white background is a drawing (diagram, flowchart, chart, logo),
 # not a photo; photos rarely have even a fifth of near-white pixels.
@@ -47,6 +48,9 @@ _LABEL_SEARCH_ROWS = 3
 _LABEL_SEARCH_COLS = 3
 _LABEL_MAX_CHARS = 40
 _LABELS_PER_SIDE = 2
+# Charts and diagrams named per sheet in an overview, and the length kept of each title.
+_INVENTORY_TITLES = 5
+_INVENTORY_TITLE_CHARS = 60
 # Length kept of each value written on a picture's table row.
 _ROW_VALUE_MAX_CHARS = 160
 # Rows of `list_media` that still fit a cell's printed output (about 2000 characters).
@@ -128,10 +132,14 @@ class MediaOperator(BaseOperator):
         "header for the row, include its tokens. "
         "When the answer reports rows whose pictures show what the row describes (a part, a defect, a product, a person), "
         "put those tokens next to the row; leave them out of counts and totals. At most 8 tokens per answer. "
-        "Pictures outside tables are listed by `operators.list_media`, with the cells they cover, their `kind` "
+        "Pictures outside tables are listed by `operators.list_media`, with the cells they cover, their "
+        "`title` (a chart's or diagram's own title, or the name given to a picture; print it whenever charts or "
+        "diagrams are listed; tell several apart by it and by their text, not by guessing from their order on the sheet, and "
+        "use their cells and side of a table when the question says where the picture is), their `kind` "
         "(`chart`: an Excel chart; `diagram`: Excel shapes drawn together, such as a flowchart or labels on a photo; for "
         "image files, `drawing`: mostly white background, as diagrams, flowcharts, charts and logos are; `photo` "
-        "otherwise), the text "
+        "otherwise; a flowchart or diagram the question asks for may be any of these, often an image file, so never "
+        "narrow the candidates by `kind` alone: rank them all by their text with `find_media` first), the text "
         "written just above and left of them, and the nearest table with the picture's side of it, in sheet order. That "
         "text is only the closest written cell: often the picture's caption, but it may title a neighbouring section or "
         "another picture. `operators.find_media(query)` ranks pictures by how well that text matches words you take from "
@@ -140,7 +148,9 @@ class MediaOperator(BaseOperator):
         "needs what a picture shows and the workbook text does not say it; it reads at most 4 image files, so pick the "
         "candidates by their text and kind first and read the best one first. For a `chart` it returns the plotted series "
         "and values with their cells, and for a `diagram` its text and arrows; those do not count toward the 4. When the "
-        "question asks to show, draw or see a chart or diagram, put its token in `final_answer`. Its text explains a "
+        "question asks to show, draw or see a chart, picture or diagram, look for the one the workbook already holds "
+        "(`list_media`, `find_media`) and put its token in `final_answer`; do not rebuild it from the table's data, which "
+        "can only explain it. Its text explains a "
         "picture but never "
         "replaces it: when the picture is the value asked for, the token must still be in `final_answer`. For a picture on "
         "a table row it also lists the values on the same row, which may or may not be about this picture; it also "
@@ -200,7 +210,7 @@ class MediaOperator(BaseOperator):
             areas.append(
                 _TableArea(
                     table_id=table_id,
-                    sheet=ranges[0].sheet,
+                    sheet=self._workbook_sheet(ranges[0].sheet),
                     start_row=start_row,
                     start_col=min(cell_range.start_col for cell_range in ranges),
                     end_row=max(cell_range.end_row for cell_range in ranges),
@@ -242,25 +252,90 @@ class MediaOperator(BaseOperator):
     def has_media(self) -> bool:
         return bool(self.loaded_media())
 
+    @staticmethod
+    def _kind_counts(items: list[WorkbookMedia]) -> str:
+        counts: dict[str, int] = {}
+        for item in items:
+            counts[item.kind] = counts.get(item.kind, 0) + 1
+        return ", ".join(f"{count} {kind}{'s' if count > 1 else ''}" for kind, count in counts.items())
+
+    def _other_sheet_lines(self) -> list[str]:
+        """``- sheet: 1 chart (title)`` for workbook sheets whose pictures are not on a loaded sheet."""
+        loaded = {item.media_id for item in self.loaded_media()}
+        sheets = list(dict.fromkeys(item.sheet for item in self.all_media() if item.media_id not in loaded))
+        return [f"- {sheet}: {self.sheet_inventory(sheet)}" for sheet in sheets]
+
+    def sheet_inventory(self, sheet: str) -> str:
+        """What a sheet holds besides its cells, in words: charts and diagrams by title, pictures by count.
+
+        For overview answers: it names the visuals without showing them, so a
+        sheet with many photos adds one line, not the photos.
+        """
+        sheet = self._workbook_sheet(sheet)
+        items = [item for item in self.all_media() if item.sheet.casefold() == sheet.casefold()]
+        if not items:
+            return ""
+        parts = []
+        for kind in dict.fromkeys(item.kind for item in items):
+            of_kind = [item for item in items if item.kind == kind]
+            count = f"{len(of_kind)} {kind}{'s' if len(of_kind) > 1 else ''}"
+            titles = [
+                " ".join(str(item.description).split())[:_INVENTORY_TITLE_CHARS]
+                for item in of_kind
+                if item.kind != KIND_PICTURE and item.description
+            ]
+            if titles:
+                shown = "; ".join(titles[:_INVENTORY_TITLES])
+                more = "; ..." if len(titles) > _INVENTORY_TITLES else ""
+                count += f" ({shown}{more})"
+            parts.append(count)
+        return ", ".join(parts)
+
+    def other_sheets_brief(self) -> str:
+        """A short catalog entry when only sheets that were not loaded hold pictures.
+
+        The tables picked for a question can miss the sheet a chart or picture sits
+        on; without this the agent never learns the workbook has one.
+        """
+        lines = self._other_sheet_lines()
+        if not lines:
+            return ""
+        return (
+            "media: The loaded sheets hold no pictures, charts or diagrams, but other sheets of this workbook do:\n"
+            + "\n".join(lines)
+            + "\nWhen the question asks to see or read one, `operators.list_media(sheet='<sheet>')` lists them "
+            "(id, cells, kind, nearby text, token) and `operators.describe_media(media_id)` reads one. A picture "
+            "reaches the user only as its token `[[media:<id>]]` copied verbatim into `final_answer`; never use "
+            "an id you have not seen printed."
+        )
+
     def describe(self) -> str:  # type: ignore[override]
         """The operator text plus how many pictures outside tables each loaded sheet holds.
 
         Only sheets with such pictures get a line: pictures on table rows already
         come with the rows, so those sheets keep the plain operator text.
         """
-        outside: dict[str, int] = {}
+        outside: dict[str, list[WorkbookMedia]] = {}
         for item in self.loaded_media():
             if not self._on_table_row(item):
-                outside[item.sheet] = outside.get(item.sheet, 0) + 1
-        lines = [f"- {sheet}: {count}" for sheet, count in outside.items()]
+                outside.setdefault(item.sheet, []).append(item)
+        lines = [f"- {sheet}: {self._kind_counts(items)}" for sheet, items in outside.items()]
         text = super().describe()
         if lines:
             text += "\nPictures, charts and diagrams outside table rows, listed by `list_media`, per loaded sheet:\n" + "\n".join(lines)
-            if any(count > _LIST_PRINT_LIMIT for count in outside.values()):
+            if any(len(items) > _LIST_PRINT_LIMIT for items in outside.values()):
                 text += (
                     f"\nWith more than {_LIST_PRINT_LIMIT} pictures, filter `list_media` (by its text, cells or rows) "
                     "before printing it; a full printout is cut in the middle."
                 )
+        others = self._other_sheet_lines()
+        if others:
+            text += (
+                "\nOther sheets of this workbook, not loaded, also hold some. `list_media()` without a sheet leaves them "
+                "out; `list_media(sheet=...)` lists them, so a question about all of the workbook's charts, pictures "
+                "or diagrams needs them too:\n"
+                + "\n".join(others)
+            )
         return text
 
     def _media_by_id(self, media_id: str) -> WorkbookMedia:
@@ -334,8 +409,19 @@ class MediaOperator(BaseOperator):
 
     # Table column ------------------------------------------------------------
 
+    def _workbook_sheet(self, sheet: Any) -> str:
+        """The workbook's own name for a sheet named in a structure or by the agent.
+
+        A structure may name "Sheet2" for the sheet "Sheet2..", while pictures carry
+        the workbook's name; comparing the two as written would lose the pictures.
+        """
+        resolve = getattr(self.env, "resolve_sheet_name", None)
+        resolved = resolve(sheet) if callable(resolve) else None
+        return resolved or str(sheet or "")
+
     def _row_pictures(self, sheet: str, start_col: int, end_col: int):
         """``(row, header, picture)`` for pictures on table data rows overlapping the columns read."""
+        sheet = self._workbook_sheet(sheet)
         for item in self.all_media():
             if item.sheet.casefold() != sheet.casefold() or not self._on_table_row(item):
                 continue
@@ -502,7 +588,7 @@ class MediaOperator(BaseOperator):
             "nearest_table": nearest_table,
             "side": side,
             "same_as": same_as.get(item.media_id),
-            "name": item.description or (None if _DEFAULT_PICTURE_NAME.match(item.name or "") else item.name) or None,
+            "title": item.description or (None if _DEFAULT_PICTURE_NAME.match(item.name or "") else item.name) or None,
             "viewable": item.previewable,
             "kind": self._kind(item),
         }
@@ -537,6 +623,7 @@ class MediaOperator(BaseOperator):
     def list_media(self, sheet: str = "", table_id: Optional[str] = None) -> pd.DataFrame:
         """Pictures with their position and the text around them (loaded sheets unless ``sheet`` is given)."""
         same_as = self._same_as()
+        sheet = self._workbook_sheet(sheet) if str(sheet or "").strip() else ""
         items = self.all_media() if sheet else self.loaded_media()
         sheet_order = {name: index for index, name in reversed(list(enumerate(item.sheet for item in items)))}
         records = []
@@ -550,6 +637,38 @@ class MediaOperator(BaseOperator):
             records.append(record)
         # object dtype keeps whole row numbers and None instead of floats and NaN.
         return MediaFrame(records, columns=_LIST_COLUMNS, dtype=object)
+
+    def answer_legend(self, answer: str) -> str:
+        """What each picture token in ``answer`` shows, read from the workbook; empty without tokens.
+
+        A reviewer reading only ``[[media:2_K29]]`` cannot tell which chart or photo
+        the answer shows; this names it (kind, title, place, table row).
+        """
+        ids = list(dict.fromkeys(MEDIA_TOKEN.findall(str(answer or ""))))
+        if not ids:
+            return ""
+        same_as = self._same_as()
+        lines = []
+        for media_id in ids:
+            try:
+                item = self._media_by_id(media_id)
+            except KeyError:
+                lines.append(f"[[media:{media_id}]] = no such picture in the workbook")
+                continue
+            record = self._row_record(item, same_as)
+            parts = [item.kind]
+            if record.get("title"):
+                parts.append(f'"{record["title"]}"')
+            parts.append(f"at {item.location}")
+            if record.get("row") is not None:
+                place = f"on row {record['row']} of table {record['table_id']}"
+                if record.get("header"):
+                    place += f" under {record['header']}"
+                parts.append(place)
+            elif record.get("text_above"):
+                parts.append(f"below {record['text_above']}")
+            lines.append(f"[[media:{media_id}]] = " + " ".join(parts))
+        return "\n".join(lines)
 
     def find_same_media(self, media_id: str) -> pd.DataFrame:
         """Other placements of the identical picture (same image bytes)."""
@@ -583,7 +702,7 @@ class MediaOperator(BaseOperator):
             return listed.assign(score=pd.Series(dtype=float))
         query_words = self._words(query)
         fields = [
-            (self._words(record["text_above"]) | self._words(record["header"]) | self._words(record["name"]),
+            (self._words(record["text_above"]) | self._words(record["header"]) | self._words(record["title"]),
              self._words(record["text_left"]))
             for _, record in listed.iterrows()
         ]

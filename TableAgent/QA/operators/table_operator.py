@@ -35,9 +35,13 @@ class TableOperators(BaseOperator):
     def operator_catalog(self) -> str:
         """Return prompt-ready descriptions and examples for the exposed operators."""
         sections = [op.describe() for op in self._catalog_sources]
-        # Sheets without pictures keep the catalog they always had.
+        # Workbooks without pictures keep the catalog they always had.
         if self._media.has_media():
             sections.append(self._media.describe())
+        else:
+            brief = self._media.other_sheets_brief()
+            if brief:
+                sections.append(brief)
         sections.append(
             "calculation: Write normal Python/pandas/numpy code for arithmetic, aggregation, "
             "filtering, joins, formatting, and final answer construction. For example: "
@@ -75,6 +79,8 @@ class TableOperators(BaseOperator):
             for cell_range in (header.header_range, header.data_range)
             if cell_range is not None
         ]
+        if ranges:
+            self._note_read(ranges[0].sheet)
         if not ranges:
             return pd.DataFrame()
         sheet = ranges[0].sheet
@@ -287,6 +293,12 @@ class TableOperators(BaseOperator):
     def find_media(self, query: str, sheet: str = "") -> pd.DataFrame:
         return self._media.find_media(query, sheet=sheet)
 
+    def media_inventory(self, sheet: str) -> str:
+        return self._media.sheet_inventory(sheet)
+
+    def media_legend(self, answer: str) -> str:
+        return self._media.answer_legend(answer)
+
     def find_same_media(self, media_id: str) -> pd.DataFrame:
         return self._media.find_same_media(media_id)
 
@@ -328,13 +340,34 @@ class TableOperators(BaseOperator):
         return self._range.project_selection(selection, target_range, sheet)
 
     # Workbook operators
+    def _note_read(self, sheet: Any = "", range_or_a1: Union[CellRange, str, None] = None) -> None:
+        """Record the sheet a read touched, for the answer's sources."""
+        name = str(sheet or "").strip()
+        if not name and range_or_a1 is not None:
+            try:
+                parsed = parse_a1_range(range_or_a1, "") if isinstance(range_or_a1, str) else range_or_a1
+                name = str(getattr(parsed, "sheet", "") or "")
+            except Exception:
+                name = ""
+        if not name:
+            try:
+                name = self.env.get_active_sheet_name()
+            except Exception:
+                return
+        note = getattr(self.env, "note_sheet_used", None)
+        if callable(note):
+            note(name)
+
     def read_range(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[List[Any]]:
+        self._note_read(sheet, range_or_a1)
         return self._workbook.read_range(range_or_a1, sheet)
 
     def read_range_flat(self, range_or_a1: Union[CellRange, str], sheet: str = "") -> List[Any]:
+        self._note_read(sheet, range_or_a1)
         return self._workbook.read_range_flat(range_or_a1, sheet)
 
     def read_range_as_dataframe(self, range_or_a1: Union[CellRange, str], sheet: str = "", has_headers: bool = True) -> pd.DataFrame:
+        self._note_read(sheet, range_or_a1)
         frame = self._workbook.read_range_as_dataframe(range_or_a1, sheet, has_headers)
         try:
             cell_range = parse_a1_range(range_or_a1, sheet) if isinstance(range_or_a1, str) else range_or_a1
@@ -359,6 +392,7 @@ class TableOperators(BaseOperator):
         min_col: int = 1,
         max_col: int | None = None,
     ) -> pd.DataFrame:
+        self._note_read(sheet)
         frame = self._workbook.read_sheet_as_dataframe(
             sheet,
             min_row=min_row,
@@ -378,6 +412,7 @@ class TableOperators(BaseOperator):
 
     # Value filter / sparse selection operators
     def filter_values(self, range_or_a1: Union[CellRange, str], **kwargs: Any) -> AxisSelection:
+        self._note_read(kwargs.get("sheet", ""), range_or_a1)
         return self._filter.filter_values(range_or_a1, **kwargs)
 
     def group_header_mask(
@@ -390,6 +425,7 @@ class TableOperators(BaseOperator):
         return self._filter.group_header_mask(dataframe, table_id, header_id, **kwargs)
 
     def read_selection(self, selection: AxisSelection, target_range: Union[CellRange, str], sheet: str = "") -> List[Any]:
+        self._note_read(sheet, target_range)
         return self._filter.read_selection(selection, target_range, sheet=sheet)
 
     # Multi-table routing, relational operations, and formula evaluation

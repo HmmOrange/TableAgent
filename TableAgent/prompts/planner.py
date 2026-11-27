@@ -16,7 +16,9 @@ Classify by the subject being described, not by keywords such as "general inform
   its structural identity, purpose, top-level headers, or organization;
 - use `normal` when the requested subject is specific data inside a table, including a record, row, item, incident,
   equipment, product, person, code, date, value, or group of matching records, even when the question asks for that
-  subject's general information or description.
+  subject's general information or description;
+- use `normal` when the question asks to see, show or read pictures, charts or diagrams, even those of a whole sheet or
+  workbook: common information names them but cannot show them.
 
 For common-info questions such as an overview of all sheets or a sheet's inventory columns, mark the relevant
 inspect and synthesis subtasks as `common_info`. Set `metadata.common_info_scope` to `workbook`, `sheet`, or `table`,

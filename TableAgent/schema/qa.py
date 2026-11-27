@@ -31,6 +31,8 @@ class QAResult:
     subtask_retry_count: int = 0
     qa_max_retries: int = 0
     llm_calls: List[Dict[str, Any]] = field(default_factory=list)
+    # Sheets whose cells the answer was read from, in first-read order.
+    used_sheets: List[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return f"QAResult(success={self.success}, final_answer='{self.final_answer}')"

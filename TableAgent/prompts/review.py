@@ -99,6 +99,8 @@ Reject the answer when any of these applies:
 - code filters a child belonging to an unrelated parent group, including substituting monthly tracking for a requested
   stock/status field merely because the report title contains a month;
 - the answer adds facts that are absent from the verified observations;
+- a picture, chart or diagram in the answer is clearly not the one the question asks for, judged by its entry under
+  "Pictures shown by the answer" (kind, title, place, table row); different wording alone is no reason to reject;
 - a structural/common-information answer is synthesized as business data, or a record-level answer is produced only
   from sheet/table descriptions.
 

@@ -31,6 +31,8 @@ Routing rules:
   verified top-level headers.
 - Questions about specific records, named items, defects, incidents, products, values, filters, lists of data values, or
   calculations require `normal` inspection even if they use wording such as general information.
+- Questions asking to see, show or read pictures, charts or diagrams require `normal` inspection, even for a whole sheet
+  or workbook.
 - A pure common-information plan must end in `common_info` synthesis.
 - A final `normal` synthesis must depend on at least one normal data-inspection branch. Mixed questions may combine both.
 

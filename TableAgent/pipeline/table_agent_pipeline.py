@@ -718,6 +718,7 @@ class TableAgentPipeline(BasePipeline):
             qa_info = {
                 "success": result.success,
                 "error": result.error,
+                "used_sheets": list(getattr(result, "used_sheets", []) or []),
                 "execution_time": result.execution_time,
                 "token_usage": result.token_usage,
                 "artifacts": result.artifacts,

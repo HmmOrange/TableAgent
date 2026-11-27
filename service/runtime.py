@@ -35,6 +35,7 @@ from TableAgent.schema import EvalSample
 from service.artifact_rebuild import rebuild_artifacts as rebuild_table_agent_artifacts
 from TableAgent.utils.workbook_media import (
     KIND_PICTURE,
+    MEDIA_TOKEN,
     index_workbook_media,
     mentions_media,
     render_media_tokens,
@@ -49,6 +50,24 @@ SHEET_MEDIA_URL = "/api/v1/documents/{document_id}/spreadsheet-preview/media?pat
 SHEET_DRAWING_AREA_URL = (
     "/api/v1/documents/{document_id}/spreadsheet-preview/drawing-area?sheet={sheet}&range={cells}"
 )
+
+
+def answer_used_sheets(answer: str, workbook_path: str | Path, qa_info: dict[str, Any]) -> list[str]:
+    """Sheets the answer came from: those the agent read, then those of the pictures it shows.
+
+    The sheets picked for a question are not always the ones used: a chart may sit on
+    a sheet that was not picked, and a picked sheet may not be read at all.
+    """
+    used = [str(sheet) for sheet in (qa_info or {}).get("used_sheets") or [] if str(sheet).strip()]
+    shown = set(MEDIA_TOKEN.findall(str(answer or "")))
+    if shown:
+        try:
+            for item in index_workbook_media(workbook_path):
+                if item.media_id in shown and item.sheet not in used:
+                    used.append(item.sheet)
+        except Exception:
+            pass
+    return used
 
 
 def render_answer_media(
@@ -497,6 +516,11 @@ class TableAgentService:
                     {
                         "workbook": workbook_name,
                         "sheets": [sheet for sheet, _ in structures],
+                        "used_sheets": answer_used_sheets(
+                            answer_response.content,
+                            Path(by_name[workbook_name]["path"]),
+                            qa_info,
+                        ),
                         "answer": render_answer_media(
                             answer_response.content,
                             Path(by_name[workbook_name]["path"]),
@@ -560,6 +584,13 @@ class TableAgentService:
                         "workbook": selected_workbooks[0] if len(selected_workbooks) == 1 else "",
                         "workbooks": selected_workbooks,
                         "sheets": selected_sheets,
+                        "used_sheets": list(
+                            dict.fromkeys(
+                                sheet
+                                for item in group_answers
+                                for sheet in item.get("used_sheets") or []
+                            )
+                        ),
                         "retrieval": {
                             "mode": "indexed_vector_multi_candidate",
                             "candidate_count": sum(len(item["candidates"]) for item in group_answers),
@@ -958,6 +989,11 @@ class TableAgentService:
                         "workbook": selected_workbook,
                         "workbooks": [selected_workbook],
                         "sheets": [sheet for sheet, _ in structure_paths],
+                        "used_sheets": answer_used_sheets(
+                            answer_response.content,
+                            candidate.workbook_path,
+                            qa_info,
+                        ),
                         "retrieval": retrieval_payload,
                         "qa": public_qa_info,
                         "token_usage": {

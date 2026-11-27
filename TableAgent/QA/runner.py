@@ -408,6 +408,7 @@ class TableQARunner:
             question=question,
             plan=plan,
             subtask_outputs=subtask_outputs,
+            used_sheets=list(getattr(self.env, "used_sheets", []) or []),
             final_answer=final_answer,
             success=success,
             error=error_msg,

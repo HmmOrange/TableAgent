@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Tuple, Optional
 from pathlib import Path
+import re
+import unicodedata
 import openpyxl
 import pandas as pd
 
@@ -51,6 +53,8 @@ class QAEnvironment:
         self.experience_pool = ExperiencePool(max_records=max_experience_records)
         
         # Operators facade
+        # Workbook sheets whose cells the agent read, in first-read order; the answer's sources.
+        self.used_sheets: list[str] = []
         self.operators = TableOperators(self)
         
         # Logger
@@ -124,11 +128,41 @@ class QAEnvironment:
                 return struct
         return {}
 
-    def get_sheet(self, sheet_name: str) -> Any:
-        """Get openpyxl sheet object by name."""
-        if sheet_name in self.workbook.sheetnames:
-            return self.workbook[sheet_name]
+    def resolve_sheet_name(self, sheet_name: Any) -> Optional[str]:
+        """The workbook's own name for a sheet named in a structure or by the agent.
+
+        Structures are written by a model, which can drop punctuation or spacing
+        from a sheet name ("Sheet2" for "Sheet2.."). Exact names win, then a
+        case-insensitive match, then a match on letters and digits only; a loose
+        name that fits several sheets resolves to none.
+        """
+        name = str(sheet_name or "").strip()
+        if not name:
+            return None
+        names = list(self.workbook.sheetnames)
+        if name in names:
+            return name
+        for key in (str.casefold, _sheet_name_key):
+            wanted = key(name)
+            if not wanted:
+                continue
+            matches = [candidate for candidate in names if key(candidate) == wanted]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                return None
         return None
+
+    def note_sheet_used(self, sheet_name: Any) -> None:
+        """Record that the agent read cells of a sheet (under the workbook's own name)."""
+        resolved = self.resolve_sheet_name(sheet_name)
+        if resolved is not None and resolved not in self.used_sheets:
+            self.used_sheets.append(resolved)
+
+    def get_sheet(self, sheet_name: str) -> Any:
+        """Get openpyxl sheet object by name (see ``resolve_sheet_name``)."""
+        resolved = self.resolve_sheet_name(sheet_name)
+        return self.workbook[resolved] if resolved is not None else None
 
     def get_active_sheet(self) -> Any:
         """Get openpyxl active sheet object."""
@@ -200,3 +234,8 @@ class QAEnvironment:
 
     def export_notebook(self, path: str | Path) -> Path:
         return self.notebook.export_ipynb(path)
+
+
+def _sheet_name_key(name: str) -> str:
+    """Letters and digits of a sheet name, case-folded: "Sheet2.." and "sheet 2" give "sheet2"."""
+    return "".join(re.findall(r"[^\W_]+", unicodedata.normalize("NFC", name).casefold()))

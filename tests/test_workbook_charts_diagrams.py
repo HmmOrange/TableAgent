@@ -219,7 +219,7 @@ def test_media_operator_lists_and_reads_charts_and_diagrams_without_vision(visua
     flow = visuals_env.operators.list_media(sheet="Flow")
 
     assert list(stats["kind"]) == ["chart"]
-    assert stats.iloc[0]["name"] == "Output by day"
+    assert stats.iloc[0]["title"] == "Output by day"
     assert "diagram" in set(flow["kind"])
     chart_id = stats.iloc[0]["id"]
     described = visuals_env.operators.describe_media(chart_id)
