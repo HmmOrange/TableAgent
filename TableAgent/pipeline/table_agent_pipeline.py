@@ -38,6 +38,11 @@ from TableAgent.pipeline.siflex_formatter import SiflexAnswerFormatterAgent
 from TableAgent.pipeline.source_preparer import SourcePreparer
 from TableAgent.structure.layout.workflow import TableLayoutWorkflow
 from TableAgent.pipeline.structure_cache import StructureCache, StructureCacheRecord
+from TableAgent.pipeline.sheet_cells import (
+    SHEET_CELLS_MAX_CHARS,
+    SHEET_CELLS_OBSERVATION_CHARS,
+    sheet_cells_fallback_prompt,
+)
 from TableAgent.rendering.workbook import WorkbookRenderer
 from TableAgent.structure.verification import DeterministicVerifier
 
@@ -752,8 +757,23 @@ class TableAgentPipeline(BasePipeline):
 
         if result.success:
             raise RuntimeError("TableQARunner returned success without a final answer")
-        verified_fallback_prompt = self._verified_observation_fallback_prompt(question, result)
-        if verified_fallback_prompt:
+        # The sheets' own cells come first: when QA failed because the structure misreads the
+        # sheet, its "successful" inspections may have read the wrong cells, so they only
+        # accompany the cells as hints.
+        sheet_cells_prompt = sheet_cells_fallback_prompt(
+            question,
+            workbook_path,
+            [structure_path, *(related_structure_paths or [])],
+            max_chars=min(self.settings.max_context_chars, SHEET_CELLS_MAX_CHARS),
+            observations=TableAgentPipeline._verified_observations(result, SHEET_CELLS_OBSERVATION_CHARS),
+        )
+        verified_fallback_prompt = (
+            None if sheet_cells_prompt else self._verified_observation_fallback_prompt(question, result)
+        )
+        if sheet_cells_prompt:
+            response = self.qa_agent.run(prompt=sheet_cells_prompt)
+            qa_info["fallback_source"] = "sheet_cells"
+        elif verified_fallback_prompt:
             response = self.qa_agent.run(prompt=verified_fallback_prompt)
             qa_info["fallback_source"] = "verified_inspection_observations"
         else:
@@ -851,6 +871,22 @@ class TableAgentPipeline(BasePipeline):
         return self._format_siflex_answer(sample, draft_answer, responses)
 
     def _verified_observation_fallback_prompt(self, question: str, result: Any) -> str | None:
+        evidence = TableAgentPipeline._verified_observations(result, self.settings.max_context_chars)
+        if evidence is None:
+            return None
+        return (
+            f"Question:\n{question}\n\n"
+            "The normal QA synthesis failed, but the following observations were successfully computed from the "
+            "verified spreadsheet structure and workbook. Answer using only these observations. Preserve exact "
+            "header-to-value ownership and every label explicitly enumerated in the question, apply every constraint "
+            "stated in the question, and do not add fields that were not requested. If the observations contain "
+            "multiple records, select only records matching all question constraints.\n\n"
+            f"{evidence}\n\nAnswer:"
+        )
+
+    @staticmethod
+    def _verified_observations(result: Any, max_chars: int) -> str | None:
+        """Observations of the successful normal inspections of a failed QA run, or None."""
         failure_text = "\n".join(
             [str(getattr(result, "error", "") or "")]
             + [
@@ -891,17 +927,9 @@ class TableAgentPipeline(BasePipeline):
         if not observations:
             return None
         evidence = "\n\n".join(observations)
-        if len(evidence) > self.settings.max_context_chars:
-            evidence = evidence[: self.settings.max_context_chars] + "\n...[truncated]"
-        return (
-            f"Question:\n{question}\n\n"
-            "The normal QA synthesis failed, but the following observations were successfully computed from the "
-            "verified spreadsheet structure and workbook. Answer using only these observations. Preserve exact "
-            "header-to-value ownership and every label explicitly enumerated in the question, apply every constraint "
-            "stated in the question, and do not add fields that were not requested. If the observations contain "
-            "multiple records, select only records matching all question constraints.\n\n"
-            f"{evidence}\n\nAnswer:"
-        )
+        if len(evidence) > max_chars:
+            evidence = evidence[:max_chars] + "\n...[truncated]"
+        return evidence
 
     @staticmethod
     def _select_table_id(structure_path: Path, question: str) -> str | None:
